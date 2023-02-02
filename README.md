@@ -13,4 +13,4 @@ cp /global/cfs/cdirs/nelli/frederik/github/nelli/ssuextract_db* snakes/database/
 snakemake -j 16 --use-conda --config modeldir="snakes/models" querydir="example"
 snakemake -j 16 --use-conda --config modeldir="{dir with cms}" querydir="{dir with fna files}"
 ```
-* Results can be found in a new subdir that is in the query directory
+* Results can be found in a new subdir "cmsearch_out" in the query directory
