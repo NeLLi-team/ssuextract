@@ -52,10 +52,10 @@ rule get_cmstats:
    input:
       str(outdir) + "out/{fnaf}_{cmodel}.out"
    output:
-      str(outdir) + "out/{fnaf}_{cmodel}_stats/{fnaf}_{cmodel}.seqmap"
+      str(outdir) + "stats/{fnaf}_{cmodel}.seqmap"
    shell:
       """
-      python3 snakes/get_cmstats.py {input} {outdir}out/{wildcards.fnaf}_{wildcards.cmodel}_stats/{wildcards.fnaf}_{wildcards.cmodel}
+      python3 snakes/get_cmstats.py {input} {outdir}stats/{wildcards.fnaf}_{wildcards.cmodel}
       """
 
 
@@ -64,7 +64,7 @@ rule extract_cmhits:
    conda:
       "snakes/cmsearchclass.yml"
    input:
-      str(outdir) + "out/{fnaf}_{cmodel}_stats/{fnaf}_{cmodel}.seqmap",
+      str(outdir) + "stats/{fnaf}_{cmodel}.seqmap",
       str(outdir) + "fna/{fnaf}.fna"
    output:
       str(outdir) + "extracted/{fnaf}_{cmodel}.fna"
