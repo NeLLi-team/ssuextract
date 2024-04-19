@@ -31,7 +31,6 @@ rule check_bins_fna:
     python snakes/rename_fnaheaders.py {input} {output}
     """
 
-
 rule run_cmsearch:
    # cmsearch for a set of covariance models
    conda:
@@ -40,10 +39,23 @@ rule run_cmsearch:
       str(outdir) + "fna/{fnaf}.fna",
       str(modeldir) + "/{cmodel}.cm"
    output:
-      outdir + "out/{fnaf}_{cmodel}.out"
+      str(outdir) + "out/{fnaf}_{cmodel}.out"
    shell:
       """
-      cmsearch --cut_ga --cpu 8 --tblout {output} {input[1]} {input[0]}
+      cmsearch --anytrunc --cpu 8 --tblout {output} {input[1]} {input[0]}
+      """
+
+rule get_cmstats:
+    # retrieve alignment stats to define coordinates to extract
+   conda:
+      "snakes/cmsearchclass.yml"
+   input:
+      str(outdir) + "out/{fnaf}_{cmodel}.out"
+   output:
+      str(outdir) + "out/{fnaf}_{cmodel}_stats/{fnaf}_{cmodel}.seqmap"
+   shell:
+      """
+      python3 snakes/get_cmstats.py {input} {outdir}out/{wildcards.fnaf}_{wildcards.cmodel}_stats/{wildcards.fnaf}_{wildcards.cmodel}
       """
 
 
@@ -52,13 +64,13 @@ rule extract_cmhits:
    conda:
       "snakes/cmsearchclass.yml"
    input:
-      str(outdir) + "out/{fnaf}_{cmodel}.out",
+      str(outdir) + "out/{fnaf}_{cmodel}_stats/{fnaf}_{cmodel}.seqmap",
       str(outdir) + "fna/{fnaf}.fna"
    output:
       str(outdir) + "extracted/{fnaf}_{cmodel}.fna"
    shell:
       """
-      python snakes/cmsearchout_extract_by_position_size.py {input[0]} {input[1]} {output} 800
+      python3 snakes/get_cmsequences.py {input[1]} {input[0]} {output} 800
       """
 
 
