@@ -4,7 +4,7 @@
 * Annotation will only be successful for SSU rRNA genes but identification and extraction of hits using any other cm should work fine
 * Database was too large to upload here, copy it from 
 ```
-cp /global/cfs/cdirs/nelli/frederik/github/nelli/ssuextract_db/* snakes/database/
+wget -r -np -nH --cut-dirs=3 -P "snakes/database/" "https://portal.nersc.gov/cfs/nelli/ssuextract_db/"
 ```
 
 ## How to run it
