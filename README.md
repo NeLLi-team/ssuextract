@@ -1,5 +1,6 @@
 # SSUEXTRACT
 * Identify, extract, annotate SSU rRNA genes
+* Run it from the repo base dir
 * Inputs are a directory with fna files and a directory with cm files (e.g. from RFAM)
 * Annotation will only be successful for SSU rRNA genes but identification and extraction of hits using any other cm should work fine
 * Database was too large to upload here, copy it from 
