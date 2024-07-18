@@ -7,6 +7,7 @@
 * Inputs are a directory with fna files and a directory with cm files (e.g. from RFAM)
 * Database was too large to upload here, copy it from 
 ```
+cd ssuextract
 wget -r -np -nH --cut-dirs=3 -P "snakes/database/" "https://portal.nersc.gov/cfs/nelli/ssuextract_db/"
 ```
 * Conda env that has snakemake installed
