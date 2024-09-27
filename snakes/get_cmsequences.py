@@ -83,7 +83,7 @@ def get_sequences(seqmap_dict, fasta_name, outfile, minlength):
                     if len(d_seq) >= int(minlength):
                         seqfrom = str(min([int(i) for i in seqlist[1:3]]))
                         seqto = str(max([int(i) for i in seqlist[1:3]]))
-                        outfile.write('>'+ seqlist[0] +'|'+ seqfrom +'-'+ seqto +'|strand_'+ seqlist[3] +'|'+ seqlist[4] +'\n'+ d_seq +'\n')
+                        outfile.write('>'+ currkey +'|'+ seqfrom +'-'+ seqto +'|strand_'+ seqlist[3] +'|'+ seqlist[4] +'\n'+ d_seq +'\n')
                 switch = 0
     return outfile
             
