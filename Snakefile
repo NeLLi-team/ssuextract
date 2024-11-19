@@ -15,7 +15,8 @@ rule all:
       expand(outdir + "extracted/{fnaf}_{cmodel}.fna", fnaf=FNABASE, cmodel=MODELSBASE),
       expand(outdir + "m8/{fnaf}_{cmodel}.m8", fnaf=FNABASE, cmodel=MODELSBASE),
       outdir + "m8/merged.m8",
-      outdir + "cmsearch_summary.tab"
+      outdir + "cmsearch_summary.tab",
+      outdir + "cmsearch_summary.tsv"
 
 
 rule check_bins_fna:
@@ -42,7 +43,7 @@ rule run_cmsearch:
       str(outdir) + "out/{fnaf}_{cmodel}.out"
    shell:
       """
-      cmsearch --anytrunc --cpu 8 --tblout {output} {input[1]} {input[0]}
+      cmsearch --anytrunc --cpu 8 -o /dev/null --tblout {output} {input[1]} {input[0]}
       """
 
 rule get_cmstats:
@@ -55,7 +56,7 @@ rule get_cmstats:
       str(outdir) + "stats/{fnaf}_{cmodel}.seqmap"
    shell:
       """
-      python3 snakes/get_cmstats.py {input} {outdir}stats/{wildcards.fnaf}_{wildcards.cmodel}
+      python3 snakes/get_cmstats.py {input} {outdir}stats/{wildcards.fnaf}_{wildcards.cmodel} > {outdir}stats/{wildcards.fnaf}_{wildcards.cmodel}.log
       """
 
 
@@ -110,4 +111,18 @@ rule process_cmhits:
    shell:
       """
       python snakes/cmprocessing.py fna {input} {output}
+      """
+
+rule build_summary_tab:
+   conda:
+      "snakes/cmsearchclass.yml"
+   input:
+      outdir + "cmsearch_summary.tab",
+      str(querydir),
+      str(modeldir)
+   output:
+      outdir + "cmsearch_summary.tsv"
+   shell:
+      """
+      python snakes/get_table.py {input[1]} {input[2]}
       """
