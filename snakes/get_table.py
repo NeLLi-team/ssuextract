@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import sys
-import subprocess
 import pandas as pd
 import pathlib
 import numpy as np
@@ -49,7 +48,7 @@ def load_m8_best(sample, model, inpath):
 
 def get_blast_best_stats(sample, model, inpath, df, load_m8_best=load_m8_best):
     """add blast best hits to a data frame"""
-    besthit_d = {'blast_sseqid':[], 'blast_pident':[], 'blast_length':[]}
+    besthit_d = {'blast_sseqid':[], 'blast_pident':[], 'blast_length':[], 'blast_bitscore':[]}
     try: # if m8 is not empty
         bestm8 = load_m8_best(sample, model, inpath)
 
@@ -60,18 +59,21 @@ def get_blast_best_stats(sample, model, inpath, df, load_m8_best=load_m8_best):
                 besthit_d['blast_sseqid'].append(ctab['sseqid'].item())
                 besthit_d['blast_pident'].append(round(ctab['pident'].item(), 2))
                 besthit_d['blast_length'].append(ctab['length'].item())
+                besthit_d['blast_bitscore'].append(ctab['bitscore'].item())
             else:
                 besthit_d['blast_sseqid'].append(np.nan)
                 besthit_d['blast_pident'].append(np.nan)
                 besthit_d['blast_length'].append(np.nan)
+                besthit_d['blast_bitscore'].append(np.nan)
             
     except pd.errors.EmptyDataError: # if m8 is empty
         for i in df.index.values:
             besthit_d['blast_sseqid'].append(np.nan)
             besthit_d['blast_pident'].append(np.nan)
             besthit_d['blast_length'].append(np.nan)
+            besthit_d['blast_bitscore'].append(np.nan)
 
-    for key in ['blast_sseqid', 'blast_pident', 'blast_length']:
+    for key in ['blast_sseqid', 'blast_pident', 'blast_length', 'blast_bitscore']:
         df[key] = besthit_d[key]
         
     return df
@@ -124,10 +126,10 @@ for sample in FNABASE:
             df['sample'] = [sample for i in range(df.shape[0])]
             df['model'] = [model for i in range(df.shape[0])]
             df['length'] = seqlens_dict['length']
-            df['coordinates'] = [df['name'][i].split('|')[1] for i in df.index.values]
-            df['strand'] = [df['name'][i].split('|')[2].split('_')[-1] for i in df.index.values]
-            df['sequence_type'] = [df['name'][i].split('|')[3] for i in df.index.values]
-            df['contig_name'] = [df['name'][i].split('|')[0] for i in df.index.values]
+            df['coordinates'] = [df['name'][i].split('|')[-3] for i in df.index.values]
+            df['strand'] = [df['name'][i].split('|')[-2].split('_')[-1] for i in df.index.values]
+            df['sequence_type'] = [df['name'][i].split('|')[-1] for i in df.index.values]
+            df['contig_name'] = ['|'.join(df['name'][i].split('|')[:-3]) for i in df.index.values] # in case original sequence name has pipes
 
             # add blast best hit stats
             df = get_blast_best_stats(sample, model, cmpath, df)
