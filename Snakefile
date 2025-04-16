@@ -5,6 +5,7 @@ import pathlib
 
 modeldir = Path(config["modeldir"]) # dir with models ending with .cm
 querydir = Path(config["querydir"]) # dir with assemblies ending with .fna
+cthreads = config["threads_per_job"]
 FNABASE = [x.stem for x in querydir.iterdir() if x.is_file() and x.suffix in [".fa", ".fna", ".fasta"]]
 MODELSBASE = [x.stem for x in modeldir.iterdir() if x.is_file() and x.suffix in [".cm"]]
 outdir = str(querydir) + "/cmsearch_out/"
@@ -41,9 +42,11 @@ rule run_cmsearch:
       str(modeldir) + "/{cmodel}.cm"
    output:
       str(outdir) + "out/{fnaf}_{cmodel}.out"
+   threads:
+      cthreads
    shell:
       """
-      cmsearch --anytrunc --cpu 8 -o /dev/null --tblout {output} {input[1]} {input[0]}
+      cmsearch --anytrunc --cpu {threads} -o /dev/null --tblout {output} {input[1]} {input[0]}
       """
 
 rule get_cmstats:
@@ -84,6 +87,8 @@ rule annotate_cmhits:
       db = "snakes/database/silva-138-1_pr2-4-12"
    output:
       outdir + "m8/{fnaf}_{cmodel}.m8"
+   threads:
+      cthreads
    shell:
       """
       blastn -outfmt 6 -db {params.db} -query {input} -max_target_seqs 5 -num_threads 8 -out {output}
