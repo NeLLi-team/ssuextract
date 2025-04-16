@@ -91,7 +91,7 @@ rule annotate_cmhits:
       cthreads
    shell:
       """
-      blastn -outfmt 6 -db {params.db} -query {input} -max_target_seqs 5 -num_threads 8 -out {output}
+      blastn -outfmt 6 -db {params.db} -query {input} -max_target_seqs 5 -num_threads {threads} -out {output}
       """
 
 rule merge_cmhits:
