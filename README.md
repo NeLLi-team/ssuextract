@@ -12,7 +12,7 @@ wget -r -np -nH --cut-dirs=3 -P "snakes/database/" "https://portal.nersc.gov/cfs
 ```
 * Conda env that has snakemake installed
 ```
-snakemake -j 16 --use-conda --config modeldir="snakes/models" querydir="example"
-snakemake -j 16 --use-conda --config modeldir="{dir with cms}" querydir="{dir with fna files}"
+snakemake -j 16 --use-conda --config modeldir="snakes/models" querydir="example" threads_per_job=4
+snakemake -j 16 --use-conda --config modeldir="{dir with cms}" querydir="{dir with fna files}" threads_per_job=4
 ```
 * Results can be found in a new subdir "cmsearch_out" in the query directory
