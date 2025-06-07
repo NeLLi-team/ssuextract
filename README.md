@@ -7,7 +7,7 @@
 
 A high-performance bioinformatics pipeline for extracting and annotating Small Subunit (SSU) rRNA sequences from genomic assemblies using covariance models.
 
-> **🚀 Nextflow Branch**: Complete conversion from Snakemake to Nextflow for improved scalability and cloud compatibility! Built on the solid foundation of v0.9.0.
+> **🚀 Nextflow Pipeline**: Complete conversion from Snakemake to Nextflow for improved scalability and cloud compatibility! This is now the main branch (v1.0.0).
 
 ## 🎯 Overview
 
@@ -230,15 +230,17 @@ pixi run nextflow clean -f
 
 ## 📝 Changelog
 
-### v0.9.0 (Latest) - 2025-06-06
-- 🎯 **Major architecture overhaul** with modern directory structure
-- 📦 **Migrated to pixi** package manager for better reproducibility  
-- 🐛 **Fixed critical bugs** in sequence filtering and DataFrame processing
-- 📊 **Enhanced output** with sample basename in results
-- 📚 **Comprehensive documentation** and migration guide
-- [View full release notes →](https://github.com/NeLLi-team/ssuextract/releases/tag/v0.9.0)
+### v1.0.0 (Latest) - 2024-06-06
+- 🚀 **Major Release: Migration to Nextflow** - Complete pipeline rewrite using Nextflow
+- 🏗️ **Enhanced workflow structure** - Improved modularity and maintainability
+- 📦 **Updated covariance models** - Added RF00177.cm and RF01960.cm resources
+- 📚 **Comprehensive documentation** - Updated README with Nextflow-specific instructions
+- 🛠️ **Improved script functionality** - Enhanced get_cmstats.py and other processing scripts
+- 📁 **Repository restructure** - Legacy Snakemake version preserved in ssuextract-snk branch
+- [View full release notes →](https://github.com/NeLLi-team/ssuextract/releases/tag/v1.0.0)
 
 ### Previous Versions
+- **v0.9.0** - Last Snakemake version (now in ssuextract-snk branch)
 - [View all releases →](https://github.com/NeLLi-team/ssuextract/releases)
 
 ## 📝 Citation
@@ -246,7 +248,7 @@ pixi run nextflow clean -f
 If you use SSUextract in your research, please cite:
 
 ```
-SSUextract: A Snakemake pipeline for SSU rRNA extraction
+SSUextract: A Nextflow pipeline for SSU rRNA extraction
 [Your publication details here]
 ```
 
@@ -267,7 +269,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - [Infernal](http://eddylab.org/infernal/) for covariance model searches
 - [SILVA](https://www.arb-silva.de/) and [PR2](https://pr2-database.org/) databases
-- [Snakemake](https://snakemake.github.io) workflow engine
+- [Nextflow](https://nextflow.io) workflow engine
 - [pixi](https://pixi.sh) package manager
 
 ---
