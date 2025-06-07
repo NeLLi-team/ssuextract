@@ -1,11 +1,13 @@
 # 🧬 SSUextract: Small Subunit rRNA Extraction Pipeline
 
-[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](https://github.com/NeLLi-team/ssuextract/releases)
+[![GitHub release](https://img.shields.io/github/v/release/NeLLi-team/ssuextract?style=flat-square&color=green)](https://github.com/NeLLi-team/ssuextract/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Snakemake](https://img.shields.io/badge/snakemake-≥7.0-brightgreen.svg)](https://snakemake.github.io)
 [![pixi](https://img.shields.io/badge/pixi-supported-blue.svg)](https://pixi.sh)
 
 A high-performance bioinformatics pipeline for extracting and annotating Small Subunit (SSU) rRNA sequences from genomic assemblies using covariance models.
+
+> **🚀 New in v0.9.0**: Complete pipeline modernization with pixi package manager, restructured directories, and critical bug fixes! [See release notes →](https://github.com/NeLLi-team/ssuextract/releases/latest)
 
 ## 🎯 Overview
 
@@ -230,6 +232,19 @@ pixi run snakemake --unlock --configfile config/default.yaml
 ### File path errors
 - Ensure input files have `.fna`, `.fa`, or `.fasta` extensions
 - Check that `querydir` path exists and contains sequence files
+
+## 📝 Changelog
+
+### v0.9.0 (Latest) - 2025-06-06
+- 🎯 **Major architecture overhaul** with modern directory structure
+- 📦 **Migrated to pixi** package manager for better reproducibility  
+- 🐛 **Fixed critical bugs** in sequence filtering and DataFrame processing
+- 📊 **Enhanced output** with sample basename in results
+- 📚 **Comprehensive documentation** and migration guide
+- [View full release notes →](https://github.com/NeLLi-team/ssuextract/releases/tag/v0.9.0)
+
+### Previous Versions
+- [View all releases →](https://github.com/NeLLi-team/ssuextract/releases)
 
 ## 📝 Citation
 
