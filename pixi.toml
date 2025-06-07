@@ -1,14 +1,14 @@
 [project]
 name = "ssuextract"
 version = "0.9.0"
-description = "SSU extraction tools using Snakemake pipeline"
+description = "SSU extraction tools using Nextflow pipeline"
 channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64", "osx-64", "osx-arm64"]
 
 [dependencies]
 # Core tools
 python = ">=3.8"
-snakemake-minimal = "*"
+nextflow = "*"
 wget = "*"               # for database download
 
 # Bioinformatics tools
@@ -28,31 +28,30 @@ download-db = { cmd = "bash -c 'if [ ! -f resources/database/silva-138-1_pr2-4-1
 setup = { depends-on = ["download-db"], description = "Complete setup including database download" }
 
 # Run the full pipeline
-run = "snakemake --cores all --configfile config/default.yaml"
+run = "nextflow run main.nf"
 
 # Clean outputs
-clean = "snakemake --delete-all-output --configfile config/default.yaml"
+clean = "nextflow clean -f"
 
 # Clean results directory (use with caution)
-clean-results = { cmd = "rm -rf results/", description = "Remove all results directories" }
+clean-results = { cmd = "rm -rf results/ work/", description = "Remove all results and work directories" }
 
 # Dry run to see what will be executed
-dryrun = "snakemake --dry-run --configfile config/default.yaml"
+dryrun = "nextflow run main.nf -preview"
 
 # Generate pipeline visualization
-dag = "snakemake --dag --configfile config/default.yaml | dot -Tsvg > pipeline.svg"
+dag = "nextflow run main.nf -with-dag pipeline.svg"
 
 [environments]
 dev = ["dev"]
 
 [feature.dev.dependencies]
 # Development dependencies
-snakemake = "*"          # full snakemake with plotting capabilities
 graphviz = "*"           # for DAG visualization
 
 [feature.dev.tasks]
 # Run with detailed output
-run-verbose = "snakemake --cores all --configfile config/default.yaml --verbose"
+run-verbose = "nextflow run main.nf -with-trace -with-timeline -with-report"
 
 # Create pipeline report
-report = "snakemake --report report.html --configfile config/default.yaml"
+report = "nextflow run main.nf -with-report report.html"
