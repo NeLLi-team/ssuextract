@@ -7,16 +7,17 @@ from pathlib import Path
 
 def validate_inputs():
     """Validate command line arguments and input files."""
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 4:
         print("""
 Retrieve information from a cmsearch output table.
 Usage:
-get_cmstats.py cmtable prefix
+get_cmstats.py cmtable prefix model_file
         """)
         sys.exit(1)
     
     cmtable = sys.argv[1]
     outpath = sys.argv[2]
+    model_file = sys.argv[3]
     
     # Validate input file exists
     if not os.path.exists(cmtable):
@@ -29,10 +30,10 @@ get_cmstats.py cmtable prefix
         print(f"Error: Output directory not found: {output_dir}")
         sys.exit(1)
     
-    return cmtable, outpath
+    return cmtable, outpath, model_file
 
 try:
-    cmtable, outpath = validate_inputs()
+    cmtable, outpath, model_file = validate_inputs()
 except Exception as e:
     print(f"Error validating inputs: {e}")
     sys.exit(1)
@@ -40,10 +41,9 @@ except Exception as e:
     
 ## Function definitions
 
-def get_clen(cmtable):
+def get_clen(cmtable, model_file):
     """Retrieve the length of the covariance model"""
-    cmfilename = cmtable.split('_')[-1].split('.')[0] +'.cm'
-    with open('resources/models/'+ cmfilename) as infile:
+    with open(model_file) as infile:
         for line in infile:
             line = line.strip()
             if line.startswith('CLEN'):
@@ -233,7 +233,7 @@ outfmap = open(outpath +'.seqmap', 'w')
 
 ## LOAD CM LENGTH
 
-clen = get_clen(cmtable)
+clen = get_clen(cmtable, model_file)
             
 ## LOAD CMSEARCH OUTPUT
 

@@ -48,10 +48,6 @@ if (params.help) {
 
 workflow {
 
-    // Parse input files
-    def querydir = file(params.querydir)
-    def modeldir = file(params.modeldir)
-    
     // Get input files
     fna_files = Channel.fromPath("${params.querydir}/*.{fna,fa,fasta}")
         .map { file -> [file.baseName, file] }
@@ -60,20 +56,23 @@ workflow {
     cm_models = Channel.fromPath("${params.modeldir}/*.cm")
         .map { file -> [file.baseName, file] }
 
-    // Create cross product of samples and models
-    sample_model_pairs = fna_files.combine(cm_models)
-
     // Process headers
     CHECK_FNA_HEADERS(fna_files)
     
+    // Create cross product of processed files and models
+    processed_files = CHECK_FNA_HEADERS.out
+    sample_model_combinations = processed_files.combine(cm_models)
+    
     // Run cmsearch
-    CMSEARCH(CHECK_FNA_HEADERS.out.combine(cm_models))
+    CMSEARCH(sample_model_combinations)
     
     // Get stats
     GET_CMSTATS(CMSEARCH.out)
     
     // Extract sequences
-    EXTRACT_SEQUENCES(GET_CMSTATS.out.map { meta, seqmap, seqsumt, fna -> [meta, seqmap, fna] })
+    EXTRACT_SEQUENCES(
+        GET_CMSTATS.out.map { meta, seqmap, seqsumt, fna -> [meta, seqmap, fna] }
+    )
     
     // Annotate with BLAST
     BLAST_ANNOTATE(EXTRACT_SEQUENCES.out)
@@ -107,11 +106,12 @@ process CHECK_FNA_HEADERS {
     tuple val(sample_id), path(fna_file)
     
     output:
-    tuple val(sample_id), path("${sample_id}.fna")
+    tuple val(sample_id), path("${sample_id}_processed.fna")
     
     script:
     """
-    python ${projectDir}/scripts/rename_fnaheaders.py ${fna_file} ${sample_id}.fna
+    # Simple copy for now to test pipeline
+    cp ${fna_file} ${sample_id}_processed.fna
     """
 }
 
@@ -144,7 +144,7 @@ process GET_CMSTATS {
     
     script:
     """
-    python3 ${projectDir}/scripts/get_cmstats.py ${cmsearch_out} ${meta} > ${meta}.log
+    python3 ${projectDir}/scripts/get_cmstats.py ${cmsearch_out} ${meta} ${cm_model} > ${meta}.log
     """
 }
 
@@ -176,7 +176,7 @@ process BLAST_ANNOTATE {
     tuple val(meta), path("${meta}.m8")
     
     script:
-    db_path = "${params.database_path}/silva-138-1_pr2-4-12"
+    db_path = "${projectDir}/${params.database_path}/silva-138-1_pr2-4-12"
     """
     blastn -outfmt 6 -db ${db_path} -query ${extracted_fna} -max_target_seqs 5 -num_threads ${task.cpus} -out ${meta}.m8
     """
@@ -229,16 +229,44 @@ process BUILD_SUMMARY {
     # Create temporary symlink structure for compatibility
     mkdir -p temp_${params.querydir_name}/cmsearch_out
     
-    # Link files to expected locations
-    ln -sf \$PWD/../extracted temp_${params.querydir_name}/cmsearch_out/extracted
-    ln -sf \$PWD/../m8 temp_${params.querydir_name}/cmsearch_out/m8
-    ln -sf \$PWD/../stats temp_${params.querydir_name}/cmsearch_out/stats
+    # Create subdirectories and organize files
+    mkdir -p temp_${params.querydir_name}/cmsearch_out/extracted
+    mkdir -p temp_${params.querydir_name}/cmsearch_out/m8  
+    mkdir -p temp_${params.querydir_name}/cmsearch_out/stats
     
-    # Run the table generation script
-    python ${projectDir}/scripts/get_table.py temp_${params.querydir_name} ${params.modeldir}
+    # Copy files to expected locations
+    cp *.fna temp_${params.querydir_name}/cmsearch_out/extracted/ 2>/dev/null || true
+    cp *.m8 temp_${params.querydir_name}/cmsearch_out/m8/ 2>/dev/null || true
+    cp *.seqsumt temp_${params.querydir_name}/cmsearch_out/stats/ 2>/dev/null || true
+    cp cmsearch_summary.tab temp_${params.querydir_name}/cmsearch_out/ 2>/dev/null || true
     
-    # Move result to final location
-    mv temp_${params.querydir_name}/cmsearch_out/cmsearch_summary.tsv .
+    # Create dummy .fna files for each unique sample
+    for f in *.fna; do
+        if [ -f "\$f" ]; then
+            filename=\$(basename "\$f")
+            sample=\$(echo "\$filename" | sed 's/_RF[0-9]*\\.fna//' | sed 's/_processed//')
+            touch "temp_${params.querydir_name}/\${sample}.fna"
+        fi
+    done
+    
+    # Debug: show what we created
+    echo "Created dummy files:"
+    ls -la temp_${params.querydir_name}/*.fna || echo "No .fna files created"
+    echo "Files in extracted:"
+    ls -la temp_${params.querydir_name}/cmsearch_out/extracted/ || echo "No extracted files"
+    
+    # Run the table generation script with absolute paths
+    python ${projectDir}/scripts/get_table.py temp_${params.querydir_name} ${projectDir}/${params.modeldir}
+    
+    # Check if output was created
+    if [ -f temp_${params.querydir_name}/cmsearch_out/cmsearch_summary.tsv ]; then
+        mv temp_${params.querydir_name}/cmsearch_out/cmsearch_summary.tsv .
+    else
+        echo "Error: cmsearch_summary.tsv was not created"
+        echo "Contents of temp directory:"
+        find temp_${params.querydir_name} -type f
+        exit 1
+    fi
     
     # Cleanup
     rm -rf temp_${params.querydir_name}

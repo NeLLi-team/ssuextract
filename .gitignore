@@ -9,7 +9,7 @@ work/
 
 # Generated results and resources
 results/
-resources/
+resources/database
 
 # Log files
 *.log
