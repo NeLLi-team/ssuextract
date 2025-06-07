@@ -1,4 +1,22 @@
+# Pixi and environment files
 .pixi
-.snakemake
-resources
 pixi.lock
+
+# Nextflow working directory
+work/
+.nextflow/
+.nextflow.log*
+
+# Generated results and resources
+results/
+resources/
+
+# Log files
+*.log
+
+# Pipeline execution reports
+pipeline_info/
+trace.txt
+report.html
+timeline.html
+dag.svg

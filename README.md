@@ -2,12 +2,12 @@
 
 [![GitHub release](https://img.shields.io/github/v/release/NeLLi-team/ssuextract?style=flat-square&color=green)](https://github.com/NeLLi-team/ssuextract/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Snakemake](https://img.shields.io/badge/snakemake-≥7.0-brightgreen.svg)](https://snakemake.github.io)
+[![Nextflow](https://img.shields.io/badge/nextflow-≥22.10.1-brightgreen.svg)](https://nextflow.io)
 [![pixi](https://img.shields.io/badge/pixi-supported-blue.svg)](https://pixi.sh)
 
 A high-performance bioinformatics pipeline for extracting and annotating Small Subunit (SSU) rRNA sequences from genomic assemblies using covariance models.
 
-> **🚀 New in v0.9.0**: Complete pipeline modernization with pixi package manager, restructured directories, and critical bug fixes! [See release notes →](https://github.com/NeLLi-team/ssuextract/releases/latest)
+> **🚀 Nextflow Branch**: Complete conversion from Snakemake to Nextflow for improved scalability and cloud compatibility! Built on the solid foundation of v0.9.0.
 
 ## 🎯 Overview
 
@@ -37,7 +37,7 @@ pixi run setup
 
 ```bash
 # Run on example data
-pixi run snakemake --cores 4 --configfile config/default.yaml
+pixi run run
 
 # Results will be in: results/example/
 ```
@@ -64,7 +64,8 @@ graph TD
 
 ```
 ssuextract/
-├── 📄 Snakefile             # Pipeline workflow definition
+├── 📄 main.nf               # Nextflow pipeline definition
+├── 📄 nextflow.config       # Nextflow configuration
 ├── 📦 pixi.toml             # Dependencies and tasks
 ├── 📂 config/               # Configuration files
 │   └── default.yaml         # Pipeline configuration
@@ -93,20 +94,13 @@ ssuextract/
 
 ## ⚙️ Configuration
 
-Edit `config/default.yaml` to customize the pipeline:
+### Basic Configuration
 
-```yaml
-# Directory containing covariance models (.cm files)
-modeldir: "resources/models"
+Pipeline parameters can be set in `nextflow.config` or via command line:
 
-# Directory containing query sequences (.fna files)  
-querydir: "data/example"
-
-# Number of threads per job
-threads_per_job: 2
-
-# Minimum sequence length for extraction (bp)
-min_extract_length: 30
+```bash
+# Run with custom parameters
+nextflow run main.nf --querydir data/my_dataset --threads_per_job 4 --min_extract_length 50
 ```
 
 ### Custom Data
@@ -116,17 +110,15 @@ min_extract_length: 30
 mkdir data/your_dataset
 cp /path/to/*.fna data/your_dataset/
 
-# Create custom config
-cat > config/my_config.yaml << EOF
-modeldir: "resources/models"
-querydir: "data/your_dataset"
-threads_per_job: 4
-min_extract_length: 30
-EOF
-
-# Run pipeline
-pixi run snakemake --cores 8 --configfile config/my_config.yaml
+# Run pipeline on custom data
+pixi run nextflow run main.nf --querydir data/your_dataset --threads_per_job 4
 ```
+
+### Configuration Files
+
+- **`nextflow.config`**: Main pipeline configuration
+- **`config/base.config`**: Process-specific resource requirements
+- **`config/environment.yml`**: Conda environment specification
 
 Results will be in `results/your_dataset/`
 
@@ -169,8 +161,8 @@ pixi run setup              # Install deps + download database
 pixi run run                # Run full pipeline (default config)
 pixi run dryrun            # Preview what will be executed
 
-# Custom execution
-pixi run snakemake --cores 8 --configfile config/my_config.yaml
+# Custom execution  
+pixi run nextflow run main.nf --querydir data/my_dataset
 
 # Database management
 pixi run download-db        # Download reference database
@@ -222,12 +214,12 @@ pixi run -e dev dag         # Generate pipeline visualization
 
 ### Pipeline locked error
 ```bash
-pixi run snakemake --unlock --configfile config/default.yaml
+pixi run nextflow clean -f
 ```
 
 ### Memory issues
-- Reduce `threads_per_job` in config/default.yaml
-- Process fewer files at once
+- Reduce `threads_per_job` parameter
+- Use profile configurations: `nextflow run main.nf -profile local`
 
 ### File path errors
 - Ensure input files have `.fna`, `.fa`, or `.fasta` extensions
