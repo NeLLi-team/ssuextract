@@ -1,0 +1,13 @@
+# Configuration for SSU extraction pipeline
+
+# Directory containing covariance models (.cm files)
+modeldir: "resources/models"
+
+# Directory containing query sequences (.fna files)  
+querydir: "data/example"
+
+# Number of threads per job
+threads_per_job: 2
+
+# Minimum sequence length for extraction (bp)
+min_extract_length: 30

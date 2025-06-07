@@ -1,0 +1,58 @@
+[project]
+name = "ssuextract"
+version = "0.9.0"
+description = "SSU extraction tools using Snakemake pipeline"
+channels = ["conda-forge", "bioconda"]
+platforms = ["linux-64", "osx-64", "osx-arm64"]
+
+[dependencies]
+# Core tools
+python = ">=3.8"
+snakemake-minimal = "*"
+wget = "*"               # for database download
+
+# Bioinformatics tools
+infernal = "*"           # provides cmsearch
+blast = "*"              # provides blastn
+
+# Python packages
+pandas = "*"
+biopython = "*"
+numpy = "*"
+
+[tasks]
+# Download database if not already present
+download-db = { cmd = "bash -c 'if [ ! -f resources/database/silva-138-1_pr2-4-12.fasta ]; then mkdir -p resources/database && wget -r -np -nH --cut-dirs=3 -P resources/database/ https://portal.nersc.gov/cfs/nelli/ssuextract_db/; else echo \"Database already exists, skipping download\"; fi'", description = "Download database files if not present" }
+
+# Setup: install dependencies and download database
+setup = { depends-on = ["download-db"], description = "Complete setup including database download" }
+
+# Run the full pipeline
+run = "snakemake --cores all --configfile config/default.yaml"
+
+# Clean outputs
+clean = "snakemake --delete-all-output --configfile config/default.yaml"
+
+# Clean results directory (use with caution)
+clean-results = { cmd = "rm -rf results/", description = "Remove all results directories" }
+
+# Dry run to see what will be executed
+dryrun = "snakemake --dry-run --configfile config/default.yaml"
+
+# Generate pipeline visualization
+dag = "snakemake --dag --configfile config/default.yaml | dot -Tsvg > pipeline.svg"
+
+[environments]
+dev = ["dev"]
+
+[feature.dev.dependencies]
+# Development dependencies
+snakemake = "*"          # full snakemake with plotting capabilities
+graphviz = "*"           # for DAG visualization
+
+[feature.dev.tasks]
+# Run with detailed output
+run-verbose = "snakemake --cores all --configfile config/default.yaml --verbose"
+
+# Create pipeline report
+report = "snakemake --report report.html --configfile config/default.yaml"
