@@ -21,12 +21,15 @@ SSUextract identifies SSU rRNA sequences in your genomic data by:
 
 ### Prerequisites
 - [pixi](https://pixi.sh) package manager
+```bash
+curl -fsSL https://pixi.sh/install.sh | sh
+```
 
 ### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/ssuextract.git
+git clone https://github.com/NeLLi-team/ssuextract.git
 cd ssuextract
 
 # Install dependencies and download reference database
