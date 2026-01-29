@@ -184,7 +184,7 @@ ssuextract/
 nextflow run main.nf \
     --querydir data/my_dataset \
     --threads_per_job 4 \
-    --min_extract_length 50 \
+    --min_extract_length 1000 \
     --database silva-pr2
 ```
 
@@ -197,8 +197,10 @@ nextflow run main.nf \
 | `--outdir` | `results/{dataset}` | Output directory |
 | `--database` | `silva-pr2` | Database: `silva-pr2` or `eukcensus` |
 | `--database_path` | `resources/database` | Path to database files |
-| `--min_extract_length` | `30` | Minimum sequence length (bp) |
+| `--min_extract_length` | `500` | Minimum sequence length (bp) |
 | `--threads_per_job` | `2` | CPU threads per process |
+
+> **Note on sequence length**: The default minimum length is 500 bp. For better taxonomic resolution, we recommend using `--min_extract_length 1000` or higher. Longer sequences provide more phylogenetic signal and more accurate taxonomic assignments.
 
 ### Custom Data
 
@@ -291,7 +293,7 @@ pixi run -e dev dag         # Generate pipeline DAG visualization
 ### Step 3: Hit Processing
 - Extracts alignment coordinates using `scripts/get_cmstats.py`
 - Handles truncated alignments at sequence boundaries
-- Filters by minimum length (default: 30 bp)
+- Filters by minimum length (default: 500 bp; recommend 1000+ bp for better resolution)
 
 ### Step 4: Sequence Extraction
 - Extracts sequences based on coordinates using `scripts/get_cmsequences.py`
