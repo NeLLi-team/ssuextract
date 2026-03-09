@@ -21,14 +21,17 @@ biopython = "*"
 numpy = "*"
 
 [tasks]
-# Download database if not already present
-download-db = { cmd = "bash -c 'if [ ! -f resources/database/silva-138-1_pr2-4-12.fasta ]; then mkdir -p resources/database && wget -r -np -nH --cut-dirs=3 -P resources/database/ https://portal.nersc.gov/cfs/nelli/ssuextract_db/; else echo \"Database already exists, skipping download\"; fi'", description = "Download database files if not present" }
+# Download the default database
+download-db = { cmd = "bash scripts/pipeline_cli.sh setup", description = "Resolve the database path and download SILVA/PR2 if needed" }
 
-# Setup: install dependencies and download database
-setup = { depends-on = ["download-db"], description = "Complete setup including database download" }
+# Setup: resolve the database path and download the database
+setup = { cmd = "bash scripts/pipeline_cli.sh setup", description = "Interactive first-run setup for the default database" }
 
 # Run the full pipeline
-run = "nextflow run main.nf"
+ssuextract = { cmd = "bash scripts/pipeline_cli.sh run", description = "Run the full pipeline with automatic database setup" }
+
+# Run a one-file smoke test on the smaller bundled example
+example = { cmd = "bash scripts/pipeline_cli.sh smoke", description = "Run a one-file example on bundled data" }
 
 # Clean outputs
 clean = "nextflow clean -f"
@@ -40,7 +43,7 @@ clean-results = { cmd = "rm -rf results/ work/", description = "Remove all resul
 dryrun = "nextflow run main.nf -preview"
 
 # Generate pipeline visualization
-dag = "nextflow run main.nf -with-dag pipeline.svg"
+dag = "bash scripts/pipeline_cli.sh run -with-dag pipeline.svg"
 
 [environments]
 dev = ["dev"]
@@ -51,7 +54,7 @@ graphviz = "*"           # for DAG visualization
 
 [feature.dev.tasks]
 # Run with detailed output
-run-verbose = "nextflow run main.nf -with-trace -with-timeline -with-report"
+run-verbose = "bash scripts/pipeline_cli.sh run -with-trace -with-timeline -with-report"
 
 # Create pipeline report
-report = "nextflow run main.nf -with-report report.html"
+report = "bash scripts/pipeline_cli.sh run -with-report report.html"

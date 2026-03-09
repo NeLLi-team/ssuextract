@@ -1,217 +1,50 @@
-# 📁 SSUextract Project Structure
+# SSUextract Project Structure
 
-This document describes the modern, state-of-the-art directory structure used in SSUextract.
+This repository is intentionally small. The main workflow lives in Nextflow, and `pixi` provides the entrypoints users actually run.
 
-## Directory Layout
+## Layout
 
-```
+```text
 ssuextract/
-├── 📋 Snakefile                 # Main workflow definition
-├── 📦 pixi.toml                 # Dependencies and task runner
-├── 📄 LICENSE                   # Project license
-├── 📄 PROJECT_STRUCTURE.md      # This file
-│
-├── 📁 config/                   # Configuration files
-│   ├── default.yaml            # Default pipeline configuration
-│   └── environment.yml         # Conda environment specification
-│
-├── 📁 scripts/                  # Pipeline scripts
-│   ├── cmprocessing.py         # BLAST result processing
-│   ├── get_cmsequences.py      # Sequence extraction
-│   ├── get_cmstats.py          # Alignment statistics
-│   ├── get_table.py            # Summary table generation
-│   ├── rename_fnaheaders.py    # Header validation
-│   └── cmsearchout_extract_by_position_size.py  # Legacy extraction
-│
-├── 📁 resources/               # Static resources
-│   ├── models/                 # Covariance models
-│   │   ├── RF00177.cm         # Bacterial/Archaeal SSU rRNA
-│   │   └── RF01960.cm         # Eukaryotic SSU rRNA
-│   └── database/              # Reference databases
-│       ├── silva-138-1_pr2-4-12.fasta
-│       ├── silva-138-1_pr2-4-12.nhr
-│       ├── silva-138-1_pr2-4-12.nin
-│       └── silva-138-1_pr2-4-12.nsq
-│
-├── 📁 data/                    # Input data
-│   └── example/               # Example test data
-│       ├── LKH462_P08_Rh.fna
-│       └── LKH565_P11_Ci.fna
-│
-├── 📁 results/                 # Analysis results (auto-generated)
-│   └── results_{dataset}/     # Dataset-specific results
-│       ├── fna/              # Processed sequences
-│       ├── out/              # cmsearch raw output
-│       ├── stats/            # Alignment statistics
-│       ├── extracted/        # Extracted SSU sequences
-│       ├── m8/               # BLAST results
-│       ├── cmsearch_summary.tab   # Category summary
-│       └── cmsearch_summary.tsv   # Detailed results
-│
-├── 📁 docs/                   # Documentation
-│   ├── README.md             # Main documentation
-│   └── TUTORIAL.md           # Step-by-step tutorial
-│
-└── 📁 tests/                  # Unit tests (future)
-    └── test_pipeline.py      # Pipeline tests
+├── main.nf                 # Nextflow workflow
+├── nextflow.config         # Runtime defaults and profiles
+├── pixi.toml               # Environment and user-facing tasks
+├── config/
+│   ├── base.config         # Process resources
+│   ├── environment.yml     # Conda profile definition
+│   └── local.config        # Optional local database path override, gitignored
+├── data/
+│   └── example/            # Bundled example assemblies
+├── resources/
+│   ├── models/             # RF00177.cm and RF01960.cm
+│   └── database/           # Downloaded BLAST database, gitignored
+├── results/                # Pipeline outputs, gitignored
+└── scripts/
+    ├── pipeline_cli.sh     # Setup/run/smoke wrapper used by pixi
+    ├── get_cmstats.py      # Parse cmsearch hits
+    ├── get_cmsequences.py  # Extract hit sequences
+    ├── cmprocessing.py     # Summarize BLAST categories
+    └── get_table.py        # Build final TSV output
 ```
 
-## Design Principles
+## Rationale
 
-### 🎯 **Separation of Concerns**
-- **`config/`**: All configuration in one place
-- **`scripts/`**: Executable code separate from workflow
-- **`resources/`**: Static files that don't change
-- **`data/`**: Input data separate from code
-- **`results/`**: Output separate from everything else
+- Nextflow stays focused on batch execution.
+- Interactive setup happens in `scripts/pipeline_cli.sh`, not inside `main.nf`.
+- The database location is persisted in `config/local.config` so users are not prompted every run.
+- The bundled smoke test uses the smaller example file without forcing a permanent extra dataset into the repo.
 
-### 📦 **Modern Package Management**
-- **`pixi.toml`**: Reproducible dependency management
-- **`config/environment.yml`**: Conda environment backup
-- **Cross-platform compatibility** ensured
+## Expected Run Paths
 
-### 🔧 **Workflow Organization**
-- **`Snakefile`**: Clean workflow definition
-- **Modular scripts**: Each script has single responsibility
-- **Configurable paths**: No hardcoded directories
-
-### 📊 **Data Management**
-- **Input/Output separation**: Clean data flow
-- **Results versioning**: Each dataset gets own directory
-- **Intermediate files**: Organized by processing step
-
-## Configuration Files
-
-### `config/default.yaml`
-```yaml
-# Directory containing covariance models (.cm files)
-modeldir: "resources/models"
-
-# Directory containing query sequences (.fna files)  
-querydir: "data/example"
-
-# Number of threads per job
-threads_per_job: 2
-
-# Minimum sequence length for extraction (bp)
-min_extract_length: 30
-```
-
-### `config/environment.yml`
-- Conda environment specification
-- Bioinformatics tools (Infernal, BLAST)
-- Python dependencies
-
-## Script Organization
-
-### Core Processing Scripts
-
-#### `scripts/get_cmstats.py`
-- **Purpose**: Extract alignment coordinates from cmsearch output
-- **Input**: Raw cmsearch .out files
-- **Output**: .seqmap files with coordinates
-
-#### `scripts/get_cmsequences.py`
-- **Purpose**: Extract sequences based on coordinates
-- **Input**: .seqmap files + FASTA sequences
-- **Output**: Extracted SSU sequences
-
-#### `scripts/cmprocessing.py`
-- **Purpose**: Process BLAST results into categories
-- **Input**: BLAST m8 files
-- **Output**: Category count table
-
-#### `scripts/get_table.py`
-- **Purpose**: Generate comprehensive summary table
-- **Input**: All intermediate files
-- **Output**: Final TSV with annotations
-
-#### `scripts/rename_fnaheaders.py`
-- **Purpose**: Validate and clean FASTA headers
-- **Input**: Raw FASTA files
-- **Output**: Cleaned FASTA files
-
-## Output Structure
-
-### Main Results Files
-
-#### `cmsearch_summary.tsv`
-Comprehensive table with columns:
-- **name**: Full sequence identifier
-- **sample**: Input file basename (sampleid)
-- **model**: Covariance model used
-- **length**: Sequence length
-- **coordinates**: Genomic coordinates
-- **strand**: DNA strand (+/-)
-- **sequence_type**: Hit type (simple/complex)
-- **contig_name**: Source contig
-- **blast_sseqid**: Best BLAST hit with taxonomy
-- **blast_pident**: Percent identity
-- **blast_length**: Alignment length
-- **blast_bitscore**: BLAST bit score
-- **is_assembled**: Assembly status
-
-#### `cmsearch_summary.tab`
-Category count matrix:
-```
-               BacteriaSSU  ArchaeaSSU  EukaryotaSSU
-Sample1        5            1           0
-Sample2        3            0           2
-```
-
-## Usage Examples
-
-### Basic Usage
 ```bash
-# Run with default configuration
-pixi run run
-
-# Use custom config
-pixi run snakemake --configfile config/my_config.yaml --cores 4
+pixi run setup
+pixi run example
+pixi run ssuextract
+pixi run ssuextract -- --querydir data/my_dataset
 ```
 
-### Custom Data
-```bash
-# Create new dataset directory
-mkdir data/my_genomes
-cp /path/to/*.fna data/my_genomes/
+## Current Constraints
 
-# Create custom config
-cat > config/my_config.yaml << EOF
-modeldir: "resources/models"
-querydir: "data/my_genomes"
-threads_per_job: 8
-min_extract_length: 50
-EOF
-
-# Run pipeline
-pixi run snakemake --configfile config/my_config.yaml --cores 16
-```
-
-### Results will be in: `results_my_genomes/`
-
-## Benefits of This Structure
-
-### ✅ **Maintainability**
-- Clear separation of code, config, data, and results
-- Easy to find and modify components
-- Follows bioinformatics best practices
-
-### ✅ **Reproducibility**
-- All dependencies in pixi.toml
-- Configuration versioned with code
-- Clear data provenance
-
-### ✅ **Scalability**
-- Easy to add new scripts or workflows
-- Modular design supports extensions
-- Clean interfaces between components
-
-### ✅ **Usability**
-- Intuitive directory names
-- Self-documenting structure
-- Easy onboarding for new users
-
----
-
-This structure follows modern software engineering practices while being tailored for bioinformatics workflows and computational reproducibility.
+- The supported annotation database is the SILVA/PR2 BLAST database with prefix `silva-138-1_pr2-4-12`.
+- The pipeline reads directories of FASTA files rather than single FASTA file paths.
+- Output and downloaded resources are intentionally gitignored.

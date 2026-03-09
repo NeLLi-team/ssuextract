@@ -10,6 +10,7 @@ work/
 # Generated results and resources
 results/
 resources/database
+config/local.config
 
 # Log files
 *.log

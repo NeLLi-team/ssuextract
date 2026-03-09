@@ -110,7 +110,7 @@ process CHECK_FNA_HEADERS {
     
     script:
     """
-    # Simple copy for now to test pipeline
+    # Preserve input headers as provided by the assembly source.
     cp ${fna_file} ${sample_id}_processed.fna
     """
 }
@@ -176,7 +176,10 @@ process BLAST_ANNOTATE {
     tuple val(meta), path("${meta}.m8")
     
     script:
-    db_path = "${projectDir}/${params.database_path}/silva-138-1_pr2-4-12"
+    def db_dir = new File(params.database_path.toString())
+    def db_path = db_dir.isAbsolute() \
+        ? "${params.database_path}/silva-138-1_pr2-4-12" \
+        : "${projectDir}/${params.database_path}/silva-138-1_pr2-4-12"
     """
     blastn -outfmt 6 -db ${db_path} -query ${extracted_fna} -max_target_seqs 5 -num_threads ${task.cpus} -out ${meta}.m8
     """
@@ -306,7 +309,7 @@ def helpMessage() {
     
     Optional arguments:
       --outdir [path]             Path to output directory (default: results/[querydir_name])
-      --min_extract_length [int]  Minimum sequence length for extraction (default: 30)
+      --min_extract_length [int]  Minimum sequence length for extraction (default: 500)
       --threads_per_job [int]     Number of threads per job (default: 2)
       --database_path [path]      Path to BLAST database directory (default: resources/database)
       --help                      Show this help message and exit
