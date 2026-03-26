@@ -62,29 +62,44 @@ def get_seqmap_dict(seqmap):
     return seqmap_dict
 
 def get_sequences(seqmap_dict, fasta_name, outfile, minlength):
-    switch = 0
+    # First pass: load all sequences that appear in the seqmap into memory.
+    # This correctly handles multi-line FASTA files by concatenating all
+    # sequence lines belonging to each header.
+    sequences = {}
     currkey = ''
+    collecting = False
     with open(fasta_name) as fileobject:
         for line in fileobject:
-            if line[0] == '>' and line[1:-1] in seqmap_dict.keys():
-                switch = 1
-                currkey = line[1:-1]
-            elif switch == 1:
-                for seqlist in seqmap_dict[currkey]:
-                    c_seq = line[:-1]
-                    if seqlist[3] == '+':
-                        d_seq = c_seq[int(seqlist[1]) : int(seqlist[2])]
-                    else:
-                        c_seq = c_seq[int(seqlist[2]) : int(seqlist[1])]
-                        c_seq = c_seq[::-1]
-                        d_seq = ''
-                        for nuc in c_seq:
-                            d_seq += wcdict[nuc]
-                    if len(d_seq) >= int(minlength):
-                        seqfrom = str(min([int(i) for i in seqlist[1:3]]))
-                        seqto = str(max([int(i) for i in seqlist[1:3]]))
-                        outfile.write('>'+ currkey +'|'+ seqfrom +'-'+ seqto +'|strand_'+ seqlist[3] +'|'+ seqlist[4] +'\n'+ d_seq +'\n')
-                switch = 0
+            line = line.rstrip('\n')
+            if line.startswith('>'):
+                header = line[1:]
+                if header in seqmap_dict:
+                    currkey = header
+                    sequences[currkey] = []
+                    collecting = True
+                else:
+                    collecting = False
+            elif collecting:
+                sequences[currkey].append(line)
+    # Join the collected lines into full sequences
+    for key in sequences:
+        sequences[key] = ''.join(sequences[key])
+
+    # Second pass: extract subsequences using the seqmap coordinates
+    for currkey, c_seq in sequences.items():
+        for seqlist in seqmap_dict[currkey]:
+            if seqlist[3] == '+':
+                d_seq = c_seq[int(seqlist[1]) : int(seqlist[2])]
+            else:
+                sub = c_seq[int(seqlist[2]) : int(seqlist[1])]
+                sub = sub[::-1]
+                d_seq = ''
+                for nuc in sub:
+                    d_seq += wcdict[nuc]
+            if len(d_seq) >= int(minlength):
+                seqfrom = str(min([int(i) for i in seqlist[1:3]]))
+                seqto = str(max([int(i) for i in seqlist[1:3]]))
+                outfile.write('>'+ currkey +'|'+ seqfrom +'-'+ seqto +'|strand_'+ seqlist[3] +'|'+ seqlist[4] +'\n'+ d_seq +'\n')
     return outfile
             
 
