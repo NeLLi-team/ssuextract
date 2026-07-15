@@ -1,0 +1,46 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          manifest-path: docs-env/pixi.toml
+          frozen: true
+      - run: pixi run --manifest-path docs-env/pixi.toml register-kernel
+      - run: pixi run --manifest-path docs-env/pixi.toml execute-notebooks
+      - run: pixi run --manifest-path docs-env/pixi.toml build
+      - uses: actions/configure-pages@v6
+        if: github.event_name == 'push'
+      - uses: actions/upload-pages-artifact@v5
+        if: github.event_name == 'push'
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

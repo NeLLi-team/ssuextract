@@ -1,0 +1,89 @@
+site_name: SSUextract
+site_description: Extract and classify small-subunit ribosomal RNA from assembled contigs.
+site_url: https://nelli-team.github.io/ssuextract/
+repo_url: https://github.com/NeLLi-team/ssuextract
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2023–2026 NeLLi-team
+
+# The receipt hashes the completed site tree, so publishing it inside that tree
+# would create a self-reference and leave the site with the preceding receipt.
+exclude_docs: |
+  data/build_receipt.json
+  handoffs/
+  releases/
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - search.suggest
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: deep orange
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+nav:
+  - Home: index.md
+  - Tutorial:
+      - tutorials/index.md
+      - First SSUextract run: tutorials/first-run.md
+  - How-to guides:
+      - how-to/index.md
+      - Run assembled genomes: how-to/run-assemblies.md
+      - Install and select databases: how-to/database-profiles.md
+  - Reference:
+      - reference/index.md
+      - Command-line parameters: reference/cli.md
+      - Output files: reference/outputs.md
+      - Database profiles: reference/database-profiles.md
+      - Benchmark data: reference/benchmark-data.md
+  - Explanation:
+      - explanation/index.md
+      - Pipeline design: explanation/pipeline.md
+      - Taxonomy policy: explanation/taxonomy.md
+      - Benchmarks: explanation/benchmarks.ipynb
+
+plugins:
+  - search
+  - mkdocs-jupyter:
+      execute: true
+      include_source: true
+      allow_errors: false
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_css:
+  - stylesheets/extra.css

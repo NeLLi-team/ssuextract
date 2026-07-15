@@ -1,0 +1,19 @@
+SILVA database notice
+
+This profile contains transformed records from the SILVA ribosomal RNA gene
+database, release 138.2. SILVA databases, taxonomy, and download files are
+licensed under Creative Commons Attribution 4.0 International (CC BY 4.0).
+
+License: https://creativecommons.org/licenses/by/4.0/
+Source and terms: https://www.arb-silva.de/silva-license-information
+Release: https://www.arb-silva.de/documentation/release-1382/
+
+Credit SILVA as the original author. The records in this profile were filtered
+to Bacteria and Archaea, projected onto declared SILVA ranks, normalized for
+exact-sequence hashing, deduplicated by sequence, and converted to BLAST and
+Parquet formats.
+
+SILVA notes that Digital Sequence Information may be subject to benefit-sharing
+obligations under the Convention on Biological Diversity, including possible
+Cali Fund contributions from commercial users. Consult the current SILVA terms
+before commercial redistribution or use.

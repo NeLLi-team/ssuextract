@@ -1,6 +1,7 @@
 # Pixi and environment files
 .pixi
-pixi.lock
+__pycache__/
+*.py[cod]
 
 # Nextflow working directory
 work/
@@ -12,6 +13,12 @@ results/
 resources/database
 config/local.config
 
+# Local agent/session state
+.memd/
+memory.md
+tasks/
+docs/handoffs/
+
 # Log files
 *.log
 
@@ -21,3 +28,6 @@ trace.txt
 report.html
 timeline.html
 dag.svg
+
+# Generated documentation site
+site/

@@ -1,50 +1,60 @@
-# SSUextract Project Structure
-
-This repository is intentionally small. The main workflow lives in Nextflow, and `pixi` provides the entrypoints users actually run.
-
-## Layout
+# SSUextract project structure
 
 ```text
 ssuextract/
-├── main.nf                 # Nextflow workflow
-├── nextflow.config         # Runtime defaults and profiles
-├── pixi.toml               # Environment and user-facing tasks
+├── main.nf                       # Four-stage Nextflow workflow
+├── nextflow.config               # Parameters, profiles, reports, and manifest
+├── pixi.toml                     # Environment constraints and commands
+├── pixi.lock                     # Resolved cross-platform environment
 ├── config/
-│   ├── base.config         # Process resources
-│   ├── environment.yml     # Conda profile definition
-│   └── local.config        # Optional local database path override, gitignored
-├── data/
-│   └── example/            # Bundled example assemblies
+│   ├── base.config               # Per-process resource requests
+│   ├── database_catalog.json     # Installable profile archives
+│   ├── database_sources.json     # Pinned source versions, URLs, and hashes
+│   ├── model_markers.json        # Covariance-model to 16S/18S mapping
+│   ├── environment.yml           # Optional Nextflow Conda environment
+│   └── local.config              # Local database path; generated and ignored
+├── data/example/                 # Bundled example assemblies
 ├── resources/
-│   ├── models/             # RF00177.cm and RF01960.cm
-│   └── database/           # Downloaded BLAST database, gitignored
-├── results/                # Pipeline outputs, gitignored
-└── scripts/
-    ├── pipeline_cli.sh     # Setup/run/smoke wrapper used by pixi
-    ├── get_cmstats.py      # Parse cmsearch hits
-    ├── get_cmsequences.py  # Extract hit sequences
-    ├── cmprocessing.py     # Summarize BLAST categories
-    └── get_table.py        # Build final TSV output
+│   ├── models/                   # RF00177 and RF01960 covariance models
+│   └── database_notices/         # Source licenses and attribution
+├── scripts/
+│   ├── pipeline_cli.sh           # Database setup and Pixi-facing runner
+│   ├── database_manager.py       # Profile download, validation, and resolution
+│   ├── build_database_profiles.py # Reproducible source-to-release driver
+│   ├── build_database_release.py # Source parsing and database construction
+│   ├── database_sources.py       # Source-specific parsing
+│   ├── database_contracts.py     # Taxonomy and record contracts
+│   ├── database_release_io.py    # BLAST, Parquet, evidence, and manifest output
+│   ├── assemble_database_profile.py # Validated profile/archive publication
+│   ├── calibrate_taxonomy.py     # Leave-one-reference-out rank calibration
+│   ├── classify_img_clusters.py  # Conservative IMG cluster classification
+│   ├── classify_img_marker.sh    # Production centroid-classification contract
+│   ├── hit_processing.py         # Typed hit parsing and sequence extraction
+│   ├── extract_hits.py           # Extraction command-line interface
+│   ├── annotate_hits.py          # BLAST annotation and taxonomy resolution
+│   ├── finalize_summaries.py     # Deterministic final reports
+│   ├── get_cmsequences.py        # Compatibility wrapper for legacy callers
+│   └── check_version.py          # Release-version consistency gate
+└── tests/                         # Unit and self-contained integration tests
 ```
 
-## Rationale
+`main.nf` carries sample and model identifiers as explicit channel metadata. Raw
+search output is parsed once into hit and extraction records. Those records feed
+the FASTA, detailed summary, category summary, and annotation outputs, avoiding
+independent reconstruction of biological state in separate scripts.
 
-- Nextflow stays focused on batch execution.
-- Interactive setup happens in `scripts/pipeline_cli.sh`, not inside `main.nf`.
-- The database location is persisted in `config/local.config` so users are not prompted every run.
-- The bundled smoke test uses the smaller example file without forcing a permanent extra dataset into the repo.
+Database construction is separate from runtime installation. The source catalog
+pins every input; the build modules normalize sequences and taxonomy, write
+marker-specific BLAST databases and compressed metadata, then assemble one
+checksum-covered archive. Runtime setup accepts only a catalog entry whose
+archive and internal manifest both validate.
 
-## Expected Run Paths
+Run all automated checks with:
 
 ```bash
-pixi run setup
-pixi run example
-pixi run ssuextract
-pixi run ssuextract -- --querydir data/my_dataset
+pixi run test
 ```
 
-## Current Constraints
-
-- The supported annotation database is the SILVA/PR2 BLAST database with prefix `silva-138-1_pr2-4-12`.
-- The pipeline reads directories of FASTA files rather than single FASTA file paths.
-- Output and downloaded resources are intentionally gitignored.
+The integration tests create their own FASTA inputs and BLAST databases, use
+absolute paths, exercise no-hit and marker-routing behavior, and remove their
+temporary files afterward.

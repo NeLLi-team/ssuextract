@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+test_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssuextract-db-profiles.XXXXXX")
+trap 'rm -rf "${test_dir}"' EXIT
+
+mkdir -p \
+    "${test_dir}/query" \
+    "${test_dir}/database/curated/blast" \
+    "${test_dir}/database/curated/metadata"
+cp "${repo}/data/example/LKH565_P11_Ci.fna" "${test_dir}/query/"
+
+for marker in 16S 18S; do
+    subject=ref${marker%S}
+    if [[ "${marker}" == "16S" ]]; then
+        model=RF00177
+    else
+        model=RF01960
+    fi
+    cmsearch \
+        --anytrunc \
+        --cpu 1 \
+        -o /dev/null \
+        --tblout "${test_dir}/${model}.out" \
+        "${repo}/resources/models/${model}.cm" \
+        "${repo}/data/example/LKH565_P11_Ci.fna"
+    python3 "${repo}/scripts/extract_hits.py" \
+        --cmsearch "${test_dir}/${model}.out" \
+        --model-file "${repo}/resources/models/${model}.cm" \
+        --fasta "${repo}/data/example/LKH565_P11_Ci.fna" \
+        --sample database-test \
+        --model "${model}" \
+        --minimum-length 500 \
+        --fasta-output "${test_dir}/${model}.fna" \
+        --hits-output "${test_dir}/${model}.hits.tsv" \
+        --metadata-output "${test_dir}/${model}.meta.tsv"
+    [[ "$(grep -c '^>' "${test_dir}/${model}.fna")" -eq 1 ]]
+    awk -v subject="${subject}" '
+        /^>/ { print ">" subject; next }
+        { print }
+    ' "${test_dir}/${model}.fna" \
+        > "${test_dir}/database/curated/blast/${marker}.fna"
+    makeblastdb \
+        -in "${test_dir}/database/curated/blast/${marker}.fna" \
+        -dbtype nucl \
+        -blastdb_version 5 \
+        -out "${test_dir}/database/curated/blast/${marker}" \
+        >/dev/null
+    rm "${test_dir}/database/curated/blast/${marker}.fna"
+done
+
+mkdir -p "${test_dir}/legacy-database"
+{
+    awk '/^>/ { print ">ref16"; next } { print }' "${test_dir}/RF00177.fna"
+    awk '/^>/ { print ">ref18"; next } { print }' "${test_dir}/RF01960.fna"
+} > "${test_dir}/legacy.fna"
+makeblastdb \
+    -in "${test_dir}/legacy.fna" \
+    -dbtype nucl \
+    -blastdb_version 4 \
+    -out "${test_dir}/legacy-database/silva-138-1_pr2-4-12" \
+    >/dev/null
+
+if nextflow run "${repo}/main.nf" \
+    --querydir "${test_dir}/query" \
+    --modeldir "${repo}/resources/models" \
+    --database_path "${test_dir}/legacy-database" \
+    --database_profile img \
+    --outdir "${test_dir}/legacy-fallback-results" \
+    --threads_per_job 1 \
+    -work-dir "${test_dir}/legacy-fallback-work" \
+    >"${test_dir}/legacy-fallback.log" 2>&1; then
+    echo "IMG profile unexpectedly accepted the deprecated curated-only database" >&2
+    exit 1
+fi
+grep -F "Database profile 'img' is not installed" "${test_dir}/legacy-fallback.log"
+
+python3 - "${test_dir}/database/curated" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+import duckdb
+
+
+profile = Path(sys.argv[1])
+taxonomy = profile / "metadata" / "preferred_taxonomy.parquet"
+connection = duckdb.connect(":memory:")
+connection.execute(
+    """
+    CREATE TABLE taxonomy (
+        sequence_id VARCHAR,
+        reference_source VARCHAR,
+        taxonomy VARCHAR,
+        taxonomy_source VARCHAR,
+        domain VARCHAR,
+        compartment VARCHAR,
+        assignment_method VARCHAR,
+        cross_domain_conflict BOOLEAN,
+        taxonomy_alternatives VARCHAR
+    )
+    """
+)
+connection.executemany(
+    "INSERT INTO taxonomy VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [
+        ("ref16", "SILVA", "Bacteria", "SILVA", "Bacteria", "", "native", False, ""),
+        ("ref18", "PR2", "Eukaryota", "PR2", "Eukaryota", "nucleus", "native", False, ""),
+    ],
+)
+connection.execute("COPY taxonomy TO ? (FORMAT PARQUET)", [str(taxonomy)])
+connection.close()
+
+artifacts = []
+for path in sorted((profile / "blast").glob("16S.*")) + sorted(
+    (profile / "blast").glob("18S.*")
+) + [taxonomy]:
+    relative = path.relative_to(profile).as_posix()
+    artifacts.append(
+        {
+            "path": relative,
+            "bytes": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+    )
+
+manifest = {
+    "schema_version": 1,
+    "profile": "curated",
+    "version": "test-1",
+    "artifacts": artifacts,
+    "blast_databases": {
+        "16S": {"prefix": "blast/16S"},
+        "18S": {"prefix": "blast/18S"},
+    },
+    "taxonomy_database": {"preferred": "metadata/preferred_taxonomy.parquet"},
+}
+(profile / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+PY
+
+cp -a "${test_dir}/database" "${test_dir}/shell-safe-database"
+python3 - "${test_dir}/shell-safe-database/curated" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+profile = Path(sys.argv[1])
+blast = profile / "blast"
+hostile_prefix = "16S'$(:>PWNED_DB)"
+source_fasta = blast / "16S-hostile-source.fna"
+subprocess.run(
+    [
+        "blastdbcmd",
+        "-db",
+        str(blast / "16S"),
+        "-entry",
+        "all",
+        "-outfmt",
+        "%f",
+        "-out",
+        str(source_fasta),
+    ],
+    check=True,
+)
+for path in sorted(blast.glob("16S.*")):
+    if path != source_fasta:
+        path.unlink()
+subprocess.run(
+    [
+        "makeblastdb",
+        "-in",
+        str(source_fasta),
+        "-dbtype",
+        "nucl",
+        "-blastdb_version",
+        "5",
+        "-out",
+        str(blast / hostile_prefix),
+    ],
+    check=True,
+    stdout=subprocess.DEVNULL,
+)
+source_fasta.unlink()
+
+taxonomy = profile / "metadata" / "preferred_taxonomy.parquet"
+hostile_taxonomy = taxonomy.with_name("preferred`touch PWNED_TAX`.parquet")
+taxonomy.rename(hostile_taxonomy)
+
+manifest_path = profile / "manifest.json"
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+manifest["blast_databases"]["16S"]["prefix"] = f"blast/{hostile_prefix}"
+manifest["taxonomy_database"]["preferred"] = (
+    f"metadata/{hostile_taxonomy.name}"
+)
+manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+PY
+
+if ! nextflow run "${repo}/main.nf" \
+    --querydir "${test_dir}/query" \
+    --modeldir "${repo}/resources/models" \
+    --database_path "${test_dir}/shell-safe-database" \
+    --database_profile curated \
+    --outdir "${test_dir}/shell-safe-results" \
+    --threads_per_job 1 \
+    -work-dir "${test_dir}/shell-safe-work" \
+    >"${test_dir}/shell-safe.log" 2>&1; then
+    cat "${test_dir}/shell-safe.log" >&2
+    exit 1
+fi
+
+if find "${test_dir}/shell-safe-work" -type f \
+    \( -name PWNED_DB -o -name PWNED_TAX \) -print -quit | grep -q .; then
+    echo "Manifest-derived path executed shell syntax" >&2
+    exit 1
+fi
+
+cp -a "${test_dir}/database" "${test_dir}/traversal-database"
+cp \
+    "${test_dir}/database/curated/metadata/preferred_taxonomy.parquet" \
+    "${test_dir}/traversal-database/outside.parquet"
+python3 - "${test_dir}/traversal-database/curated/manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+
+path = Path(sys.argv[1])
+manifest = json.loads(path.read_text(encoding="utf-8"))
+manifest["taxonomy_database"]["preferred"] = "../outside.parquet"
+path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+PY
+
+if nextflow run "${repo}/main.nf" \
+    --querydir "${test_dir}/query" \
+    --modeldir "${repo}/resources/models" \
+    --database_path "${test_dir}/traversal-database" \
+    --database_profile curated \
+    --outdir "${test_dir}/traversal-results" \
+    --threads_per_job 1 \
+    -work-dir "${test_dir}/traversal-work" \
+    >"${test_dir}/traversal.log" 2>&1; then
+    echo "Escaping taxonomy path unexpectedly passed profile validation" >&2
+    exit 1
+fi
+grep -F "escapes database profile" "${test_dir}/traversal.log"
+
+nextflow run "${repo}/main.nf" \
+    --querydir "${test_dir}/query" \
+    --modeldir "${repo}/resources/models" \
+    --database_path "${test_dir}/database" \
+    --database_profile curated \
+    --outdir "${test_dir}/results" \
+    --threads_per_job 1 \
+    -work-dir "${test_dir}/work" \
+    >/dev/null
+
+python3 - "${test_dir}/results/cmsearch_summary.tsv" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+
+with Path(sys.argv[1]).open(newline="") as handle:
+    rows = list(csv.DictReader(handle, delimiter="\t"))
+if not rows:
+    raise SystemExit("profile-routing integration produced no hits")
+for row in rows:
+    expected = {
+        "RF00177": ("ref16", "Bacteria", "SILVA"),
+        "RF01960": ("ref18", "Eukaryota", "PR2"),
+    }[row["model"]]
+    observed = (
+        row["blast_sseqid"],
+        row["taxonomy_domain"],
+        row["taxonomy_source"],
+    )
+    if observed != expected:
+        raise SystemExit(
+            f"wrong database route for {row['model']}: expected {expected}, found {observed}"
+        )
+PY

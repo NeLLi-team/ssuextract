@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "taxonomy_policy_version": "1.0.0",
+  "sources": {
+    "silva_ssu_nr99_fasta": {
+      "version": "138.2",
+      "url": "https://www.arb-silva.de/fileadmin/silva_databases/release_138_2/Exports/SILVA_138.2_SSURef_NR99_tax_silva.fasta.gz",
+      "filename": "SILVA_138.2_SSURef_NR99_tax_silva.fasta.gz",
+      "bytes": 201107829,
+      "sha256": "c779f51f1c605377f23d240005cbdd96068a77fdf85117f15d9f598b138a2072",
+      "md5": "c3b7638cab8bf2fe1e5cad01ce406a53",
+      "doi": "10.82364/138.2/SSU/Ref-NR99/FASTA/unaligned",
+      "license": "CC-BY-4.0",
+      "license_url": "https://www.arb-silva.de/silva-license-information",
+      "redistribution_confirmed": true
+    },
+    "silva_ssu_taxonomy": {
+      "version": "138.2",
+      "url": "https://www.arb-silva.de/fileadmin/silva_databases/release_138_2/Exports/taxonomy/tax_slv_ssu_138.2.txt.gz",
+      "filename": "tax_slv_ssu_138.2.txt.gz",
+      "bytes": 210848,
+      "sha256": "847c794b0a3a5f4e66ca09682f349d28e96e44e5069a29bb4f358ae804169d42",
+      "md5": "489319c74615da2ab80a42d8f88fc72f",
+      "license": "CC-BY-4.0",
+      "license_url": "https://www.arb-silva.de/silva-license-information",
+      "redistribution_confirmed": true
+    },
+    "silva_ssu_nr99_taxmap": {
+      "version": "138.2",
+      "url": "https://www.arb-silva.de/fileadmin/silva_databases/release_138_2/Exports/taxonomy/taxmap_slv_ssu_ref_nr_138.2.txt.gz",
+      "filename": "taxmap_slv_ssu_ref_nr_138.2.txt.gz",
+      "bytes": 8506134,
+      "sha256": "062127455d7e0a9775ecec2df768533565b5b418666d012caad212807be487d8",
+      "md5": "d9c7a3ed817c3d7c73103f32a4e7d0f4",
+      "license": "CC-BY-4.0",
+      "license_url": "https://www.arb-silva.de/silva-license-information",
+      "redistribution_confirmed": true
+    },
+    "pr2_ssu_fasta": {
+      "version": "5.1.1",
+      "url": "https://github.com/pr2database/pr2database/releases/download/v5.1.1/pr2_version_5.1.1_SSU_taxo_long.fasta.gz",
+      "filename": "pr2_version_5.1.1_SSU_taxo_long.fasta.gz",
+      "bytes": 59640632,
+      "sha256": "b9cef85537b49bf54d1033ad38a6cce1875123fb9f7c7c8f442aadccd2bbb8f5",
+      "citation_doi": "10.1093/nar/gks1160",
+      "license": "MIT",
+      "license_url": "https://github.com/pr2database/pr2database/blob/v5.1.1/LICENSE.md",
+      "redistribution_confirmed": true
+    },
+    "eukcensus_16s_fasta": {
+      "version": "2025",
+      "url": "https://portal.nersc.gov/cfs/nelli/eukcensus/eukcensus_2025_16S.fna",
+      "filename": "eukcensus_2025_16S.fna",
+      "bytes": 1776360053,
+      "sha256": "0a106ce975661edd8ebf119c6986f352f7b9b576784ea0584975c6a8aa85dd65",
+      "md5": "2cc8d2b66f97a38d723c9f4313051a19",
+      "doi": "10.5281/zenodo.20653200",
+      "license": "CC-BY-4.0",
+      "license_url": "https://zenodo.org/records/20653200",
+      "redistribution_confirmed": true
+    },
+    "eukcensus_18s_fasta": {
+      "version": "2025",
+      "url": "https://portal.nersc.gov/cfs/nelli/eukcensus/eukcensus_2025_18S.fna",
+      "filename": "eukcensus_2025_18S.fna",
+      "bytes": 616186593,
+      "sha256": "0acea8dcc455902ce39bd9193cbcf7eb8e8c718666f004fd5c457cb3fa7825e1",
+      "md5": "a368c40f62f836cd09c5b1c07507debc",
+      "doi": "10.5281/zenodo.20653200",
+      "license": "CC-BY-4.0",
+      "license_url": "https://zenodo.org/records/20653200",
+      "redistribution_confirmed": true
+    },
+    "eukcensus_16s_clusters": {
+      "version": "2025",
+      "url": "https://portal.nersc.gov/cfs/nelli/eukcensus/eukcensus_2025_16S_clusters.tsv",
+      "filename": "eukcensus_2025_16S_clusters.tsv",
+      "bytes": 98662521,
+      "sha256": "e6a45c9a60de86228e6299f444f6a90ea69bce5f50c4c0fb0095e44301a64545",
+      "license": null,
+      "license_url": null,
+      "redistribution_confirmed": false
+    },
+    "eukcensus_18s_clusters": {
+      "version": "2025",
+      "url": "https://portal.nersc.gov/cfs/nelli/eukcensus/eukcensus_2025_18S_clusters.tsv",
+      "filename": "eukcensus_2025_18S_clusters.tsv",
+      "bytes": 143098775,
+      "sha256": "8131d102cfe994c37682be4096051eefb9c5ef103e16da098202d049dc810045",
+      "license": null,
+      "license_url": null,
+      "redistribution_confirmed": false
+    },
+    "eukcensus_img_metadata": {
+      "version": "2025",
+      "url": "https://portal.nersc.gov/cfs/nelli/eukcensus/eukcensus_2025_img_metadata.tsv",
+      "filename": "eukcensus_2025_img_metadata.tsv",
+      "bytes": 18075928,
+      "sha256": "e6d6b7d9f5f0c434695ecb8d35e4f2e74a54552e1582a68a3e1e4c2014c39c3e",
+      "md5": "21a70e997e065f7f18a35e8f4d3150a8",
+      "doi": "10.5281/zenodo.20653200",
+      "license": "CC-BY-4.0",
+      "license_url": "https://zenodo.org/records/20653200",
+      "redistribution_confirmed": true,
+      "distribution_policy": "privacy_filtered_allowlist_only"
+    }
+  }
+}

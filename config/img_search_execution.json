@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "threads_per_chunk": 8,
+  "markers": [
+    {
+      "marker": "16S",
+      "chunks": 16
+    },
+    {
+      "marker": "18S",
+      "chunks": 4
+    }
+  ]
+}

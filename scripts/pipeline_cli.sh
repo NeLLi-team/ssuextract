@@ -5,10 +5,9 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROJECT_DIR=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 CONFIG_FILE="${PROJECT_DIR}/config/local.config"
 DEFAULT_DB_DIR="${PROJECT_DIR}/resources/database"
-DB_BASE_URL="https://portal.nersc.gov/cfs/nelli/ssuextract_db"
-DB_PREFIX="silva-138-1_pr2-4-12"
+DEFAULT_DB_PROFILE="curated"
+DATABASE_MANAGER="${PROJECT_DIR}/scripts/database_manager.py"
 SMOKE_FASTA="${PROJECT_DIR}/data/example/LKH565_P11_Ci.fna"
-DB_SUFFIXES=(fasta nhr nin nsq)
 
 main() {
     local command="${1:-run}"
@@ -25,10 +24,10 @@ main() {
     esac
 }
 
-has_help_flag() {
+has_information_flag() {
     local arg
     for arg in "$@"; do
-        [[ "${arg}" == "--help" ]] && return 0
+        [[ "${arg}" == "--help" || "${arg}" == "--version" ]] && return 0
     done
     return 1
 }
@@ -47,6 +46,44 @@ cli_has_database_path() {
         [[ "${arg}" == "--database_path" ]] && expect_value=1
     done
 
+    return 1
+}
+
+cli_has_database_profile() {
+    local arg
+    for arg in "$@"; do
+        [[ "${arg}" == --database_profile=* ]] && return 0
+    done
+
+    local expect_value=0
+    for arg in "$@"; do
+        if [[ ${expect_value} -eq 1 ]]; then
+            return 0
+        fi
+        [[ "${arg}" == "--database_profile" ]] && expect_value=1
+    done
+    return 1
+}
+
+read_cli_database_profile() {
+    local arg
+    for arg in "$@"; do
+        case "${arg}" in
+            --database_profile=*)
+                printf '%s\n' "${arg#*=}"
+                return 0
+                ;;
+        esac
+    done
+
+    local expect_value=0
+    for arg in "$@"; do
+        if [[ ${expect_value} -eq 1 ]]; then
+            printf '%s\n' "${arg}"
+            return 0
+        fi
+        [[ "${arg}" == "--database_profile" ]] && expect_value=1
+    done
     return 1
 }
 
@@ -75,16 +112,18 @@ read_cli_database_path() {
 
 read_config_database_path() {
     [[ -f "${CONFIG_FILE}" ]] || return 1
-    awk -F"'" '/database_path/ {print $2; exit}' "${CONFIG_FILE}"
+    if grep -Eq '^[[:space:]]*database_path[[:space:]]*=' "${CONFIG_FILE}"; then
+        awk -F"'" '/^[[:space:]]*database_path[[:space:]]*=/ {print $2; exit}' "${CONFIG_FILE}"
+    else
+        sed -n '1p' "${CONFIG_FILE}"
+    fi
 }
 
 write_config_database_path() {
     local db_dir="$1"
-    cat > "${CONFIG_FILE}" <<EOF
-params {
-    database_path = '${db_dir}'
-}
-EOF
+    local temp_file="${CONFIG_FILE}.tmp.$$"
+    printf '%s\n' "${db_dir}" > "${temp_file}"
+    mv "${temp_file}" "${CONFIG_FILE}"
 }
 
 prompt_database_path() {
@@ -121,66 +160,78 @@ resolve_database_path() {
 
 database_ready() {
     local db_dir="$1"
-    local suffix
+    local profile="$2"
+    if python3 "${DATABASE_MANAGER}" validate \
+        --root "${db_dir}" \
+        --profile "${profile}" \
+        >/dev/null 2>&1; then
+        return 0
+    fi
 
-    for suffix in "${DB_SUFFIXES[@]}"; do
-        [[ -f "${db_dir}/${DB_PREFIX}.${suffix}" ]] || return 1
-    done
-
-    return 0
-}
-
-download_database() {
-    local db_dir="$1"
-    local suffix=""
-    local file=""
-    local url=""
-
-    mkdir -p "${db_dir}"
-    for suffix in "${DB_SUFFIXES[@]}"; do
-        file="${DB_PREFIX}.${suffix}"
-        url="${DB_BASE_URL}/${file}"
-        printf 'Downloading %s\n' "${file}" >&2
-        wget -q --show-progress -O "${db_dir}/${file}" "${url}"
-    done
+    # The resolver is needed only for the deprecated unprofiled curated layout.
+    python3 "${DATABASE_MANAGER}" resolve \
+        --root "${db_dir}" \
+        --profile "${profile}" \
+        --model RF00177 \
+        >/dev/null 2>&1
 }
 
 ensure_database() {
     local db_dir="$1"
+    local profile="$2"
 
-    if database_ready "${db_dir}"; then
-        printf 'Database ready at %s\n' "${db_dir}" >&2
+    if database_ready "${db_dir}" "${profile}"; then
+        printf 'Database profile %s ready at %s\n' "${profile}" "${db_dir}" >&2
         return
     fi
 
-    printf 'Database files not found in %s\n' "${db_dir}" >&2
-    download_database "${db_dir}"
-    printf 'Database ready at %s\n' "${db_dir}" >&2
+    printf 'Database profile %s not found in %s\n' "${profile}" "${db_dir}" >&2
+    python3 "${DATABASE_MANAGER}" install \
+        --root "${db_dir}" \
+        --profile "${profile}"
+    if ! database_ready "${db_dir}" "${profile}"; then
+        printf 'Installed database profile failed validation: %s/%s\n' \
+            "${db_dir}" "${profile}" >&2
+        return 1
+    fi
+    printf 'Database profile %s ready at %s\n' "${profile}" "${db_dir}" >&2
 }
 
 setup_database() {
     local db_dir=""
+    local profile="${DEFAULT_DB_PROFILE}"
     db_dir=$(resolve_database_path "$@")
-    ensure_database "${db_dir}"
+    profile=$(read_cli_database_profile "$@" 2>/dev/null || printf '%s\n' "${profile}")
+    ensure_database "${db_dir}" "${profile}"
 }
 
 run_pipeline() {
     local db_dir=""
+    local profile="${DEFAULT_DB_PROFILE}"
+    local nextflow_args=()
 
-    if has_help_flag "$@"; then
+    if has_information_flag "$@"; then
         nextflow run "${PROJECT_DIR}/main.nf" "$@"
         return
     fi
 
     db_dir=$(resolve_database_path "$@")
-    ensure_database "${db_dir}"
+    profile=$(read_cli_database_profile "$@" 2>/dev/null || printf '%s\n' "${profile}")
+    ensure_database "${db_dir}" "${profile}"
 
-    if cli_has_database_path "$@"; then
+    if cli_has_database_path "$@" && cli_has_database_profile "$@"; then
         nextflow run "${PROJECT_DIR}/main.nf" "$@"
         return
     fi
 
-    nextflow run "${PROJECT_DIR}/main.nf" --database_path "${db_dir}" "$@"
+    nextflow_args=(nextflow run "${PROJECT_DIR}/main.nf")
+    if ! cli_has_database_path "$@"; then
+        nextflow_args+=(--database_path "${db_dir}")
+    fi
+    if ! cli_has_database_profile "$@"; then
+        nextflow_args+=(--database_profile "${profile}")
+    fi
+    "${nextflow_args[@]}" "$@"
 }
 
 run_smoke() {
@@ -191,4 +242,6 @@ run_smoke() {
     run_pipeline --querydir "${smoke_dir}" --outdir "${PROJECT_DIR}/results/smoke" --threads_per_job 1 "$@"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

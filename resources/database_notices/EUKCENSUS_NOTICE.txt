@@ -1,0 +1,21 @@
+Eukcensus dataset notice
+
+The IMG profile contains transformed records from the supporting data for
+"Global Environmental Genomics Reveals Vast Uncultivated Protist Diversity and
+Taxonomic Blind Spots," Zenodo record 20653200. The dataset is licensed under
+Creative Commons Attribution 4.0 International (CC BY 4.0).
+
+Dataset: https://doi.org/10.5281/zenodo.20653200
+License: https://creativecommons.org/licenses/by/4.0/
+Related preprint: https://doi.org/10.1101/2025.03.26.645542
+
+Creators: Miguel Fernando Romero Gutierrez, Arianna I. Krinos, Xyrus
+Maurer-Alcala, John A. Burns, Ramunas Stepanauskas, Tanja Woyke, and Frederik
+Schulz.
+
+The IMG profile retains only `IMG_` sequence records from the composite 16S and
+18S FASTA files. It replaces embedded reference records with the same SILVA
+138.2 and PR2 5.1.1 sources used by the curated profile. IMG taxonomy is derived
+against those updated references. Distributed IMG metadata contains only
+`taxon_oid`, `latitude`, and `longitude`; project, contact, comment, and other
+source fields are excluded.

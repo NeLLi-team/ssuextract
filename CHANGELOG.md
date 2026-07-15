@@ -1,42 +1,35 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+## [1.1.0] - 2026-07-11
 
-## [2.0.0] - 2024-06-06
+### Fixed
 
-### 🚀 Major Release: Migration to Nextflow
+- Extract complete 1-based inclusive `cmsearch` intervals on both strands. Earlier
+  versions omitted one nucleotide from every extracted interval.
+- Retain FASTA records whose headers contain descriptions.
+- Retain the final record in legacy sequence maps without a trailing newline.
+- Produce valid empty summaries when no covariance-model hits pass filtering.
+- Accept absolute query, model, database, and output paths.
 
-This is a major release that transitions the ssuextract pipeline from Snakemake to Nextflow.
+### Changed
 
-#### ✨ New Features
-- **Complete pipeline rewrite using Nextflow** - Modern, scalable workflow management
-- **Enhanced workflow structure** - Improved modularity and maintainability
-- **Updated covariance models** - Added RF00177.cm and RF01960.cm resources
-- **Comprehensive documentation** - Updated README with Nextflow-specific instructions
-- **Improved script functionality** - Enhanced get_cmstats.py and other processing scripts
+- Replace the multi-script temporary-directory pipeline with typed hit parsing and
+  four explicit Nextflow processes.
+- Parse each BLAST result once and select the highest-bit-score annotation.
+- Generate detailed and category summaries from one canonical metadata stream.
+- Sort final tables and merged BLAST output deterministically.
+- Publish only owned artifacts; input assemblies are no longer copied into results.
+- Validate identifiers, numeric parameters, covariance-model lengths, sequence
+  references, and BLAST database files before or during processing.
+- Track the resolved Pixi environment and test Linux in continuous integration.
 
-#### 🔄 Breaking Changes
-- **Pipeline engine changed from Snakemake to Nextflow**
-- **Configuration format updated** - Now uses Nextflow config syntax
-- **Command line interface changed** - Use `nextflow run main.nf` instead of `snakemake`
-- **Dependencies updated** - See pixi.toml for current requirements
+### Removed
 
-#### 📁 Repository Structure Changes
-- **Main branch** - Now contains the Nextflow implementation
-- **ssuextract-snk branch** - Contains the legacy Snakemake implementation for reference
+- Remove the legacy `cmprocessing.py`, `cmsearchout_extract_by_position_size.py`,
+  `get_cmstats.py`, `get_table.py`, and `rename_fnaheaders.py` stages.
 
-#### 🛠️ Migration Guide
-For users migrating from the Snakemake version:
-1. Update your environment using the new pixi.toml
-2. Replace Snakemake commands with Nextflow equivalents
-3. Update configuration files to use Nextflow syntax
-4. Refer to the updated README.md for detailed usage instructions
+## [1.0.0] - 2025-06-06
 
-#### 📋 Legacy Support
-The previous Snakemake implementation is preserved in the `ssuextract-snk` branch and remains available for users who need to continue using the Snakemake version.
-
----
-
-## [1.x.x] - Previous Versions
-
-Previous versions used Snakemake as the workflow engine. For historical changes, please refer to the `ssuextract-snk` branch.
+- Migrate the pipeline from Snakemake to Nextflow.
+- Add the RF00177 and RF01960 covariance models.
+- Preserve the former Snakemake implementation on the `ssuextract-snk` branch.
