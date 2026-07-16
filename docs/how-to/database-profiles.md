@@ -1,7 +1,7 @@
 # Install and select database profiles
 
-The `curated` profile is the default. The `img` profile uses the same current
-SILVA and PR2 references and adds IMG-derived 16S and 18S sequences.
+The `curated` profile is the default. The `img` profile uses the same SILVA
+138.2 and PR2 5.1.1 references and adds IMG-derived 16S and 18S sequences.
 
 ## Install the curated profile
 

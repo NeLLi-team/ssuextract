@@ -1,36 +1,18 @@
-<div class="ssue-hero" markdown>
+# SSUextract
 
-# Find and classify 16S and 18S rRNA
+SSUextract searches assembled contigs for 16S and 18S rRNA. It extracts each
+complete Infernal hit interval and assigns taxonomy with the reference database
+for that marker.
 
-SSUextract detects small-subunit ribosomal RNA in assembled contigs, extracts
-the complete hit interval, and assigns taxonomy with a marker-specific reference
-database.
+[Run the bundled example](tutorials/first-run.md) ·
+[Parameters](reference/cli.md) ·
+[Output files](reference/outputs.md)
 
-[Run the tutorial](tutorials/first-run.md){ .md-button .md-button--primary }
-[View the parameters](reference/cli.md){ .md-button }
+## Pipeline
 
-</div>
+[![SSUextract pipeline from assembly FASTA through Infernal detection, interval extraction, marker-specific BLAST, and result files](assets/figures/pipeline-architecture.svg)](assets/figures/pipeline-architecture.svg){ .docs-figure }
 
-<div class="metric-grid" markdown>
-<div class="metric-card" markdown>
-<strong>16S + 18S</strong>
-<span>marker-specific search</span>
-</div>
-<div class="metric-card" markdown>
-<strong>609,298</strong>
-<span>unique curated sequences</span>
-</div>
-<div class="metric-card" markdown>
-<strong>55–73 s</strong>
-<span>median runtime, bundled example</span>
-</div>
-<div class="metric-card" markdown>
-<strong>2.8 GiB</strong>
-<span>median maximum reported RSS</span>
-</div>
-</div>
-
-## Start with a complete example
+## Run the bundled example
 
 ```bash
 git clone https://github.com/NeLLi-team/ssuextract.git
@@ -44,7 +26,7 @@ pixi run example
 writes extracted sequences, per-hit annotations, category counts, and Nextflow
 reports under `results/smoke/`.
 
-## What the pipeline does
+## Steps
 
 1. Infernal searches each assembly with 16S and 18S covariance models.
 2. SSUextract keeps accepted coordinates and extracts the complete interval on
@@ -53,5 +35,5 @@ reports under `results/smoke/`.
 4. The workflow writes extracted FASTA files, one row per hit, category counts,
    and execution reports.
 
-[See the pipeline diagram](explanation/pipeline.md) or
-[run your assemblies](how-to/run-assemblies.md).
+[Pipeline details](explanation/pipeline.md) ·
+[Run assembled genomes or metagenomes](how-to/run-assemblies.md)
