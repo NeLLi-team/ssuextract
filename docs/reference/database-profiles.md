@@ -9,7 +9,31 @@ RF00177 routes to the 16S index. RF01960 routes to the 18S index. The mapping is
 stored in `config/model_markers.json`.
 
 Database packages use a version independent of the SSUextract application.
-The current database profile version is `1.0.0`.
+The version is stored in each profile's `manifest.json` and printed before a
+pipeline run.
+
+## Installation and update checks
+
+`pixi run setup` lists each profile with the version and compressed download
+size from `config/database_catalog.json`. The selected path and profile are
+stored as `database_path` and `database_profile` in `config/local.config`.
+
+The installer accepts a Zenodo release only when all of these values agree:
+
+- the configured concept record and the latest release record;
+- the exact four-file release inventory and Zenodo MD5 values;
+- the release manifest, archive sizes, and archive SHA-256 values;
+- the two entries in `SHA256SUMS`.
+
+Archive extraction takes place in a staging directory. The profile becomes the
+installed profile after its manifest files and BLAST indexes validate. A failed
+replacement restores the installed profile.
+
+`pixi run ssuextract` checks Zenodo before starting Nextflow. The check has a
+five-second total timeout. A valid installed profile remains usable when the
+check times out, Zenodo is unavailable, or the remote release contract fails
+validation. Updates require `pixi run setup -- --update` or confirmation in
+interactive setup.
 
 ## Runtime files
 

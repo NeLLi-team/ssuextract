@@ -16,6 +16,10 @@ pixi run setup
 pixi run example
 ```
 
+`pixi run setup` lists the `curated` and `img` profiles with their database
+versions and download sizes. Select a profile by number or name. The installer
+reports download, extraction, and validation progress.
+
 Documentation: [tutorial](https://nelli-team.github.io/ssuextract/tutorials/first-run/),
 [parameters](https://nelli-team.github.io/ssuextract/reference/cli/),
 [output files](https://nelli-team.github.io/ssuextract/reference/outputs/), and

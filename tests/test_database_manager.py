@@ -33,6 +33,7 @@ def write_profile(
     artifact_bytes: int | None = None,
     artifact_sha256: str | None = None,
     artifact_path: str = "blast/ssu.unusual",
+    version: str = "test-1",
 ) -> Path:
     directory = root / profile
     artifact = directory / artifact_path
@@ -43,7 +44,7 @@ def write_profile(
         {
             "schema_version": 1,
             "profile": profile,
-            "version": "test-1",
+            "version": version,
             "artifacts": [
                 {
                     "path": artifact_path,
@@ -86,6 +87,7 @@ class DatabaseManagerTests(unittest.TestCase):
     def test_repository_catalog_has_coherent_release_state(self) -> None:
         catalog = manager.load_catalog(REPO / "config" / "database_catalog.json")
         self.assertEqual(set(catalog["profiles"]), {"curated", "img"})
+        self.assertEqual(catalog["zenodo"]["concept_record_id"], "21367798")
         states = []
         for profile in ("curated", "img"):
             archive = catalog["profiles"][profile]["archive"]
@@ -98,6 +100,23 @@ class DatabaseManagerTests(unittest.TestCase):
                     r"\.tar\.zst\?download=1$",
                 )
         self.assertIn(states, ([False, False], [True, True]))
+
+    def test_tutorial_profile_versions_and_sizes_match_catalog(self) -> None:
+        catalog = manager.load_catalog(REPO / "config" / "database_catalog.json")
+        tutorial = (REPO / "docs" / "tutorials" / "first-run.md").read_text()
+        for number, profile in enumerate(("curated", "img"), start=1):
+            entry = catalog["profiles"][profile]
+            expected = (
+                f"{number}) {profile} v{entry['version']} "
+                f"({manager._human_size(entry['archive']['bytes'])})"
+            )
+            self.assertIn(expected, tutorial)
+
+    def test_human_size_formats_binary_unit_boundaries(self) -> None:
+        self.assertEqual(manager._human_size(1023), "1023 B")
+        self.assertEqual(manager._human_size(1024), "1.0 KiB")
+        self.assertEqual(manager._human_size(1024**2), "1.0 MiB")
+        self.assertEqual(manager._human_size(1024**3), "1.0 GiB")
 
     def test_marker_override_extends_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -200,6 +219,112 @@ class DatabaseManagerTests(unittest.TestCase):
                     1,
                     sha256(b"x"),
                 )
+
+    def test_download_reports_visible_progress(self) -> None:
+        data = b"x" * 100
+        messages: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            manager.download_archive(
+                "https://example.org/profile.tar.gz",
+                Path(tmp) / "profile.tar.gz",
+                len(data),
+                sha256(data),
+                opener=lambda url, timeout: FakeResponse(data),
+                progress=messages.append,
+            )
+        self.assertIn("Downloading archive: 0% of 100 B", messages)
+        self.assertTrue(any("Downloading archive: 100%" in message for message in messages))
+
+    @mock.patch.object(manager, "discover_latest_catalog")
+    def test_update_check_reports_newer_verified_release(self, discover) -> None:
+        discover.return_value = {
+            "profiles": {"curated": {"version": "1.1.0"}}
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_profile(root, version="1.0.0")
+            result = manager.check_profile_update(root, "curated")
+        self.assertEqual(result["status"], "update_available")
+        self.assertEqual(result["installed"], "1.0.0")
+        self.assertEqual(result["latest"], "1.1.0")
+
+    @mock.patch.object(manager, "discover_latest_catalog")
+    def test_update_check_reports_current_and_installed_newer_states(self, discover) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_profile(root, version="1.1.0")
+            for latest, expected in (("1.1.0", "current"), ("1.0.0", "installed_newer")):
+                with self.subTest(latest=latest):
+                    discover.return_value = {
+                        "profiles": {"curated": {"version": latest}}
+                    }
+                    result = manager.check_profile_update(root, "curated")
+                    self.assertEqual(result["status"], expected)
+
+    @mock.patch.object(manager, "discover_latest_catalog")
+    def test_latest_install_catalog_accepts_newer_verified_release(self, discover) -> None:
+        discovered = {
+            "profiles": {"curated": {"version": "1.1.0", "archive": {}}}
+        }
+        discover.return_value = discovered
+        messages: list[str] = []
+        selected = manager._catalog_for_install(
+            manager.DEFAULT_CATALOG,
+            "curated",
+            latest=True,
+            timeout=1,
+            opener=mock.Mock(),
+            progress=messages.append,
+        )
+        self.assertIs(selected, discovered)
+        self.assertIn("Latest verified Zenodo database release: v1.1.0", messages)
+
+    @mock.patch.object(manager, "discover_latest_catalog")
+    def test_latest_install_catalog_never_downgrades_bundled_release(self, discover) -> None:
+        discover.return_value = {
+            "profiles": {"curated": {"version": "0.9.0", "archive": {}}}
+        }
+        selected = manager._catalog_for_install(
+            manager.DEFAULT_CATALOG,
+            "curated",
+            latest=True,
+            timeout=1,
+            opener=mock.Mock(),
+            progress=None,
+        )
+        self.assertEqual(selected["profiles"]["curated"]["version"], "1.0.0")
+
+    @mock.patch.object(
+        manager,
+        "discover_latest_catalog",
+        side_effect=manager.ReleaseDiscoveryError("offline"),
+    )
+    def test_latest_install_catalog_falls_back_when_zenodo_is_unavailable(self, discover) -> None:
+        messages: list[str] = []
+        selected = manager._catalog_for_install(
+            manager.DEFAULT_CATALOG,
+            "curated",
+            latest=True,
+            timeout=1,
+            opener=mock.Mock(),
+            progress=messages.append,
+        )
+        self.assertEqual(selected["profiles"]["curated"]["version"], "1.0.0")
+        self.assertTrue(any("using bundled release metadata" in message for message in messages))
+
+    @mock.patch.object(
+        manager,
+        "discover_latest_catalog",
+        side_effect=manager.ReleaseDiscoveryError("offline"),
+    )
+    def test_update_check_is_nonfatal_when_zenodo_is_unavailable(self, discover) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_profile(root, version="1.0.0")
+            result = manager.check_profile_update(root, "curated")
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["installed"], "1.0.0")
+        self.assertEqual(result["reason"], "offline")
 
     def test_interrupted_backup_is_restored_before_install_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, self.assertWarns(RuntimeWarning):

@@ -1,9 +1,15 @@
 {
   "schema_version": 1,
   "default_profile": "curated",
+  "zenodo": {
+    "record_id": 21367799,
+    "concept_record_id": "21367798",
+    "api_url": "https://zenodo.org/api/records/21367799"
+  },
   "profiles": {
     "curated": {
       "version": "1.0.0",
+      "description": "PR2 5.1.1 and SILVA 138.2",
       "archive": {
         "url": "https://zenodo.org/records/21367799/files/ssuextract-db-curated-v1.0.0.tar.zst?download=1",
         "bytes": 362333480,
@@ -12,6 +18,7 @@
     },
     "img": {
       "version": "1.0.0",
+      "description": "Curated profile plus IMG 16S and 18S sequences",
       "archive": {
         "url": "https://zenodo.org/records/21367799/files/ssuextract-db-img-v1.0.0.tar.zst?download=1",
         "bytes": 869200950,

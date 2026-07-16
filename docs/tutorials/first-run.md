@@ -1,6 +1,6 @@
 # Run the bundled example
 
-This tutorial uses the default `curated` database profile.
+Select the `curated` database profile for this tutorial.
 
 ## Install the pinned environment
 
@@ -22,8 +22,19 @@ pixi run ssuextract -- --version
 pixi run setup
 ```
 
-Press Enter to accept `resources/database`, or enter another writable directory.
-The installer checks the archive and the files listed in its manifest.
+Setup lists both database profiles:
+
+```text
+Available database profiles:
+  1) curated v1.0.0 (345.5 MiB) - PR2 5.1.1 and SILVA 138.2
+  2) img v1.0.0 (828.9 MiB) - Curated profile plus IMG 16S and 18S sequences
+Database profile [1, curated]:
+```
+
+Press Enter to select `curated`. Press Enter again to accept
+`resources/database`, or enter another writable directory. The terminal reports
+the download percentage, extraction, file validation, and the installed
+database version.
 
 ## Run the bundled assembly
 
