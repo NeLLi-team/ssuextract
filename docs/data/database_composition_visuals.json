@@ -1,0 +1,45 @@
+{
+  "outputs": [
+    {
+      "bytes": 182319,
+      "path": "docs/assets/figures/database-taxonomy-resolution.png",
+      "sha256": "4af102a40b6f7129999af7dd295306561aaf4bcedbf6f7ae833c4a77705cf11e"
+    },
+    {
+      "bytes": 50501,
+      "path": "docs/assets/figures/database-taxonomy-resolution.svg",
+      "sha256": "e042c51e2d04b7fe579aa5abb4f92fd8473ba543b92b9fd676ecee8a49e6269f"
+    },
+    {
+      "bytes": 644125,
+      "path": "docs/assets/figures/database-taxonomy-lineages.png",
+      "sha256": "c37f1b02178d53338d0b948abf45ae0c8f61fe242450545ed55f8066d23ac24c"
+    },
+    {
+      "bytes": 99899,
+      "path": "docs/assets/figures/database-taxonomy-lineages.svg",
+      "sha256": "e2cccf068150c32d7712ac4459ca673c6e7a144df588247c5c0543e009f6e60e"
+    },
+    {
+      "bytes": 682158,
+      "path": "docs/assets/figures/img-ssu-locations.png",
+      "sha256": "a3064bbe6f863f4593ee62296297a9265632dae7555527ae488060987e3face9"
+    },
+    {
+      "bytes": 3234143,
+      "path": "docs/assets/figures/img-ssu-locations.svg",
+      "sha256": "4c14bc15a957ecb4b699e743b7bbfa3946573963c30fb32d3b73391a972e36f8"
+    },
+    {
+      "bytes": 5245018,
+      "path": "docs/assets/figures/img-ssu-locations.html",
+      "sha256": "e10d11d317f8e2b91acf974a01d96ca1f2549119182a2910aacbcfd2734ed1b6"
+    }
+  ],
+  "schema_version": 2,
+  "source": {
+    "bytes": 7417,
+    "path": "docs/data/database_composition_provenance.json",
+    "sha256": "a0f53903113b23d5b4c5f70e49f880bb537b97616ca81b7daa82788ad7897248"
+  }
+}

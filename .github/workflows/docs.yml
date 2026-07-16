@@ -30,7 +30,23 @@ jobs:
           docs/assets/figures/pipeline-architecture.png
           docs/assets/figures/example-performance.svg
           docs/assets/figures/example-performance.png
+          docs/assets/figures/database-taxonomy-resolution.svg
+          docs/assets/figures/database-taxonomy-resolution.png
+          docs/assets/figures/database-taxonomy-lineages.svg
+          docs/assets/figures/database-taxonomy-lineages.png
+          docs/assets/figures/img-ssu-locations.svg
+          docs/assets/figures/img-ssu-locations.png
+          docs/assets/figures/img-ssu-locations.html
+          docs/data/database_composition.tsv
+          docs/data/database_sources.tsv
+          docs/data/database_taxonomy_resolution.tsv
+          docs/data/database_taxonomy_lineages.tsv
+          docs/data/img_taxon_locations.parquet
+          docs/data/img_location_sites.parquet
+          docs/data/database_composition_provenance.json
+          docs/data/database_composition_visuals.json
           notebooks/example_performance.ipynb
+          notebooks/database_composition.ipynb
       - run: pixi run --manifest-path docs-env/pixi.toml build
       - uses: actions/configure-pages@v6
         if: github.event_name == 'push'

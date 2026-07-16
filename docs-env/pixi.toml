@@ -13,9 +13,14 @@ ipykernel = ">=6,<7"
 matplotlib-base = ">=3.9,<4"
 pandas = ">=2.2,<3"
 numpy = ">=2,<3"
+duckdb = ">=1.4,<2"
+plotly = ">=6,<7"
+
+[pypi-dependencies]
+kaleido = ">=1,<2"
 
 [tasks]
 register-kernel = "python -m ipykernel install --user --name ssuextract-docs --display-name 'SSUextract docs (pixi)'"
 render-architecture = "python \"$PIXI_PROJECT_ROOT/../notebooks/pipeline_architecture.py\""
-execute-notebooks = "jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.kernel_name=ssuextract-docs --ExecutePreprocessor.timeout=300 \"$PIXI_PROJECT_ROOT/../notebooks/example_performance.ipynb\" && python \"$PIXI_PROJECT_ROOT/../notebooks/strip_execution_metadata.py\""
+execute-notebooks = "jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.kernel_name=ssuextract-docs --ExecutePreprocessor.timeout=300 \"$PIXI_PROJECT_ROOT/../notebooks/example_performance.ipynb\" && jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.kernel_name=ssuextract-docs --ExecutePreprocessor.timeout=300 \"$PIXI_PROJECT_ROOT/../notebooks/database_composition.ipynb\" && python \"$PIXI_PROJECT_ROOT/../notebooks/strip_execution_metadata.py\" \"$PIXI_PROJECT_ROOT/../notebooks/example_performance.ipynb\" \"$PIXI_PROJECT_ROOT/../notebooks/database_composition.ipynb\""
 build = "mkdocs build --strict -f \"$PIXI_PROJECT_ROOT/../mkdocs.yml\""
