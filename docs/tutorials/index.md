@@ -1,6 +1,4 @@
 # Tutorial
 
-Follow the [first SSUextract run](first-run.md) to install the pinned environment,
-validate a reference profile, analyze one bundled assembly, and inspect the main
-outputs.
-
+The [bundled example](first-run.md) installs the software and reference database,
+analyzes one assembly, and checks the output files.

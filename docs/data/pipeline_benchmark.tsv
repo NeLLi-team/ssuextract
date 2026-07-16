@@ -1,9 +1,0 @@
-implementation	trial	warmup	elapsed_seconds	peak_rss_kb	user_seconds	system_seconds
-620b1a6 baseline	0	true	96.70	2938652	390.36	9.87
-620b1a6 baseline	1	false	96.34	2806316	391.43	10.00
-620b1a6 baseline	2	false	96.25	2808044	390.26	10.08
-620b1a6 baseline	3	false	96.86	2938668	391.27	9.91
-1.1.0 candidate	0	true	95.43	2935152	391.43	9.23
-1.1.0 candidate	1	false	95.38	2808032	390.56	9.23
-1.1.0 candidate	2	false	96.69	2785888	393.48	9.45
-1.1.0 candidate	3	false	95.63	2937232	392.00	9.26

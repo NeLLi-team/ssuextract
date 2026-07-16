@@ -14,9 +14,9 @@ pixi run setup
 pixi run example
 ```
 
-The [SSUextract documentation](https://nelli-team.github.io/ssuextract/) contains
-the tutorial, database instructions, parameter reference, output schemas,
-taxonomy policy, and measured benchmarks.
+See the [SSUextract documentation](https://nelli-team.github.io/ssuextract/) for
+the tutorial, parameters, output files, database profiles, taxonomy sources,
+and example runtime and memory.
 
 Run `pixi run ssuextract -- --help` for the command-line summary. SSUextract is
 distributed under the [MIT license](LICENSE).

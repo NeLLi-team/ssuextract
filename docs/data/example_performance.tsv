@@ -1,0 +1,9 @@
+profile	trial	warmup	elapsed_seconds	peak_rss_kb
+curated	0	true	57.35	2933244
+curated	1	false	55.01	2792764
+curated	2	false	55.04	2933888
+curated	3	false	54.80	2921780
+img	0	true	75.88	2780780
+img	1	false	72.60	2791448
+img	2	false	72.73	2924328
+img	3	false	71.73	2934032

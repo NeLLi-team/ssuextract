@@ -1,27 +1,27 @@
 # Pipeline design
 
-SSUextract separates detection, extraction, annotation, and reporting so each
-stage owns one representation and one set of output files.
+SSUextract detects candidate regions, extracts their sequences, selects a
+marker-specific database, and reports taxonomy.
 
-```mermaid
-flowchart LR
-    A[Assembly FASTA] --> B[Infernal search]
-    B --> C[Typed hit table]
-    C --> D[Complete interval extraction]
-    D --> E{Marker route}
-    E -->|RF00177| F[16S BLAST index]
-    E -->|RF01960| G[18S BLAST index]
-    F --> H[Taxonomy selection]
-    G --> H
-    H --> I[Detailed and category summaries]
-```
+[![SSUextract pipeline from assembly FASTA through Infernal detection, interval extraction, marker-specific BLAST, and result files](../assets/figures/pipeline-architecture.svg)](../assets/figures/pipeline-architecture.svg){ .docs-figure }
+
+*Click the figure to open the full-size SVG.*
+
+## Detection and extraction
 
 Infernal supplies 1-based inclusive coordinates. The extraction stage retains
 both endpoints and reverse-complements negative-strand intervals. The typed hit
 table carries sample, model, contig, coordinates, strand, and sequence identity
-into later stages without reconstructing metadata from filenames.
+into annotation.
 
-Marker routing keeps 16S queries out of the 18S database and 18S queries out of
-the 16S database. Final reporting scans each BLAST result once and sorts emitted
-rows for deterministic tabular output.
+## Marker-specific annotation
 
+RF00177 sequences use the 16S BLAST index. RF01960 sequences use the 18S index.
+The selected `curated` or `img` profile supplies both indexes and their taxonomy
+tables.
+
+## Results
+
+The workflow writes extracted FASTA files, parsed hit tables, BLAST results, a
+per-hit summary, category counts, and Nextflow execution reports. See
+[output files](../reference/outputs.md) for paths and contents.

@@ -15,9 +15,9 @@ pixi run setup -- --database_profile curated
 pixi run setup -- --database_profile img
 ```
 
-The installer resolves the archive from `config/database_catalog.json`, checks
-its byte count and SHA-256 digest, validates the internal manifest, and publishes
-the profile under the configured database root.
+The installer downloads the archive listed in `config/database_catalog.json`,
+checks its size and SHA-256 digest, validates the manifest, and installs the
+profile under the configured database root.
 
 ## Select a profile for one run
 
@@ -36,7 +36,6 @@ pixi run ssuextract -- \
   --database_profile curated
 ```
 
-The root must contain the selected profile directory and a valid
-`manifest.json`. See the [database reference](../reference/database-profiles.md)
-for its contents and taxonomy contract.
-
+The root must contain the selected profile directory and its `manifest.json`.
+See [database profiles](../reference/database-profiles.md) for the installed
+files and taxonomy sources.

@@ -1,7 +1,6 @@
-# First SSUextract run
+# Run the bundled example
 
-This tutorial installs SSUextract, runs one bundled assembly, and checks the
-result. It uses the default `curated` database profile.
+This tutorial uses the default `curated` database profile.
 
 ## Install the pinned environment
 
@@ -11,7 +10,7 @@ cd ssuextract
 pixi install --frozen
 ```
 
-Pixi resolves the environment from `pixi.lock`. Confirm the entry point:
+Check the installed version:
 
 ```bash
 pixi run ssuextract -- --version
@@ -24,8 +23,7 @@ pixi run setup
 ```
 
 Press Enter to accept `resources/database`, or enter another writable directory.
-The installer verifies the downloaded archive checksum and every file listed in
-the profile manifest before the profile becomes available.
+The installer checks the archive and the files listed in its manifest.
 
 ## Run the bundled assembly
 
@@ -33,7 +31,7 @@ the profile manifest before the profile becomes available.
 pixi run example
 ```
 
-The run creates `results/smoke/`. Check the two principal reports:
+The run creates `results/smoke/`. Check the two summary files:
 
 ```bash
 test -s results/smoke/cmsearch_summary.tsv
@@ -52,7 +50,6 @@ find results/smoke/extracted -name '*.fna' -size +0 -print
 Each FASTA record spans the complete 1-based inclusive interval reported by
 Infernal. Reverse-strand hits are reverse-complemented after interval extraction.
 
-You have completed the standard SSUextract path. Continue with
-[assembled genomes](../how-to/run-assemblies.md) or inspect the
-[output reference](../reference/outputs.md).
-
+To use other FASTA files, continue with
+[run assembled genomes or metagenomes](../how-to/run-assemblies.md). See the
+[output reference](../reference/outputs.md) for every result path.

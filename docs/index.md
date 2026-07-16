@@ -3,8 +3,8 @@
 # Find and classify 16S and 18S rRNA
 
 SSUextract detects small-subunit ribosomal RNA in assembled contigs, extracts
-the complete Infernal hit interval, and assigns taxonomy against a database
-routed to the marker type.
+the complete hit interval, and assigns taxonomy with a marker-specific reference
+database.
 
 [Run the tutorial](tutorials/first-run.md){ .md-button .md-button--primary }
 [View the parameters](reference/cli.md){ .md-button }
@@ -21,12 +21,12 @@ routed to the marker type.
 <span>unique curated sequences</span>
 </div>
 <div class="metric-card" markdown>
-<strong>60.1% smaller</strong>
-<span>curated installed footprint</span>
+<strong>55–73 s</strong>
+<span>median runtime, bundled example</span>
 </div>
 <div class="metric-card" markdown>
-<strong>0.7%</strong>
-<span>pipeline runtime difference</span>
+<strong>2.8 GiB</strong>
+<span>median maximum reported RSS</span>
 </div>
 </div>
 
@@ -40,19 +40,18 @@ pixi run setup
 pixi run example
 ```
 
-`pixi run setup` installs the default `curated` database profile and records its
-location in `config/local.config`. The example writes extracted FASTA records,
-per-hit tables, taxonomy summaries, and Nextflow execution reports under
-`results/smoke/`.
+`pixi run setup` installs the default `curated` database profile. The example
+writes extracted sequences, per-hit annotations, category counts, and Nextflow
+reports under `results/smoke/`.
 
-## Choose the page that matches the task
+## What the pipeline does
 
-- Follow the [first-run tutorial](tutorials/first-run.md) to learn the complete
-  analysis path.
-- Use the [how-to guides](how-to/run-assemblies.md) for your assemblies or an
-  alternate database profile.
-- Consult the [reference](reference/cli.md) for parameters, file schemas, and
-  database contracts.
-- Read the [explanations](explanation/pipeline.md) for workflow, taxonomy, and
-  benchmark rationale.
+1. Infernal searches each assembly with 16S and 18S covariance models.
+2. SSUextract keeps accepted coordinates and extracts the complete interval on
+   the reported strand.
+3. Each sequence is searched against the 16S or 18S index selected by its model.
+4. The workflow writes extracted FASTA files, one row per hit, category counts,
+   and execution reports.
 
+[See the pipeline diagram](explanation/pipeline.md) or
+[run your assemblies](how-to/run-assemblies.md).

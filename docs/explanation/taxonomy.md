@@ -1,18 +1,14 @@
-# Taxonomy policy
+# Taxonomy sources and selection
 
-SILVA and PR2 serve different domains and use different rank systems.
-SSUextract retains those native systems instead of flattening both into a shared
-set of rank names.
+SSUextract stores the native SILVA and PR2 taxonomy strings. It does not map
+their ranks onto a shared hierarchy.
 
-## Native authority
+## Preferred source
 
 - SILVA 138.2 supplies taxonomy for Bacteria and Archaea.
 - PR2 5.1.1 supplies eukaryotic nuclear and nucleomorph taxonomy.
-- PR2 host taxonomy describes plastid, apicoplast, and mitochondrial records;
-  the compartment is stored separately.
-
-This policy preserves PR2's fixed eukaryotic hierarchy and SILVA's prokaryotic
-lineage without inventing unsupported rank equivalences.
+- PR2 supplies the host taxonomy for plastid, apicoplast, and mitochondrial
+  records. The organelle compartment is stored separately.
 
 ## Exact cross-domain identity
 
@@ -25,19 +21,15 @@ such exact-sequence conflicts. SSUextract records:
 - an empty preferred taxonomy
 - all native alternatives in structured evidence
 
-The runtime annotation layer preserves this state when equal-best hits include
-the conflicted sequence.
+Equal-best runtime hits to such a sequence retain the ambiguous state.
 
 ## IMG-derived assignments
 
-Exact matches to a current SILVA or PR2 sequence retain the complete native
-taxonomy. Other IMG sequences can receive similarity-derived evidence. Cluster
-propagation is capped at domain because the source cluster construction and
-within-cluster taxonomic coherence are not documented well enough to support
-lower-rank propagation.
+Exact matches to SILVA or PR2 retain the complete native taxonomy. Other IMG
+sequences can receive similarity-derived assignments. Cluster-only assignments
+stop at domain; lower ranks are not propagated.
 
-The classifier evaluates candidate ties within 98% of the best bit score and
-requires at least 80% query coverage. It fetches one hit beyond the 500-candidate
-policy limit; a tied overflow backs the result off to a defensible rank or leaves
-it unclassified.
-
+The classifier retains candidate ties within 98% of the best bit score and
+requires at least 80% query coverage. It checks one hit beyond the 500-candidate
+limit; tied overflow results are assigned at a higher shared rank or left
+unclassified.

@@ -22,7 +22,15 @@ jobs:
           manifest-path: docs-env/pixi.toml
           frozen: true
       - run: pixi run --manifest-path docs-env/pixi.toml register-kernel
+      - run: pixi run --manifest-path docs-env/pixi.toml render-architecture
       - run: pixi run --manifest-path docs-env/pixi.toml execute-notebooks
+      - run: >-
+          git diff --exit-code --
+          docs/assets/figures/pipeline-architecture.svg
+          docs/assets/figures/pipeline-architecture.png
+          docs/assets/figures/example-performance.svg
+          docs/assets/figures/example-performance.png
+          notebooks/example_performance.ipynb
       - run: pixi run --manifest-path docs-env/pixi.toml build
       - uses: actions/configure-pages@v6
         if: github.event_name == 'push'

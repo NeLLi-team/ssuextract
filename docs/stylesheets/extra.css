@@ -46,9 +46,7 @@
   font-size: 0.78rem;
 }
 
-.jp-OutputArea-output img,
-.jp-OutputArea-output svg {
-  max-width: 100%;
-  height: auto;
+.md-typeset a.docs-figure > img {
+  display: block;
+  width: 100%;
 }
-

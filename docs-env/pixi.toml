@@ -7,7 +7,6 @@ platforms = ["linux-64"]
 [dependencies]
 python = ">=3.12,<3.13"
 mkdocs-material = ">=9.6,<10"
-mkdocs-jupyter = ">=0.25,<0.26"
 pymdown-extensions = ">=10,<11"
 nbconvert = ">=7,<8"
 ipykernel = ">=6,<7"
@@ -17,5 +16,6 @@ numpy = ">=2,<3"
 
 [tasks]
 register-kernel = "python -m ipykernel install --user --name ssuextract-docs --display-name 'SSUextract docs (pixi)'"
-execute-notebooks = "jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.kernel_name=ssuextract-docs --ExecutePreprocessor.timeout=300 \"$PIXI_PROJECT_ROOT/../docs/explanation/benchmarks.ipynb\""
+render-architecture = "python \"$PIXI_PROJECT_ROOT/../notebooks/pipeline_architecture.py\""
+execute-notebooks = "jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.kernel_name=ssuextract-docs --ExecutePreprocessor.timeout=300 \"$PIXI_PROJECT_ROOT/../notebooks/example_performance.ipynb\" && python \"$PIXI_PROJECT_ROOT/../notebooks/strip_execution_metadata.py\""
 build = "mkdocs build --strict -f \"$PIXI_PROJECT_ROOT/../mkdocs.yml\""

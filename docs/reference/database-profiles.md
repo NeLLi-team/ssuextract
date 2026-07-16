@@ -8,13 +8,12 @@
 RF00177 routes to the 16S index. RF01960 routes to the 18S index. The mapping is
 stored in `config/model_markers.json`.
 
-Database packages use their own semantic version. Profile version `1.0.0` is
-the first current-reference database release and is independent of the
-SSUextract application version.
+Database packages use a version independent of the SSUextract application.
+The current database profile version is `1.0.0`.
 
 ## Runtime files
 
-| Path | Contract |
+| Path | Contents |
 | --- | --- |
 | `manifest.json` | Profile identity, artifact paths, sizes, and SHA-256 digests. |
 | `provenance.json` | Source versions, build contracts, software versions, and source-tree fingerprints. |
@@ -32,6 +31,6 @@ runtime profile.
 
 ## Curated profile counts
 
-The validated build contains 609,298 unique exact sequences from 683,597 source
-records. The 16S index contains 416,021 sequences; the 18S index contains
-193,282. Exact sequences assigned across domains remain explicit conflicts.
+The `curated` profile contains 609,298 unique exact sequences from 683,597
+source records. The 16S index contains 416,021 sequences; the 18S index contains
+193,282. Exact sequences assigned across domains remain marked as conflicts.
