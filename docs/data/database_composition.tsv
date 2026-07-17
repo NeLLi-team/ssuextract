@@ -1,0 +1,28 @@
+profile	version	dimension	category	marker	count
+curated	1.0.1	total_unique_sequences	All		609298
+curated	1.0.1	marker_membership	16S		416016
+curated	1.0.1	marker_membership	16S;18S		5
+curated	1.0.1	marker_membership	18S		193277
+curated	1.0.1	source_records	PR2	16S	8684
+curated	1.0.1	source_records	PR2	18S	223358
+curated	1.0.1	source_records	SILVA	16S	451555
+curated	1.0.1	taxonomy_domain	Ambiguous		1650
+curated	1.0.1	taxonomy_domain	Archaea		20182
+curated	1.0.1	taxonomy_domain	Bacteria		388861
+curated	1.0.1	taxonomy_domain	Eukaryota		198605
+img	1.0.1	total_unique_sequences	All		1396949
+img	1.0.1	marker_membership	16S		1067335
+img	1.0.1	marker_membership	16S;18S		5
+img	1.0.1	marker_membership	18S		329609
+img	1.0.1	source_records	IMG	16S	839222
+img	1.0.1	source_records	IMG	18S	157958
+img	1.0.1	source_records	PR2	16S	8684
+img	1.0.1	source_records	PR2	18S	223358
+img	1.0.1	source_records	SILVA	16S	451555
+img	1.0.1	taxonomy_domain	Ambiguous		1650
+img	1.0.1	taxonomy_domain	Archaea		43767
+img	1.0.1	taxonomy_domain	Bacteria		857491
+img	1.0.1	taxonomy_domain	Eukaryota		288908
+img	1.0.1	taxonomy_domain	Unclassified		205133
+img	1.0.1	img_taxon_coordinates	Located		30349
+img	1.0.1	img_taxon_coordinates	Coordinates unavailable		2171

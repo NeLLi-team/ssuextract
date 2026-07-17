@@ -21,10 +21,10 @@ duckdb = ">=1.4,<2"      # selective taxonomy lookup from Parquet
 
 [tasks]
 # Download the default database
-download-db = { cmd = "bash scripts/pipeline_cli.sh setup", description = "Resolve the database path and download SILVA/PR2 if needed" }
+download-db = { cmd = "bash scripts/pipeline_cli.sh setup", description = "Select and install a database profile" }
 
 # Setup: resolve the database path and download the database
-setup = { cmd = "bash scripts/pipeline_cli.sh setup", description = "Interactive first-run setup for the default database" }
+setup = { cmd = "bash scripts/pipeline_cli.sh setup", description = "Select, install, or update a database profile" }
 
 # Run the full pipeline
 ssuextract = { cmd = "bash scripts/pipeline_cli.sh run", description = "Run the full pipeline with automatic database setup" }

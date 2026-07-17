@@ -94,7 +94,95 @@ class HeaderParserTests(unittest.TestCase):
 
     def test_pr2_organellar_domain_suffix_is_moved_to_compartment(self) -> None:
         taxonomy = ("Eukaryota:plas", *builder.parse_pr2_header(PR2_HEADER).taxonomy[1:])
-        self.assertEqual(builder.normalize_pr2_taxonomy(taxonomy)[0], "Eukaryota")
+        self.assertEqual(
+            builder.normalize_pr2_taxonomy(taxonomy, compartment="plastid")[0],
+            "Eukaryota",
+        )
+
+    def test_pr2_compartment_suffix_is_removed_from_every_rank(self) -> None:
+        taxonomy = tuple(
+            f"{taxon}:plas"
+            for taxon in (
+                "Eukaryota",
+                "Archaeplastida",
+                "Streptophyta",
+                "Streptophyta_X",
+                "Embryophyceae",
+                "Embryophyceae_X",
+                "Embryophyceae_XX",
+                "Silene",
+                "Silene_latifolia",
+            )
+        )
+        self.assertEqual(
+            builder.normalize_pr2_taxonomy(taxonomy, compartment="plastid"),
+            (
+                "Eukaryota",
+                "Archaeplastida",
+                "Streptophyta",
+                "Streptophyta_X",
+                "Embryophyceae",
+                "Embryophyceae_X",
+                "Embryophyceae_XX",
+                "Silene",
+                "Silene_latifolia",
+            ),
+        )
+
+    def test_pr2_suffix_must_match_compartment(self) -> None:
+        with self.assertRaisesRegex(builder.TaxonomyError, "requires compartment 'plastid'"):
+            builder.normalize_pr2_taxonomy(
+                ("Eukaryota:plas", "Archaeplastida:plas"),
+                compartment="nucleus",
+            )
+
+    def test_pr2_rejects_mixed_taxonomy_suffixes(self) -> None:
+        with self.assertRaisesRegex(builder.TaxonomyError, "mixed compartment suffixes"):
+            builder.normalize_pr2_taxonomy(
+                ("Eukaryota:plas", "Archaeplastida:mito"),
+                compartment="plastid",
+            )
+
+    def test_pr2_recognizes_every_compartment_suffix(self) -> None:
+        cases = {
+            "apic": "apicoplast",
+            "chro": "chromatophore",
+            "chrom": "chromatophore",
+            "mito": "mitochondria",
+            "nucl": "nucleomorph",
+            "plas": "plastid",
+        }
+        for suffix, compartment in cases.items():
+            with self.subTest(suffix=suffix):
+                self.assertEqual(
+                    builder.normalize_pr2_taxonomy(
+                        (f"Eukaryota:{suffix}", f"lineage:{suffix}"),
+                        compartment=compartment,
+                    ),
+                    ("Eukaryota", "lineage"),
+                )
+
+    def test_pr2_rejects_unknown_taxonomy_suffix(self) -> None:
+        with self.assertRaisesRegex(builder.TaxonomyError, "Unknown PR2 taxonomy suffix"):
+            builder.normalize_pr2_taxonomy(
+                ("Eukaryota:future", "lineage:future"),
+                compartment="plastid",
+            )
+
+    def test_pr2_rejects_repeated_taxonomy_suffix(self) -> None:
+        with self.assertRaisesRegex(builder.TaxonomyError, "Unknown PR2 taxonomy suffix"):
+            builder.normalize_pr2_taxonomy(
+                ("Eukaryota:plas:plas",),
+                compartment="plastid",
+            )
+
+    def test_pr2_accepts_clean_taxonomy_with_organelle_compartment(self) -> None:
+        self.assertEqual(
+            builder.normalize_pr2_taxonomy(
+                ("Eukaryota", "Archaeplastida"), compartment="plastid"
+            ),
+            ("Eukaryota", "Archaeplastida"),
+        )
 
     def test_silva_header_and_rank_aware_six_rank_path(self) -> None:
         parsed = builder.parse_silva_header(
@@ -255,8 +343,67 @@ class SequenceModelTests(unittest.TestCase):
         self.assertEqual(len(model.sequences), 1)
         self.assertEqual(model.sequences[0].markers, ("16S", "18S"))
 
+    def test_real_pr2_dual_marker_headers_keep_full_host_taxonomy(self) -> None:
+        plastid = (
+            "AB189069.42332.43801_U|16S_rRNA|plastid||Eukaryota:plas|"
+            "Archaeplastida:plas|Streptophyta:plas|Streptophyta_X:plas|"
+            "Embryophyceae:plas|Embryophyceae_X:plas|Embryophyceae_XX:plas|"
+            "Silene:plas|Silene_latifolia:plas"
+        )
+        nucleus = (
+            "QBIE01005410.154239.155708_U|18S_rRNA|nucleus||Eukaryota|"
+            "Archaeplastida|Streptophyta|Streptophyta_X|Embryophyceae|"
+            "Embryophyceae_X|Embryophyceae_XX|Silene|Silene_latifolia"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            fasta = Path(tmp) / "pr2.fasta"
+            fasta.write_text(
+                f">{plastid}\nATGC\n>{nucleus}\nATGC\n", encoding="utf-8"
+            )
+            records = list(
+                builder.iter_curated_pr2_records(fasta, source_version="5.1.1")
+            )
+        model = builder.build_deduplicated_model(records)
+        self.assertEqual(model.sequences[0].markers, ("16S", "18S"))
+        self.assertEqual(
+            model.preferred_taxonomy[0].taxonomy,
+            (
+                "Eukaryota",
+                "Archaeplastida",
+                "Streptophyta",
+                "Streptophyta_X",
+                "Embryophyceae",
+                "Embryophyceae_X",
+                "Embryophyceae_XX",
+                "Silene",
+                "Silene_latifolia",
+            ),
+        )
+        self.assertEqual(model.preferred_taxonomy[0].compartment, "mixed")
+        builder.validate_release(model)
+
 
 class TaxonomyPolicyTests(unittest.TestCase):
+    def test_missing_compartment_does_not_conflict_with_known_compartment(self) -> None:
+        preferred = builder.select_preferred_taxonomy(
+            "SSU_test",
+            [
+                assignment(
+                    "a",
+                    ("Eukaryota", "Archaeplastida"),
+                    "PR2",
+                    compartment="plastid",
+                ),
+                assignment(
+                    "b",
+                    ("Eukaryota", "Archaeplastida"),
+                    "PR2",
+                    compartment="",
+                ),
+            ],
+        )
+        self.assertEqual(preferred.compartment, "plastid")
+
     def test_same_priority_disagreement_uses_lca(self) -> None:
         preferred = builder.select_preferred_taxonomy(
             "SSU_test",
@@ -378,6 +525,150 @@ class TaxonomyPolicyTests(unittest.TestCase):
         )
         completed = builder.add_taxonomy_assignments(model, derived)
         builder.validate_release(completed)
+
+    def test_release_rejects_pr2_compartment_suffixes(self) -> None:
+        model = builder.build_deduplicated_model(
+            [
+                builder.PreparedSourceRecord(
+                    "PR2",
+                    "5.1.1",
+                    "pr2",
+                    PR2_HEADER,
+                    "ATGC",
+                    "18S",
+                    ("Eukaryota", "Archaeplastida:plas"),
+                    "PR2",
+                    "plastid",
+                )
+            ]
+        )
+        with self.assertRaisesRegex(
+            builder.ReleaseValidationError,
+            "PR2 compartment suffix remains in 1 normalized taxonomy assignments",
+        ):
+            builder.validate_release(model)
+
+    def test_release_rejects_preferred_domain_mismatch(self) -> None:
+        model = builder.build_deduplicated_model(
+            [
+                builder.PreparedSourceRecord(
+                    "PR2",
+                    "5.1.1",
+                    "pr2",
+                    PR2_HEADER,
+                    "ATGC",
+                    "18S",
+                    ("Eukaryota", "TSAR"),
+                    "PR2",
+                    "nucleus",
+                )
+            ]
+        )
+        preferred = model.preferred_taxonomy[0]
+        malformed = builder.DatabaseModel(
+            model.sequences,
+            model.source_records,
+            model.taxonomy_assignments,
+            (
+                builder.PreferredTaxonomy(
+                    preferred.sequence_id,
+                    preferred.reference_source,
+                    preferred.taxonomy,
+                    preferred.taxonomy_source,
+                    "Bacteria",
+                    preferred.compartment,
+                    preferred.assignment_method,
+                    preferred.cross_domain_conflict,
+                    preferred.taxonomy_alternatives,
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(
+            builder.ReleaseValidationError, "preferred taxonomy domain mismatch in 1 rows"
+        ):
+            builder.validate_release(malformed)
+
+    def test_release_rejects_unknown_preferred_compartment(self) -> None:
+        model = builder.build_deduplicated_model(
+            [
+                builder.PreparedSourceRecord(
+                    "PR2",
+                    "5.1.1",
+                    "pr2",
+                    PR2_HEADER,
+                    "ATGC",
+                    "18S",
+                    ("Eukaryota", "TSAR"),
+                    "PR2",
+                    "nucleus",
+                )
+            ]
+        )
+        preferred = model.preferred_taxonomy[0]
+        malformed = builder.DatabaseModel(
+            model.sequences,
+            model.source_records,
+            model.taxonomy_assignments,
+            (
+                builder.PreferredTaxonomy(
+                    preferred.sequence_id,
+                    preferred.reference_source,
+                    preferred.taxonomy,
+                    preferred.taxonomy_source,
+                    preferred.domain,
+                    "chloroplast",
+                    preferred.assignment_method,
+                    preferred.cross_domain_conflict,
+                    preferred.taxonomy_alternatives,
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(
+            builder.ReleaseValidationError,
+            "invalid preferred taxonomy compartment",
+        ):
+            builder.validate_release(malformed)
+
+    def test_release_rejects_suffix_in_combined_source_preferred_row(self) -> None:
+        model = builder.build_deduplicated_model(
+            [
+                builder.PreparedSourceRecord(
+                    "PR2",
+                    "5.1.1",
+                    "pr2",
+                    PR2_HEADER,
+                    "ATGC",
+                    "18S",
+                    ("Eukaryota", "Archaeplastida"),
+                    "PR2",
+                    "plastid",
+                )
+            ]
+        )
+        preferred = model.preferred_taxonomy[0]
+        malformed = builder.DatabaseModel(
+            model.sequences,
+            model.source_records,
+            model.taxonomy_assignments,
+            (
+                builder.PreferredTaxonomy(
+                    preferred.sequence_id,
+                    "PR2+SILVA",
+                    ("Eukaryota", "Archaeplastida:plas"),
+                    "PR2+SILVA",
+                    preferred.domain,
+                    preferred.compartment,
+                    preferred.assignment_method,
+                    preferred.cross_domain_conflict,
+                    preferred.taxonomy_alternatives,
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(
+            builder.ReleaseValidationError,
+            "PR2 compartment suffix remains in 1 preferred taxonomy rows",
+        ):
+            builder.validate_release(malformed)
 
 
 class PrivacyAndOutputTests(unittest.TestCase):

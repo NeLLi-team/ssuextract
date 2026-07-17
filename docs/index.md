@@ -1,8 +1,8 @@
 # SSUextract
 
-SSUextract searches assembled contigs for 16S and 18S rRNA. It extracts each
-complete Infernal hit interval and assigns taxonomy with the reference database
-for that marker.
+SSUextract searches assembled contigs for 16S rRNA genes and 18S rRNA genes.
+It extracts each complete Infernal hit interval and assigns taxonomy with the
+reference database for that marker.
 
 [Run the bundled example](tutorials/first-run.md) ·
 [Parameters](reference/cli.md) ·
@@ -22,17 +22,20 @@ pixi run setup
 pixi run example
 ```
 
-`pixi run setup` installs the default `curated` database profile. The example
-writes extracted sequences, per-hit annotations, category counts, and Nextflow
-reports under `results/smoke/`.
+`pixi run setup` lists the database profiles and defaults to `curated`. The
+example writes extracted sequences, per-hit annotations, category counts, and
+Nextflow reports under `results/smoke/`.
 
 ## Steps
 
-1. Infernal searches each assembly with 16S and 18S covariance models.
-2. SSUextract keeps accepted coordinates and extracts the complete interval on
-   the reported strand.
-3. Each sequence is searched against the 16S or 18S index selected by its model.
-4. The workflow writes extracted FASTA files, one row per hit, category counts,
+1. Infernal searches each assembly with 16S rRNA gene and 18S rRNA gene
+   covariance models.
+2. Overlapping RF00177 and RF01960 hits on the same strand compete by Infernal
+   E-value, then bit score.
+3. SSUextract extracts each retained interval on the reported strand.
+4. Each sequence is searched against the 16S rRNA gene or 18S rRNA gene index
+   selected by its model.
+5. The workflow writes extracted FASTA files, one row per hit, category counts,
    and execution reports.
 
 [Pipeline details](explanation/pipeline.md) ·

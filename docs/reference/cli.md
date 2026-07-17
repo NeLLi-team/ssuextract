@@ -21,9 +21,10 @@ Run `pixi run ssuextract -- --help` for the installed version's generated help.
 
 | Command | Effect |
 | --- | --- |
-| `pixi run setup` | Install and validate a database profile. |
+| `pixi run setup` | Select, install, validate, or update a database profile. |
+| `pixi run setup -- --database_profile img` | Install or inspect the IMG profile without the profile prompt. |
+| `pixi run setup -- --database_profile curated --update` | Install the latest verified curated profile without an update prompt. |
 | `pixi run example` | Run one bundled assembly. |
 | `pixi run ssuextract` | Run the pipeline with supplied Nextflow arguments. |
 | `pixi run test` | Run unit, integration, profile-routing, and version checks. |
 | `pixi run dryrun` | Preview the Nextflow graph without executing tasks. |
-

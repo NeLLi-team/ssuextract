@@ -1,22 +1,29 @@
 {
-  "schema_version": 1,
   "default_profile": "curated",
   "profiles": {
     "curated": {
-      "version": "1.0.0",
       "archive": {
-        "url": "https://zenodo.org/records/21367799/files/ssuextract-db-curated-v1.0.0.tar.zst?download=1",
-        "bytes": 362333480,
-        "sha256": "2a346471e38bd8fef1838f63e50b402cdb88a267f396830d2734e2223fc0fe28"
-      }
+        "bytes": 362155210,
+        "sha256": "1f4e705ea271818edc71abb376e065234d872b3f8f921f2b56c0970f17ace03b",
+        "url": "https://zenodo.org/records/21406878/files/ssuextract-db-curated-v1.0.1.tar.zst?download=1"
+      },
+      "description": "PR2 5.1.1 and SILVA 138.2",
+      "version": "1.0.1"
     },
     "img": {
-      "version": "1.0.0",
       "archive": {
-        "url": "https://zenodo.org/records/21367799/files/ssuextract-db-img-v1.0.0.tar.zst?download=1",
-        "bytes": 869200950,
-        "sha256": "fadb6c09e9686c7bbcf08739d44e78b8806a774490e118f7a79012a816d4e831"
-      }
+        "bytes": 869070007,
+        "sha256": "0cff7fb8d6969b2cc3be93deb2a19c0536bc7bd931a9c7dee467005999103852",
+        "url": "https://zenodo.org/records/21406878/files/ssuextract-db-img-v1.0.1.tar.zst?download=1"
+      },
+      "description": "Curated profile plus IMG 16S rRNA gene and 18S rRNA gene sequences",
+      "version": "1.0.1"
     }
+  },
+  "schema_version": 1,
+  "zenodo": {
+    "api_url": "https://zenodo.org/api/records/21406878",
+    "concept_record_id": "21367798",
+    "record_id": 21406878
   }
 }

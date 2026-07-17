@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "taxonomy_policy_version": "1.0.0",
+  "taxonomy_policy_version": "1.0.1",
   "sources": {
     "silva_ssu_nr99_fasta": {
       "version": "138.2",

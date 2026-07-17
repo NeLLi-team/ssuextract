@@ -52,7 +52,18 @@ workflow {
     sample_model_combinations = fna_files.combine(cm_models)
 
     CMSEARCH(sample_model_combinations)
-    EXTRACT_HITS(CMSEARCH.out)
+    cmsearch_files_by_sample = CMSEARCH.out
+        .map { sample_id, model_id, cmsearch_out, fna_file, cm_model, marker, db_prefix, taxonomy_file, legacy_database ->
+            tuple(sample_id, cmsearch_out)
+        }
+        .groupTuple()
+    RESOLVE_MODEL_HITS(cmsearch_files_by_sample)
+    extraction_inputs = CMSEARCH.out
+        .map { sample_id, model_id, cmsearch_out, fna_file, cm_model, marker, db_prefix, taxonomy_file, legacy_database ->
+            tuple(sample_id, model_id, fna_file, cm_model, marker, db_prefix, taxonomy_file, legacy_database)
+        }
+        .combine(RESOLVE_MODEL_HITS.out, by: 0)
+    EXTRACT_HITS(extraction_inputs)
     BLAST_ANNOTATE(EXTRACT_HITS.out)
 
     summary_files = BLAST_ANNOTATE.out
@@ -110,6 +121,27 @@ process CMSEARCH {
 }
 
 
+process RESOLVE_MODEL_HITS {
+    tag "${sample_id}"
+
+    input:
+    tuple val(sample_id), path(cmsearch_files)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.accepted-hits.tsv")
+
+    script:
+    cmsearch_arguments = cmsearch_files
+        .collect { "--cmsearch ${shellQuote(it)}" }
+        .join(' ')
+    """
+    python3 "${projectDir}/scripts/resolve_model_hits.py" \
+        ${cmsearch_arguments} \
+        --output "${sample_id}.accepted-hits.tsv"
+    """
+}
+
+
 process EXTRACT_HITS {
     tag "${sample_id}_${model_id}"
     publishDir "${params.outdir}/extracted", mode: 'copy', pattern: '*.fna'
@@ -119,13 +151,13 @@ process EXTRACT_HITS {
     tuple \
         val(sample_id), \
         val(model_id), \
-        path(cmsearch_out), \
         path(fna_file), \
         path(cm_model), \
         val(marker), \
         val(db_prefix), \
         val(taxonomy_file), \
-        val(legacy_database)
+        val(legacy_database), \
+        path(accepted_hits)
 
     output:
     tuple \
@@ -142,11 +174,11 @@ process EXTRACT_HITS {
     script:
     """
     python3 "${projectDir}/scripts/extract_hits.py" \
-        --cmsearch "${cmsearch_out}" \
         --model-file "${cm_model}" \
         --fasta "${fna_file}" \
         --sample "${sample_id}" \
         --model "${model_id}" \
+        --accepted-hits "${accepted_hits}" \
         --minimum-length "${params.min_extract_length}" \
         --fasta-output "${sample_id}_${model_id}.fna" \
         --hits-output "${sample_id}_${model_id}.hits.tsv" \

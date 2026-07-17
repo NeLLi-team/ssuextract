@@ -3,4 +3,5 @@
 - [Command-line parameters](cli.md)
 - [Output files](outputs.md)
 - [Database profiles](database-profiles.md)
-- [Example runtime and memory](performance.md)
+- [Database composition](database-composition.md)
+- [Runtime and memory](performance.md)

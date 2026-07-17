@@ -75,6 +75,7 @@ from database_release_io import (
     write_source_records_parquet,
     write_taxonomy_assignments_parquet,
 )
+from taxonomy_utils import common_value
 from taxonomy_utils import lowest_common_ancestor as _shared_lca
 from taxonomy_utils import taxonomy_path
 
@@ -173,7 +174,6 @@ def select_preferred_taxonomy(
         raise TaxonomyError(f"No common taxonomy domain for {sequence_id}")
     disagreement = len({assignment.taxonomy for assignment in best}) > 1
     taxonomy_sources = sorted({assignment.taxonomy_source for assignment in best})
-    compartments = sorted({assignment.compartment for assignment in best if assignment.compartment})
     reference_sources = sorted(
         {
             "IMG" if assignment.assignment_method.lower() != "native" else assignment.taxonomy_source
@@ -186,7 +186,9 @@ def select_preferred_taxonomy(
         taxonomy=taxonomy,
         taxonomy_source="+".join(taxonomy_sources),
         domain=taxonomy[0],
-        compartment=compartments[0] if len(compartments) == 1 else "",
+        compartment=common_value(
+            (assignment.compartment for assignment in best), conflict="mixed"
+        ),
         assignment_method="lowest_common_ancestor" if disagreement else best[0].assignment_method,
         cross_domain_conflict=cross_domain_conflict,
     )

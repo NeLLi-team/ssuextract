@@ -18,17 +18,31 @@ PR2_RANKS = (
 )
 SILVA_PROKARYOTIC_RANKS = ("domain", "phylum", "class", "order", "family", "genus")
 PROKARYOTIC_DOMAINS = frozenset({"Bacteria", "Archaea"})
-PR2_COMPARTMENTS = frozenset(
-    {
-        "nucleus",
-        "nucleomorph",
-        "plastid",
-        "apicoplast",
-        "chromatophore",
-        "mitochondrion",
-        "mitochondria",
-    }
-)
+PR2_COMPARTMENT_ALIASES = {
+    "nucleus": "nucleus",
+    "nucleomorph": "nucleomorph",
+    "plastid": "plastid",
+    "apicoplast": "apicoplast",
+    "chromatophore": "chromatophore",
+    "mitochondrion": "mitochondrion",
+    "mitochondria": "mitochondrion",
+}
+PR2_COMPARTMENTS = frozenset(PR2_COMPARTMENT_ALIASES)
+PR2_CANONICAL_COMPARTMENTS = frozenset(PR2_COMPARTMENT_ALIASES.values())
+PR2_TAXONOMY_SUFFIX_TO_COMPARTMENT = {
+    "apic": "apicoplast",
+    "chro": "chromatophore",
+    "chrom": "chromatophore",
+    "mito": "mitochondrion",
+    # PR2 uses :nucl for nucleomorph genes; nuclear 18S genes have no suffix.
+    "nucl": "nucleomorph",
+    "plas": "plastid",
+}
+if not set(PR2_TAXONOMY_SUFFIX_TO_COMPARTMENT.values()).issubset(
+    PR2_CANONICAL_COMPARTMENTS
+):
+    raise RuntimeError("PR2 taxonomy suffix targets must be canonical compartments")
+PREFERRED_COMPARTMENTS = PR2_CANONICAL_COMPARTMENTS | {"", "mixed", "unknown"}
 IMG_LOCATION_COLUMNS = ("taxon_oid", "latitude", "longitude")
 
 

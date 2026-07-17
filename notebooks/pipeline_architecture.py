@@ -178,7 +178,16 @@ def build() -> plt.Figure:
     ]
     detection = [
         Box(1.05, 6.95, 3.55, 1.45, "Infernal search", "cmsearch per\nassembly and model", TEAL, TEAL_SOFT),
-        Box(5.23, 6.95, 3.55, 1.45, "Accepted hits", "contig · coordinates\nstrand · model", TEAL, TEAL_SOFT),
+        Box(
+            5.23,
+            6.95,
+            3.55,
+            1.45,
+            "Model competition",
+            "CL00111 same-strand overlap\nE-value → bit score",
+            TEAL,
+            TEAL_SOFT,
+        ),
         Box(
             9.40,
             6.95,
@@ -191,8 +200,8 @@ def build() -> plt.Figure:
         ),
     ]
     searches = [
-        Box(2.05, 4.75, 4.15, 1.35, "RF00177 → 16S", "16S BLAST index", TEAL, TEAL_SOFT),
-        Box(7.80, 4.75, 4.15, 1.35, "RF01960 → 18S", "18S BLAST index", TEAL, TEAL_SOFT),
+        Box(2.05, 4.75, 4.15, 1.35, "RF00177", "16S rRNA gene\nBLAST index", TEAL, TEAL_SOFT),
+        Box(7.80, 4.75, 4.15, 1.35, "RF01960", "18S rRNA gene\nBLAST index", TEAL, TEAL_SOFT),
     ]
     taxonomy = Box(
         3.15,

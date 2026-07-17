@@ -14,6 +14,20 @@ import build_database_profiles as profiles
 
 
 class ProfileBuildDriverTests(unittest.TestCase):
+    def test_default_profile_version_tracks_taxonomy_policy_repair(self) -> None:
+        args = profiles._parser().parse_args(
+            [
+                "curated",
+                "--source-directory",
+                "sources",
+                "--output-root",
+                "profiles",
+                "--archive-directory",
+                "archives",
+            ]
+        )
+        self.assertEqual(args.version, "1.0.1")
+
     def test_search_and_classification_qc_bind_the_same_portable_provenance(self) -> None:
         calibration = {"sha256": "a" * 64, "schema_version": 2}
         with tempfile.TemporaryDirectory() as tmp:

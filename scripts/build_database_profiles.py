@@ -893,7 +893,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-config", type=Path, default=DEFAULT_SOURCE_CONFIG)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--archive-directory", type=Path, required=True)
-    parser.add_argument("--version", default="1.0.0")
+    parser.add_argument("--version", default="1.0.1")
     parser.add_argument("--notices", type=Path, default=DEFAULT_NOTICES)
     parser.add_argument(
         "--assignments",

@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -10,10 +11,16 @@ sys.path.insert(0, str(REPO / "scripts"))
 from get_cmsequences import parse_seqmap
 from hit_processing import (
     CmHit,
+    CmModel,
     ExtractionRegion,
     extract_regions,
     parse_cmsearch_tblout,
+    read_accepted_hits,
+    read_covariance_model,
+    resolve_competing_model_hits,
     resolve_extraction_regions,
+    select_model_hits,
+    write_accepted_hits,
 )
 
 
@@ -26,15 +33,27 @@ def hit(
     sequence_to: int,
     strand: str = "+",
     included: bool = True,
+    model_accession: str = "RF00177",
+    model_name: str | None = None,
+    bit_score: float = 100.0,
+    e_value: float = 1e-20,
 ) -> CmHit:
+    if model_name is None:
+        model_name = {
+            "RF00177": "SSU_rRNA_bacteria",
+            "RF01960": "SSU_rRNA_eukarya",
+        }.get(model_accession, "RFTEST")
     return CmHit(
         subject=subject,
-        model="RFTEST",
+        model=model_name,
+        model_accession=model_accession,
         model_from=model_from,
         model_to=model_to,
         sequence_from=sequence_from,
         sequence_to=sequence_to,
         strand=strand,
+        bit_score=bit_score,
+        e_value=e_value,
         included=included,
     )
 
@@ -51,7 +70,63 @@ class CmsearchParsingTests(unittest.TestCase):
 
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0].subject, "contig1")
+        self.assertEqual(parsed[0].model_accession, "RFTEST")
+        self.assertEqual(parsed[0].bit_score, 42.0)
+        self.assertEqual(parsed[0].e_value, 1e-9)
         self.assertTrue(parsed[0].included)
+
+    def test_known_bundled_model_without_accession_fails_loudly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tblout = Path(tmp) / "hits.out"
+            tblout.write_text(
+                "contig1 - SSU_rRNA_bacteria - cm 1 10 3 12 + no 1 0.50 0.0 "
+                "42.0 1e-9 ! description\n"
+            )
+            with self.assertRaisesRegex(ValueError, "expected 'RF00177'"):
+                parse_cmsearch_tblout(tblout)
+
+    def test_unknown_custom_model_without_accession_is_retained(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tblout = Path(tmp) / "hits.out"
+            tblout.write_text(
+                "contig1 - custom_ssu - cm 1 10 3 12 + no 1 0.50 0.0 "
+                "42.0 1e-9 ! description\n"
+            )
+            parsed = parse_cmsearch_tblout(tblout)
+
+        self.assertEqual(parsed[0].model_accession, "custom_ssu")
+
+    def test_bundled_covariance_model_identity_is_explicit(self) -> None:
+        bacterial = read_covariance_model(REPO / "resources/models/RF00177.cm")
+        eukaryotic = read_covariance_model(REPO / "resources/models/RF01960.cm")
+        self.assertEqual(
+            bacterial,
+            CmModel("SSU_rRNA_bacteria", "RF00177", 1533),
+        )
+        self.assertEqual(
+            eukaryotic,
+            CmModel("SSU_rRNA_eukarya", "RF01960", 1851),
+        )
+
+    def test_covariance_model_file_must_contain_one_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "multiple.cm"
+            model.write_text(
+                "INFERNAL1/a\nNAME first\nCLEN 10\n//\n"
+                "INFERNAL1/a\nNAME second\nCLEN 20\n//\n"
+            )
+            with self.assertRaisesRegex(ValueError, "contains 2 models"):
+                read_covariance_model(model)
+
+    def test_bundled_covariance_model_filename_must_match_accession(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "renamed.cm"
+            model.write_text(
+                "INFERNAL1/a\nNAME SSU_rRNA_bacteria\n"
+                "ACC RF00177\nCLEN 1533\n//\n"
+            )
+            with self.assertRaisesRegex(ValueError, "must use filename RF00177.cm"):
+                read_covariance_model(model)
 
     def test_reported_but_not_included_hits_are_ignored(self) -> None:
         regions = resolve_extraction_regions(
@@ -67,6 +142,217 @@ class CmsearchParsingTests(unittest.TestCase):
             model_length=10,
         )
         self.assertEqual(regions, [])
+
+
+class CompetingModelTests(unittest.TestCase):
+    def test_accepted_hit_table_round_trips_exactly(self) -> None:
+        accepted = hit(
+            model_accession="RF01960",
+            model_from=2,
+            model_to=1850,
+            sequence_from=1734,
+            sequence_to=3528,
+            bit_score=1776.7,
+            e_value=3.8e-216,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "accepted.tsv"
+            write_accepted_hits([accepted], path)
+            observed = read_accepted_hits(path)
+        self.assertEqual(observed, [accepted])
+
+    def test_accepted_hit_table_rejects_malformed_rows(self) -> None:
+        accepted = hit(
+            model_accession="RF00177",
+            model_from=1,
+            model_to=10,
+            sequence_from=1,
+            sequence_to=10,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "accepted.tsv"
+            write_accepted_hits([accepted], path)
+            text = path.read_text()
+            path.write_text(text.replace("\t+\t", "\t?\t"))
+            with self.assertRaisesRegex(ValueError, "strand is invalid"):
+                read_accepted_hits(path)
+
+    def test_bacterial_model_wins_user_example_overlap(self) -> None:
+        bacterial = hit(
+            model_accession="RF00177",
+            model_from=1,
+            model_to=1533,
+            sequence_from=14154,
+            sequence_to=15690,
+            bit_score=1612.8,
+            e_value=0.0,
+        )
+        eukaryotic = hit(
+            model_accession="RF01960",
+            model_from=1,
+            model_to=1851,
+            sequence_from=14159,
+            sequence_to=15685,
+            bit_score=719.0,
+            e_value=3.8e-216,
+        )
+        self.assertEqual(resolve_competing_model_hits([eukaryotic, bacterial]), [bacterial])
+
+    def test_eukaryotic_model_wins_when_it_has_better_evidence(self) -> None:
+        bacterial = hit(
+            model_accession="RF00177",
+            model_from=1,
+            model_to=1533,
+            sequence_from=1729,
+            sequence_to=3533,
+            bit_score=573.7,
+            e_value=2.7e-182,
+        )
+        eukaryotic = hit(
+            model_accession="RF01960",
+            model_from=1,
+            model_to=1851,
+            sequence_from=1734,
+            sequence_to=3528,
+            bit_score=1776.7,
+            e_value=0.0,
+        )
+        self.assertEqual(resolve_competing_model_hits([bacterial, eukaryotic]), [eukaryotic])
+
+    def test_equal_evalue_uses_higher_bit_score(self) -> None:
+        lower = hit(
+            model_accession="RF01960",
+            model_from=1,
+            model_to=10,
+            sequence_from=1,
+            sequence_to=10,
+            bit_score=90.0,
+            e_value=0.0,
+        )
+        higher = hit(
+            model_accession="RF00177",
+            model_from=1,
+            model_to=10,
+            sequence_from=1,
+            sequence_to=10,
+            bit_score=100.0,
+            e_value=0.0,
+        )
+        self.assertEqual(resolve_competing_model_hits([lower, higher]), [higher])
+
+    def test_nonoverlap_opposite_strand_and_same_model_are_preserved(self) -> None:
+        hits = [
+            hit(
+                model_accession="RF00177",
+                model_from=1,
+                model_to=10,
+                sequence_from=1,
+                sequence_to=10,
+            ),
+            hit(
+                model_accession="RF01960",
+                model_from=1,
+                model_to=10,
+                sequence_from=20,
+                sequence_to=30,
+            ),
+            hit(
+                model_accession="RF01960",
+                model_from=1,
+                model_to=10,
+                sequence_from=1,
+                sequence_to=10,
+                strand="-",
+            ),
+            hit(
+                model_accession="RF00177",
+                model_from=1,
+                model_to=10,
+                sequence_from=5,
+                sequence_to=15,
+                bit_score=99.0,
+            ),
+        ]
+        self.assertCountEqual(resolve_competing_model_hits(hits), hits)
+
+    def test_overlapping_unconfigured_model_fails_loudly(self) -> None:
+        bundled = hit(
+            model_accession="RF00177",
+            model_from=1,
+            model_to=10,
+            sequence_from=1,
+            sequence_to=10,
+        )
+        custom = hit(
+            model_accession="RF01959",
+            model_name="SSU_rRNA_archaea",
+            model_from=1,
+            model_to=10,
+            sequence_from=2,
+            sequence_to=9,
+        )
+        with self.assertRaisesRegex(ValueError, "without an explicit competition rule"):
+            resolve_competing_model_hits([bundled, custom])
+
+    def test_two_overlapping_unconfigured_models_fail_loudly(self) -> None:
+        left = hit(
+            model_accession="custom_left",
+            model_name="custom_left",
+            model_from=1,
+            model_to=10,
+            sequence_from=1,
+            sequence_to=10,
+        )
+        right = hit(
+            model_accession="custom_right",
+            model_name="custom_right",
+            model_from=1,
+            model_to=10,
+            sequence_from=2,
+            sequence_to=9,
+        )
+        with self.assertRaisesRegex(ValueError, "without an explicit competition rule"):
+            resolve_competing_model_hits([left, right])
+
+    def test_exact_evidence_tie_fails_loudly(self) -> None:
+        left = hit(
+            model_accession="RF00177",
+            model_from=1,
+            model_to=10,
+            sequence_from=1,
+            sequence_to=10,
+        )
+        right = hit(
+            model_accession="RF01960",
+            model_from=1,
+            model_to=10,
+            sequence_from=2,
+            sequence_to=9,
+        )
+        with self.assertRaisesRegex(ValueError, "Indistinguishable competing"):
+            resolve_competing_model_hits([left, right])
+
+    def test_select_model_hits_uses_name_and_accession(self) -> None:
+        accepted = hit(
+            model_accession="RF00177",
+            model_from=1,
+            model_to=10,
+            sequence_from=1,
+            sequence_to=10,
+        )
+        rejected = hit(
+            model_accession="RF01960",
+            model_from=1,
+            model_to=10,
+            sequence_from=1,
+            sequence_to=10,
+        )
+        model = CmModel("SSU_rRNA_bacteria", "RF00177", 1533)
+        self.assertEqual(select_model_hits([accepted, rejected], model), [accepted])
+
+        conflicting = replace(accepted, model="SSU_rRNA_eukarya")
+        with self.assertRaisesRegex(ValueError, "identity disagrees"):
+            select_model_hits([conflicting], model)
 
 
 class RegionResolutionTests(unittest.TestCase):
@@ -221,4 +507,3 @@ class SequenceExtractionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

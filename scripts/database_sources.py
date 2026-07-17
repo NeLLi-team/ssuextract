@@ -22,8 +22,10 @@ from database_contracts import (
     IMG_LOCATION_COLUMNS,
     ImgIdentifier,
     ImgLocation,
+    PR2_COMPARTMENT_ALIASES,
     PR2_COMPARTMENTS,
     PR2_RANKS,
+    PR2_TAXONOMY_SUFFIX_TO_COMPARTMENT,
     PROKARYOTIC_DOMAINS,
     PreparedSourceRecord,
     Pr2Header,
@@ -43,6 +45,12 @@ FORBIDDEN_PII_TOKENS = frozenset(
 )
 _IUPAC_NUCLEOTIDES = frozenset("ACGTURYSWKMBDHVN")
 _IMG_ID = re.compile(r"^IMG_(?P<taxon_oid>[0-9]+)(?:[._|]|$)")
+_PR2_SUFFIX_PATTERN = "|".join(
+    sorted(PR2_TAXONOMY_SUFFIX_TO_COMPARTMENT, key=lambda value: (-len(value), value))
+)
+_PR2_TAXONOMY_SUFFIX = re.compile(
+    rf"(?P<taxon>[^:]+):(?P<suffix>{_PR2_SUFFIX_PATTERN})"
+)
 
 
 def load_source_config(path: str | Path = DEFAULT_SOURCES) -> dict[str, dict[str, object]]:
@@ -272,16 +280,46 @@ def include_pr2_header(header: Pr2Header) -> bool:
     return header.taxonomy[0] == "Eukaryota" or compartment in PR2_COMPARTMENTS
 
 
-def normalize_pr2_taxonomy(taxonomy: Sequence[str]) -> tuple[str, ...]:
-    """Separate PR2 organellar domain suffixes from the host-domain taxonomy."""
+def _canonical_pr2_compartment(compartment: str) -> str:
+    value = compartment.strip().lower()
+    return PR2_COMPARTMENT_ALIASES.get(value, value)
+
+
+def normalize_pr2_taxonomy(
+    taxonomy: Sequence[str], *, compartment: str
+) -> tuple[str, ...]:
+    """Remove PR2 compartment suffixes from all host-taxonomy ranks."""
 
     try:
-        normalized = taxonomy_path(taxonomy)
+        path = taxonomy_path(taxonomy)
     except ValueError as error:
         raise TaxonomyError(str(error)) from error
-    if normalized[0].startswith("Eukaryota:"):
-        normalized = ("Eukaryota", *normalized[1:])
-    return normalized
+    normalized: list[str] = []
+    suffixes: set[str] = set()
+    for taxon in path:
+        match = _PR2_TAXONOMY_SUFFIX.fullmatch(taxon)
+        if match is None:
+            if ":" in taxon:
+                raise TaxonomyError(f"Unknown PR2 taxonomy suffix in {taxon!r}")
+            normalized.append(taxon)
+            continue
+        normalized.append(match.group("taxon"))
+        suffixes.add(match.group("suffix"))
+    if len(suffixes) > 1:
+        raise TaxonomyError(
+            "PR2 taxonomy contains mixed compartment suffixes: "
+            + ", ".join(sorted(suffixes))
+        )
+    if suffixes:
+        canonical_compartment = _canonical_pr2_compartment(compartment)
+        suffix = next(iter(suffixes))
+        expected = PR2_TAXONOMY_SUFFIX_TO_COMPARTMENT[suffix]
+        if canonical_compartment != expected:
+            raise TaxonomyError(
+                f"PR2 taxonomy suffix :{suffix} requires compartment {expected!r}, "
+                f"found {canonical_compartment or 'empty'!r}"
+            )
+    return tuple(normalized)
 
 
 def parse_silva_header(header: str) -> SilvaHeader:
@@ -393,10 +431,7 @@ def iter_curated_pr2_records(
             marker = marker_by_gene[header.gene]
         except KeyError as error:
             raise TaxonomyError(f"Unsupported PR2 SSU gene: {header.gene}") from error
-        compartment = (
-            header.compartment.strip().lower().replace("mitochondria", "mitochondrion")
-            or "unknown"
-        )
+        compartment = _canonical_pr2_compartment(header.compartment) or "unknown"
         yield PreparedSourceRecord(
             reference_source="PR2",
             source_version=source_version,
@@ -404,7 +439,9 @@ def iter_curated_pr2_records(
             original_header=record.header,
             sequence=record.sequence,
             marker=marker,
-            taxonomy=normalize_pr2_taxonomy(header.taxonomy),
+            taxonomy=normalize_pr2_taxonomy(
+                header.taxonomy, compartment=compartment
+            ),
             taxonomy_source="PR2",
             compartment=compartment,
             assignment_method="native",

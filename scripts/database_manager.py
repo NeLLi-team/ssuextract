@@ -22,6 +22,12 @@ from typing import BinaryIO, Callable
 from urllib.parse import urlparse
 
 from atomic_io import fsync_directory, replace_and_fsync
+from database_updates import (
+    ReleaseDiscoveryError,
+    compare_versions,
+    discover_latest_catalog,
+    validate_zenodo_config,
+)
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -34,6 +40,8 @@ SCHEMA_VERSION = 1
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+ProgressReporter = Callable[[str], None] | None
 
 
 class DatabaseError(RuntimeError):
@@ -112,6 +120,21 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _report(progress: ProgressReporter, message: str) -> None:
+    if progress is not None:
+        progress(message)
+
+
+def _human_size(size: int) -> str:
+    value = float(size)
+    units = ("B", "KiB", "MiB", "GiB")
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    raise AssertionError("unreachable")
+
+
 def load_catalog(path: str | Path = DEFAULT_CATALOG) -> dict:
     catalog = _require_object(_read_json(path, "database catalog"), "catalog", CatalogError)
     if catalog.get("schema_version") != SCHEMA_VERSION:
@@ -126,10 +149,25 @@ def load_catalog(path: str | Path = DEFAULT_CATALOG) -> dict:
     if default_profile not in profiles:
         raise CatalogError(f"catalog default_profile {default_profile!r} is not listed")
 
+    if "zenodo" in catalog:
+        try:
+            validate_zenodo_config(catalog["zenodo"])
+        except ReleaseDiscoveryError as error:
+            raise CatalogError(str(error)) from error
+
     for profile, raw_entry in profiles.items():
         _require_identifier(profile, "catalog profile name", CatalogError)
         entry = _require_object(raw_entry, f"catalog profile {profile!r}", CatalogError)
         _require_identifier(entry.get("version"), f"catalog profile {profile!r} version", CatalogError)
+        description = entry.get("description")
+        if description is not None and (
+            not isinstance(description, str)
+            or not description.strip()
+            or any(character in description for character in "\r\n\t")
+        ):
+            raise CatalogError(
+                f"catalog profile {profile!r} description must be non-empty, single-line text"
+            )
         archive = _require_object(
             entry.get("archive"), f"catalog profile {profile!r} archive", CatalogError
         )
@@ -307,6 +345,46 @@ def validate_profile(
     return validate_profile_directory(Path(root) / profile, profile, blastdbcmd)
 
 
+def installed_version(root: str | Path, profile: str) -> str:
+    _require_identifier(profile, "profile", ManifestError)
+    manifest = load_manifest(Path(root) / profile, expected_profile=profile)
+    return manifest["version"]
+
+
+def check_profile_update(
+    root: str | Path,
+    profile: str,
+    catalog_path: str | Path = DEFAULT_CATALOG,
+    timeout: float = 5.0,
+    opener: Callable[..., BinaryIO] = urllib.request.urlopen,
+) -> dict[str, str]:
+    installed = installed_version(root, profile)
+    catalog = load_catalog(catalog_path)
+    try:
+        latest_catalog = discover_latest_catalog(catalog, timeout=timeout, opener=opener)
+        latest = latest_catalog["profiles"][profile]["version"]
+        comparison = compare_versions(installed, latest)
+    except (KeyError, ReleaseDiscoveryError) as error:
+        return {
+            "status": "unavailable",
+            "installed": installed,
+            "latest": "",
+            "reason": " ".join(str(error).split()),
+        }
+    if comparison < 0:
+        status = "update_available"
+    elif comparison > 0:
+        status = "installed_newer"
+    else:
+        status = "current"
+    return {
+        "status": status,
+        "installed": installed,
+        "latest": latest,
+        "reason": "",
+    }
+
+
 def detect_legacy_database(
     root: str | Path, blastdbcmd: str = "blastdbcmd"
 ) -> Path | None:
@@ -365,6 +443,7 @@ def download_archive(
     expected_size: int,
     expected_sha256: str,
     opener: Callable[..., BinaryIO] = urllib.request.urlopen,
+    progress: ProgressReporter = None,
 ) -> None:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.netloc:
@@ -374,6 +453,8 @@ def download_archive(
 
     digest = hashlib.sha256()
     size = 0
+    next_percent = 10
+    _report(progress, f"Downloading archive: 0% of {_human_size(expected_size)}")
     try:
         with opener(url, timeout=60) as response, Path(destination).open("wb") as output:
             while chunk := response.read(1024 * 1024):
@@ -384,6 +465,14 @@ def download_archive(
                     )
                 digest.update(chunk)
                 output.write(chunk)
+                percent = size * 100 // expected_size
+                while percent >= next_percent and next_percent <= 100:
+                    _report(
+                        progress,
+                        f"Downloading archive: {next_percent}% "
+                        f"({_human_size(size)} of {_human_size(expected_size)})",
+                    )
+                    next_percent += 10
     except DatabaseError:
         raise
     except (OSError, ValueError) as error:
@@ -398,6 +487,41 @@ def download_archive(
         raise IntegrityError(
             f"Archive SHA-256 mismatch: expected {expected_sha256}, found {actual_digest}"
         )
+
+
+def _catalog_for_install(
+    catalog_path: str | Path,
+    profile: str,
+    latest: bool,
+    timeout: float,
+    opener: Callable[..., BinaryIO],
+    progress: ProgressReporter,
+) -> dict:
+    catalog = load_catalog(catalog_path)
+    if not latest:
+        return catalog
+    _report(progress, "Checking Zenodo for the latest database release...")
+    try:
+        discovered = discover_latest_catalog(catalog, timeout=timeout, opener=opener)
+        pinned_version = catalog["profiles"][profile]["version"]
+        discovered_version = discovered["profiles"][profile]["version"]
+        if compare_versions(discovered_version, pinned_version) < 0:
+            _report(
+                progress,
+                f"Zenodo reports v{discovered_version}, older than bundled "
+                f"v{pinned_version}; using bundled release metadata.",
+            )
+            return catalog
+        _report(progress, f"Latest verified Zenodo database release: v{discovered_version}")
+        return discovered
+    except (KeyError, ReleaseDiscoveryError) as error:
+        bundled_version = catalog["profiles"].get(profile, {}).get("version", "unknown")
+        _report(
+            progress,
+            f"Could not verify the latest Zenodo release ({' '.join(str(error).split())}); "
+            f"using bundled release metadata v{bundled_version}.",
+        )
+        return catalog
 
 
 def safe_extract_tar(archive: str | Path, destination: str | Path) -> None:
@@ -511,13 +635,13 @@ def _recover_interrupted_backup(
 def _install_profile_locked(
     root: str | Path,
     profile: str,
-    catalog_path: str | Path = DEFAULT_CATALOG,
+    catalog: dict,
     blastdbcmd: str = "blastdbcmd",
     replace: bool = False,
     opener: Callable[..., BinaryIO] = urllib.request.urlopen,
+    progress: ProgressReporter = None,
 ) -> Path:
     _require_identifier(profile, "profile", CatalogError)
-    catalog = load_catalog(catalog_path)
     try:
         entry = catalog["profiles"][profile]
     except KeyError as error:
@@ -534,6 +658,11 @@ def _install_profile_locked(
     if target.exists() and not replace:
         raise InstallError(f"Database profile already exists: {target}; use --force to replace it")
 
+    _report(
+        progress,
+        f"Installing profile {profile!r} v{entry['version']} "
+        f"({_human_size(archive['bytes'])}) into {target}",
+    )
     with tempfile.TemporaryDirectory(prefix=f".{profile}.staging-", dir=root_path) as temporary:
         staging = Path(temporary)
         archive_path = staging / "profile.tar"
@@ -544,9 +673,12 @@ def _install_profile_locked(
             archive["bytes"],
             archive["sha256"],
             opener=opener,
+            progress=progress,
         )
+        _report(progress, "Extracting archive...")
         safe_extract_tar(archive_path, extracted)
         source = _find_extracted_profile(extracted)
+        _report(progress, "Validating files and BLAST indexes...")
         manifest = validate_profile_directory(source, profile, blastdbcmd)
         if manifest["version"] != entry["version"]:
             raise IntegrityError(
@@ -564,6 +696,7 @@ def _install_profile_locked(
             os.replace(source, incoming)
             if not target.exists():
                 replace_and_fsync(incoming, target)
+                _report(progress, f"Installed profile {profile!r} v{manifest['version']}.")
                 return target
         except OSError as error:
             if target.exists() and not incoming.exists():
@@ -620,6 +753,7 @@ def _install_profile_locked(
                 RuntimeWarning,
                 stacklevel=2,
             )
+        _report(progress, f"Installed profile {profile!r} v{manifest['version']}.")
     return target
 
 
@@ -630,10 +764,22 @@ def install_profile(
     blastdbcmd: str = "blastdbcmd",
     replace: bool = False,
     opener: Callable[..., BinaryIO] = urllib.request.urlopen,
+    latest: bool = False,
+    timeout: float = 5.0,
+    metadata_opener: Callable[..., BinaryIO] = urllib.request.urlopen,
+    progress: ProgressReporter = None,
 ) -> Path:
     """Download, validate, and publish one profile under an install lock."""
 
     _require_identifier(profile, "profile", CatalogError)
+    catalog = _catalog_for_install(
+        catalog_path,
+        profile,
+        latest,
+        timeout,
+        metadata_opener,
+        progress,
+    )
     root_path = Path(root).resolve()
     root_path.mkdir(parents=True, exist_ok=True)
     with _profile_install_lock(root_path):
@@ -641,10 +787,11 @@ def install_profile(
         return _install_profile_locked(
             root_path,
             profile,
-            catalog_path=catalog_path,
+            catalog=catalog,
             blastdbcmd=blastdbcmd,
             replace=replace,
             opener=opener,
+            progress=progress,
         )
 
 
@@ -652,10 +799,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Install and resolve SSUextract database profiles.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    profiles = subparsers.add_parser("profiles", help="list available database profiles")
+    profiles.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+
     validate = subparsers.add_parser("validate", help="validate an installed profile")
     validate.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     validate.add_argument("--profile", required=True)
     validate.add_argument("--blastdbcmd", default="blastdbcmd")
+
+    version = subparsers.add_parser("version", help="print an installed profile version")
+    version.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    version.add_argument("--profile", required=True)
+
+    update = subparsers.add_parser(
+        "check-update", help="compare an installed profile with the latest Zenodo release"
+    )
+    update.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    update.add_argument("--profile", required=True)
+    update.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    update.add_argument("--timeout", type=float, default=5.0)
+    update.add_argument("--format", choices=("human", "tsv"), default="human")
 
     resolve = subparsers.add_parser("resolve", help="print the BLAST prefix for a model")
     resolve.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -671,15 +834,78 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     install.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     install.add_argument("--blastdbcmd", default="blastdbcmd")
     install.add_argument("--force", action="store_true")
+    install.add_argument(
+        "--latest",
+        action="store_true",
+        help="install the latest fully verified release from the Zenodo concept record",
+    )
+    install.add_argument("--timeout", type=float, default=5.0)
     return parser.parse_args(argv)
+
+
+def _print_update_result(result: dict[str, str], profile: str, output_format: str) -> None:
+    if output_format == "tsv":
+        print(
+            "\t".join(
+                (
+                    result["status"],
+                    result["installed"],
+                    result["latest"] or "-",
+                    result["reason"] or "-",
+                )
+            )
+        )
+        return
+    installed = result["installed"]
+    latest = result["latest"]
+    if result["status"] == "update_available":
+        print(
+            f"Database update available for {profile!r}: v{installed} -> v{latest}. "
+            f"Run 'pixi run setup -- --database_profile {profile} --update'."
+        )
+    elif result["status"] == "current":
+        print(f"Database profile {profile!r}: installed v{installed}; latest v{latest}.")
+    elif result["status"] == "installed_newer":
+        print(
+            f"Database profile {profile!r}: installed v{installed}; "
+            f"Zenodo latest is v{latest}."
+        )
+    else:
+        print(
+            f"Database profile {profile!r}: installed v{installed}. "
+            f"Update check unavailable: {result['reason']}"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        if args.command == "validate":
+        if args.command == "profiles":
+            catalog = load_catalog(args.catalog)
+            for name, entry in catalog["profiles"].items():
+                print(
+                    "\t".join(
+                        (
+                            name,
+                            entry["version"],
+                            _human_size(entry["archive"]["bytes"]),
+                            entry.get("description", ""),
+                        )
+                    )
+                )
+        elif args.command == "validate":
             validate_profile(args.root, args.profile, args.blastdbcmd)
             print((args.root / args.profile).resolve())
+        elif args.command == "version":
+            print(installed_version(args.root, args.profile))
+        elif args.command == "check-update":
+            result = check_profile_update(
+                args.root,
+                args.profile,
+                catalog_path=args.catalog,
+                timeout=args.timeout,
+            )
+            _print_update_result(result, args.profile, args.format)
         elif args.command == "resolve":
             print(
                 resolve_database(
@@ -699,6 +925,11 @@ def main(argv: list[str] | None = None) -> int:
                     catalog_path=args.catalog,
                     blastdbcmd=args.blastdbcmd,
                     replace=args.force,
+                    latest=args.latest,
+                    timeout=args.timeout,
+                    progress=lambda message: print(
+                        f"Database: {message}", file=sys.stderr, flush=True
+                    ),
                 )
             )
     except DatabaseError as error:

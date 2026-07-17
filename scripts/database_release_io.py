@@ -17,6 +17,7 @@ from database_contracts import (
     FastaFormatError,
     IMG_LOCATION_COLUMNS,
     ImgLocation,
+    PREFERRED_COMPARTMENTS,
     PreferredTaxonomy,
     ReleaseValidationError,
     SequenceRecord,
@@ -79,6 +80,8 @@ def validate_release(model: DatabaseModel, img_locations: Iterable[ImgLocation] 
     )
     if assignment_ids:
         errors.append(f"duplicate taxonomy assignment IDs: {sorted(assignment_ids)}")
+    pr2_assignment_suffixes = 0
+    pr2_assignment_suffix_examples: list[str] = []
     for assignment in model.taxonomy_assignments:
         if assignment.source_record_id not in source_ids:
             errors.append(f"orphan taxonomy source_record_id: {assignment.source_record_id}")
@@ -91,6 +94,18 @@ def validate_release(model: DatabaseModel, img_locations: Iterable[ImgLocation] 
             errors.append(
                 f"taxonomy/source sequence mismatch: {assignment.taxonomy_assignment_id}"
             )
+        if assignment.taxonomy_source.upper() == "PR2" and any(
+            ":" in taxon for taxon in assignment.taxonomy
+        ):
+            pr2_assignment_suffixes += 1
+            if len(pr2_assignment_suffix_examples) < 5:
+                pr2_assignment_suffix_examples.append(assignment.taxonomy_assignment_id)
+    if pr2_assignment_suffixes:
+        errors.append(
+            f"PR2 compartment suffix remains in {pr2_assignment_suffixes} "
+            "normalized taxonomy assignments; examples: "
+            + ", ".join(pr2_assignment_suffix_examples)
+        )
 
     preferred_ids = [record.sequence_id for record in model.preferred_taxonomy]
     if _duplicates(preferred_ids):
@@ -100,7 +115,26 @@ def validate_release(model: DatabaseModel, img_locations: Iterable[ImgLocation] 
         errors.append(f"missing preferred taxonomy for {len(missing_preferred)} sequences")
     if set(preferred_ids) - sequence_ids:
         errors.append("orphan preferred taxonomy sequence_id")
+    preferred_domain_mismatches = 0
+    preferred_domain_mismatch_examples: list[str] = []
+    pr2_preferred_suffixes = 0
+    pr2_preferred_suffix_examples: list[str] = []
     for record in model.preferred_taxonomy:
+        if record.compartment not in PREFERRED_COMPARTMENTS:
+            errors.append(
+                f"invalid preferred taxonomy compartment for {record.sequence_id}: "
+                f"{record.compartment!r}"
+            )
+        if record.taxonomy and record.domain != record.taxonomy[0]:
+            preferred_domain_mismatches += 1
+            if len(preferred_domain_mismatch_examples) < 5:
+                preferred_domain_mismatch_examples.append(record.sequence_id)
+        if "PR2" in record.taxonomy_source.upper().split("+") and any(
+            ":" in taxon for taxon in record.taxonomy
+        ):
+            pr2_preferred_suffixes += 1
+            if len(pr2_preferred_suffix_examples) < 5:
+                pr2_preferred_suffix_examples.append(record.sequence_id)
         if record.cross_domain_conflict and not (
             record.domain == "ambiguous"
             and not record.taxonomy
@@ -109,6 +143,17 @@ def validate_release(model: DatabaseModel, img_locations: Iterable[ImgLocation] 
             and record.taxonomy_alternatives
         ):
             errors.append(f"unresolved cross-domain taxonomy conflict for {record.sequence_id}")
+    if preferred_domain_mismatches:
+        errors.append(
+            f"preferred taxonomy domain mismatch in {preferred_domain_mismatches} rows; "
+            "examples: " + ", ".join(preferred_domain_mismatch_examples)
+        )
+    if pr2_preferred_suffixes:
+        errors.append(
+            f"PR2 compartment suffix remains in {pr2_preferred_suffixes} "
+            "preferred taxonomy rows; examples: "
+            + ", ".join(pr2_preferred_suffix_examples)
+        )
 
     assignment_sources = {assignment.source_record_id for assignment in model.taxonomy_assignments}
     missing_img = [
@@ -328,5 +373,3 @@ def write_release_tables(
         output / "preferred_taxonomy.parquet", model.preferred_taxonomy
     )
     write_img_location_parquet(output / "img_location.parquet", locations)
-
-

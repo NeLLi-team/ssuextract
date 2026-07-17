@@ -54,7 +54,8 @@ nav:
       - Command-line parameters: reference/cli.md
       - Output files: reference/outputs.md
       - Database profiles: reference/database-profiles.md
-      - Example runtime and memory: reference/performance.md
+      - Database composition: reference/database-composition.md
+      - Runtime and memory: reference/performance.md
   - How it works:
       - explanation/index.md
       - Pipeline design: explanation/pipeline.md

@@ -1,0 +1,257 @@
+{
+  "build_source_tree": {
+    "scope": "fingerprinted database-build code, configuration, environment lock, and notices",
+    "sha256": "4ab802129221c47db989ed6334df366d1c287f62825f6da4fccf312cbe6027ce"
+  },
+  "database_release": {
+    "doi": "10.5281/zenodo.21406878",
+    "state": "published",
+    "url": "https://zenodo.org/records/21406878",
+    "version": "1.0.1",
+    "zenodo_concept_record_id": "21367798",
+    "zenodo_record_id": 21406878
+  },
+  "inputs": [
+    {
+      "bytes": 140,
+      "profile": "curated",
+      "sha256": "8a706079542b2d50ec9d9040b26fce59a4152b0863a5e2ab86f0cad392c4d9cd",
+      "table": "img_location"
+    },
+    {
+      "bytes": 23553054,
+      "profile": "curated",
+      "sha256": "17fdcf55e69f23a1338f9f14ed9c47f4c67929deacf0fc31c441db0f542e756e",
+      "table": "preferred_taxonomy"
+    },
+    {
+      "bytes": 41707182,
+      "profile": "curated",
+      "sha256": "68cbdaef571f2828d837f617e7f51084b4812afbe610e6b27ac784a43837c855",
+      "table": "sequences"
+    },
+    {
+      "bytes": 71311364,
+      "profile": "curated",
+      "sha256": "61ab3ec8f75a7307af3c685d8a78c97e56feaf81d56b3e1de98be2a8110b5ea2",
+      "table": "source_records"
+    },
+    {
+      "bytes": 74298414,
+      "profile": "curated",
+      "sha256": "69b8a9593d95d8e4bb8077f21cad0c927411b09ebf8c4fb1a1c8e9c33fc507cd",
+      "table": "taxonomy_assignments"
+    },
+    {
+      "bytes": 177700,
+      "profile": "img",
+      "sha256": "8bde59cb14ad4d27efc5e8a8b6b898eb71fdf9983200b446bc0d654faed5597c",
+      "table": "img_location"
+    },
+    {
+      "bytes": 51696141,
+      "profile": "img",
+      "sha256": "0019d302be4fc817a778f022afe42a56dbc435ab981d92239d1148f5ba84767f",
+      "table": "preferred_taxonomy"
+    },
+    {
+      "bytes": 95384025,
+      "profile": "img",
+      "sha256": "204b4c516201cec56480aa61602a6e9e714ecf2ffb30187de264b6f188bbd7ce",
+      "table": "sequences"
+    },
+    {
+      "bytes": 166695466,
+      "profile": "img",
+      "sha256": "27d07b09d565c130d3209b81965e72cc812b400f8e948f8af4f53e75287ea80c",
+      "table": "source_records"
+    },
+    {
+      "bytes": 185289160,
+      "profile": "img",
+      "sha256": "ceeb334a01ea8af98bccc077b5d3af97fed0d201d260329f8f1dbcc3dd490d09",
+      "table": "taxonomy_assignments"
+    }
+  ],
+  "outputs": [
+    {
+      "bytes": 1238,
+      "path": "docs/data/database_composition.tsv",
+      "sha256": "670fcee2eac234bf875a85b8c03050a11e3f29de5a028d3dffbb986ac93c5bc7"
+    },
+    {
+      "bytes": 1182,
+      "path": "docs/data/database_sources.tsv",
+      "sha256": "6b34395c748dd3a7401cbab47fadc454ba874ea3bf58a0fb8f322dd10ece051a"
+    },
+    {
+      "bytes": 468,
+      "path": "docs/data/database_taxonomy_resolution.tsv",
+      "sha256": "8a49202269f7c107d8497d58c6e4f7348bebe2ef7c4d33b2ed624713d8a6d092"
+    },
+    {
+      "bytes": 11047,
+      "path": "docs/data/database_taxonomy_lineages.tsv",
+      "sha256": "13c1fc011a8a960e2865d7474f44aeb3cab5c5245b7e95bf09153bda04db0a0b"
+    },
+    {
+      "bytes": 273684,
+      "path": "docs/data/img_taxon_locations.parquet",
+      "sha256": "635ab5ef68affe013ce1e98c616f94ce43a9d739f4a3303294c29ff2cf642263"
+    },
+    {
+      "bytes": 119419,
+      "path": "docs/data/img_location_sites.parquet",
+      "sha256": "0ad9a008d658afb9f24b6768b03b9b09bdb017cc3b5d0ba57b709274f53e8dc1"
+    }
+  ],
+  "privacy": {
+    "excluded_source_metadata": "all non-allowlisted IMG metadata fields",
+    "img_location_columns": [
+      "taxon_oid",
+      "latitude",
+      "longitude"
+    ]
+  },
+  "profiles": {
+    "curated": {
+      "archive": {
+        "bytes": 362155210,
+        "sha256": "1f4e705ea271818edc71abb376e065234d872b3f8f921f2b56c0970f17ace03b",
+        "url": "https://zenodo.org/records/21406878/files/ssuextract-db-curated-v1.0.1.tar.zst?download=1"
+      },
+      "counts": {
+        "preferred_taxonomy": 609298,
+        "sequences": 609298,
+        "source_records": 683597,
+        "taxonomy_assignments": 683597
+      },
+      "manifest_sha256": "ec6c29ac7c5581152730b04dcd4976d8bb78d989cecb1bf4469720d1a9293590",
+      "markers": {
+        "16S": {
+          "sequences": 416021,
+          "source_records": 460239
+        },
+        "18S": {
+          "sequences": 193282,
+          "source_records": 223358
+        }
+      },
+      "sources": [
+        {
+          "reference_source": "PR2",
+          "source_records": 232042,
+          "source_version": "5.1.1"
+        },
+        {
+          "reference_source": "SILVA",
+          "source_records": 451555,
+          "source_version": "138.2"
+        }
+      ],
+      "version": "1.0.1"
+    },
+    "img": {
+      "archive": {
+        "bytes": 869070007,
+        "sha256": "0cff7fb8d6969b2cc3be93deb2a19c0536bc7bd931a9c7dee467005999103852",
+        "url": "https://zenodo.org/records/21406878/files/ssuextract-db-img-v1.0.1.tar.zst?download=1"
+      },
+      "coordinate_coverage": {
+        "located_source_records": 931810,
+        "located_taxa": 30349,
+        "location_table_rows": 32520,
+        "marker_groups": [
+          {
+            "marker_group": "16S + 18S",
+            "sites": 3445
+          },
+          {
+            "marker_group": "16S only",
+            "sites": 1336
+          },
+          {
+            "marker_group": "18S only",
+            "sites": 75
+          }
+        ],
+        "sites": 4856,
+        "source_records": 997180,
+        "taxa": 32521,
+        "taxa_without_location_row": 1
+      },
+      "counts": {
+        "preferred_taxonomy": 1396949,
+        "sequences": 1396949,
+        "source_records": 1680777,
+        "taxonomy_assignments": 1680777
+      },
+      "manifest_sha256": "5a035dc9e73fc424ee6dd91ba9b00a67b5913596ec475ab6ddd4e9b18e20beb9",
+      "markers": {
+        "16S": {
+          "sequences": 1067340,
+          "source_records": 1299461
+        },
+        "18S": {
+          "sequences": 329614,
+          "source_records": 381316
+        }
+      },
+      "sources": [
+        {
+          "reference_source": "IMG",
+          "source_records": 997180,
+          "source_version": "2025"
+        },
+        {
+          "reference_source": "PR2",
+          "source_records": 232042,
+          "source_version": "5.1.1"
+        },
+        {
+          "reference_source": "SILVA",
+          "source_records": 451555,
+          "source_version": "138.2"
+        }
+      ],
+      "version": "1.0.1"
+    }
+  },
+  "schema_version": 2,
+  "taxonomy_policy": {
+    "Archaea": "SILVA 138.2",
+    "Bacteria": "SILVA 138.2",
+    "Eukaryota": "PR2 5.1.1",
+    "cross_domain_exact_sequence": "explicit ambiguity with native alternatives"
+  },
+  "taxonomy_summary": {
+    "Archaea": {
+      "target_rank": "phylum",
+      "taxonomy_position": 2,
+      "taxonomy_source": "SILVA",
+      "taxonomy_source_version": "138.2"
+    },
+    "Bacteria": {
+      "target_rank": "phylum",
+      "taxonomy_position": 2,
+      "taxonomy_source": "SILVA",
+      "taxonomy_source_version": "138.2"
+    },
+    "Eukaryota": {
+      "normalization": "PR2 compartment suffixes are removed from every taxonomy rank during import",
+      "normalized_suffixes": [
+        "apic",
+        "chro",
+        "chrom",
+        "mito",
+        "nucl",
+        "plas"
+      ],
+      "target_rank": "supergroup",
+      "taxonomy_position": 2,
+      "taxonomy_source": "PR2",
+      "taxonomy_source_version": "5.1.1"
+    },
+    "unresolved_definition": "no non-empty second taxonomy segment, or a second segment labeled unclassified or incertae sedis"
+  }
+}

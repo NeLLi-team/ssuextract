@@ -13,9 +13,10 @@
 
 ## Counting behavior
 
-`cmsearch_summary.tsv` retains individual accepted hits. In
+`cmsearch_summary.tsv` retains hits after overlapping RF00177 and RF01960
+matches on the same strand have competed by Infernal E-value and bit score. In
 `cmsearch_summary.tab`, one contig contributes at most once to each sample-level
-annotation category even when multiple models identify it.
+annotation category.
 
 Samples without accepted hits remain in `cmsearch_summary.tab`. Their detailed
 summary contains a header and no data rows; per-model hit tables also contain
@@ -26,4 +27,3 @@ headers only.
 Hit coordinates are the 1-based inclusive values reported by Infernal. The
 extracted sequence includes both endpoints. Reverse-strand records contain the
 reverse complement of that interval.
-

@@ -9,10 +9,43 @@ mkdir -p \
     "${test_dir}/query" \
     "${test_dir}/database/curated/blast" \
     "${test_dir}/database/curated/metadata"
-cp "${repo}/data/example/LKH565_P11_Ci.fna" "${test_dir}/query/"
+
+integration_fasta="${test_dir}/model-competition.fna"
+python3 - \
+    "${repo}/data/example/LKH565_P11_Ci.fna" \
+    "${repo}/data/example/LKH462_P08_Rh.fna" \
+    "${integration_fasta}" \
+    "${test_dir}/query" <<'PY'
+import sys
+from pathlib import Path
+
+from Bio import SeqIO
+
+
+targets = {
+    "LKH565_P11_Ci|NODE_19_length_16319_cov_4.794085",
+    "LKH462_P08_Rh|NODE_382_length_10603_cov_3.207614",
+}
+records = [
+    record
+    for source in map(Path, sys.argv[1:3])
+    for record in SeqIO.parse(source, "fasta")
+    if record.id in targets
+]
+if {record.id for record in records} != targets:
+    raise SystemExit("could not construct the two-locus model competition fixture")
+SeqIO.write(records, sys.argv[3], "fasta")
+query_dir = Path(sys.argv[4])
+for record in records:
+    sample = (
+        "bacterial_locus"
+        if "NODE_19_" in record.id
+        else "eukaryotic_locus"
+    )
+    SeqIO.write([record], query_dir / f"{sample}.fna", "fasta")
+PY
 
 for marker in 16S 18S; do
-    subject=ref${marker%S}
     if [[ "${marker}" == "16S" ]]; then
         model=RF00177
     else
@@ -24,13 +57,65 @@ for marker in 16S 18S; do
         -o /dev/null \
         --tblout "${test_dir}/${model}.out" \
         "${repo}/resources/models/${model}.cm" \
-        "${repo}/data/example/LKH565_P11_Ci.fna"
+        "${integration_fasta}"
+done
+
+python3 "${repo}/scripts/resolve_model_hits.py" \
+    --cmsearch "${test_dir}/RF00177.out" \
+    --cmsearch "${test_dir}/RF01960.out" \
+    --output "${test_dir}/accepted-hits.tsv"
+
+PYTHONPATH="${repo}/scripts" python3 - \
+    "${test_dir}/RF00177.out" \
+    "${test_dir}/RF01960.out" \
+    "${test_dir}/accepted-hits.tsv" <<'PY'
+import sys
+
+from hit_processing import parse_cmsearch_tblout, read_accepted_hits
+
+
+raw = [
+    hit
+    for path in sys.argv[1:3]
+    for hit in parse_cmsearch_tblout(path)
+    if hit.included
+]
+accessions = {hit.model_accession for hit in raw}
+if accessions != {"RF00177", "RF01960"}:
+    raise SystemExit(f"bundled models emitted wrong accessions: {sorted(accessions)}")
+
+by_subject = {}
+for hit in raw:
+    by_subject.setdefault(hit.subject, set()).add(hit.model_accession)
+if len(by_subject) != 2 or any(
+    models != {"RF00177", "RF01960"}
+    for models in by_subject.values()
+):
+    raise SystemExit(f"fixture did not produce cross-model competition: {by_subject}")
+
+accepted = read_accepted_hits(sys.argv[3])
+observed = {(hit.subject, hit.model_accession) for hit in accepted}
+expected = {
+    ("LKH565_P11_Ci|NODE_19_length_16319_cov_4.794085", "RF00177"),
+    ("LKH462_P08_Rh|NODE_382_length_10603_cov_3.207614", "RF01960"),
+}
+if observed != expected:
+    raise SystemExit(f"wrong combined model resolution: {sorted(observed)}")
+PY
+
+for marker in 16S 18S; do
+    subject=ref${marker%S}
+    if [[ "${marker}" == "16S" ]]; then
+        model=RF00177
+    else
+        model=RF01960
+    fi
     python3 "${repo}/scripts/extract_hits.py" \
-        --cmsearch "${test_dir}/${model}.out" \
         --model-file "${repo}/resources/models/${model}.cm" \
-        --fasta "${repo}/data/example/LKH565_P11_Ci.fna" \
+        --fasta "${integration_fasta}" \
         --sample database-test \
         --model "${model}" \
+        --accepted-hits "${test_dir}/accepted-hits.tsv" \
         --minimum-length 500 \
         --fasta-output "${test_dir}/${model}.fna" \
         --hits-output "${test_dir}/${model}.hits.tsv" \
@@ -266,20 +351,22 @@ from pathlib import Path
 
 with Path(sys.argv[1]).open(newline="") as handle:
     rows = list(csv.DictReader(handle, delimiter="\t"))
-if not rows:
-    raise SystemExit("profile-routing integration produced no hits")
-for row in rows:
-    expected = {
-        "RF00177": ("ref16", "Bacteria", "SILVA"),
-        "RF01960": ("ref18", "Eukaryota", "PR2"),
-    }[row["model"]]
-    observed = (
+observed = {
+    (
+        row["sample"],
+        row["model"],
         row["blast_sseqid"],
         row["taxonomy_domain"],
         row["taxonomy_source"],
     )
-    if observed != expected:
-        raise SystemExit(
-            f"wrong database route for {row['model']}: expected {expected}, found {observed}"
-        )
+    for row in rows
+}
+expected = {
+    ("bacterial_locus", "RF00177", "ref16", "Bacteria", "SILVA"),
+    ("eukaryotic_locus", "RF01960", "ref18", "Eukaryota", "PR2"),
+}
+if len(rows) != 2 or observed != expected:
+    raise SystemExit(
+        f"wrong resolved model/database routes: expected {expected}, found {observed}"
+    )
 PY
