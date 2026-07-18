@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -22,6 +23,11 @@ from typing import BinaryIO, Callable
 from urllib.parse import urlparse
 
 from atomic_io import fsync_directory, replace_and_fsync
+from database_download import (
+    DownloadError,
+    DownloadIntegrityError,
+    download_verified_archive,
+)
 from database_updates import (
     ReleaseDiscoveryError,
     compare_versions,
@@ -451,42 +457,19 @@ def download_archive(
     _require_size(expected_size, "archive bytes", InstallError)
     _require_sha256(expected_sha256, "archive sha256", InstallError)
 
-    digest = hashlib.sha256()
-    size = 0
-    next_percent = 10
-    _report(progress, f"Downloading archive: 0% of {_human_size(expected_size)}")
     try:
-        with opener(url, timeout=60) as response, Path(destination).open("wb") as output:
-            while chunk := response.read(1024 * 1024):
-                size += len(chunk)
-                if size > expected_size:
-                    raise IntegrityError(
-                        f"Archive size exceeds catalog value: expected {expected_size} bytes"
-                    )
-                digest.update(chunk)
-                output.write(chunk)
-                percent = size * 100 // expected_size
-                while percent >= next_percent and next_percent <= 100:
-                    _report(
-                        progress,
-                        f"Downloading archive: {next_percent}% "
-                        f"({_human_size(size)} of {_human_size(expected_size)})",
-                    )
-                    next_percent += 10
-    except DatabaseError:
-        raise
-    except (OSError, ValueError) as error:
-        raise InstallError(f"Could not download database archive {url}: {error}") from error
-
-    if size != expected_size:
-        raise IntegrityError(
-            f"Archive size mismatch: expected {expected_size} bytes, received {size}"
+        download_verified_archive(
+            url,
+            destination,
+            expected_size,
+            expected_sha256,
+            opener=opener,
+            progress=progress,
         )
-    actual_digest = digest.hexdigest()
-    if actual_digest != expected_sha256:
-        raise IntegrityError(
-            f"Archive SHA-256 mismatch: expected {expected_sha256}, found {actual_digest}"
-        )
+    except DownloadIntegrityError as error:
+        raise IntegrityError(str(error)) from error
+    except DownloadError as error:
+        raise InstallError(str(error)) from error
 
 
 def _catalog_for_install(
@@ -632,6 +615,18 @@ def _recover_interrupted_backup(
     )
 
 
+def _remove_verified_download(path: Path, root: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+        fsync_directory(root)
+    except OSError as error:
+        warnings.warn(
+            f"Could not remove verified download cache {path}: {error}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+
 def _install_profile_locked(
     root: str | Path,
     profile: str,
@@ -663,10 +658,12 @@ def _install_profile_locked(
         f"Installing profile {profile!r} v{entry['version']} "
         f"({_human_size(archive['bytes'])}) into {target}",
     )
-    with tempfile.TemporaryDirectory(prefix=f".{profile}.staging-", dir=root_path) as temporary:
-        staging = Path(temporary)
-        archive_path = staging / "profile.tar"
-        extracted = staging / "extracted"
+    host = hashlib.sha256(socket.gethostname().encode()).hexdigest()[:12]
+    archive_path = (
+        root_path
+        / f".{profile}.download-v{entry['version']}-{archive['sha256']}-{host}.part"
+    )
+    with contextlib.ExitStack() as cleanup:
         download_archive(
             archive["url"],
             archive_path,
@@ -675,6 +672,12 @@ def _install_profile_locked(
             opener=opener,
             progress=progress,
         )
+        cleanup.callback(_remove_verified_download, archive_path, root_path)
+        temporary = cleanup.enter_context(
+            tempfile.TemporaryDirectory(prefix=f".{profile}.staging-", dir=root_path)
+        )
+        staging = Path(temporary)
+        extracted = staging / "extracted"
         _report(progress, "Extracting archive...")
         safe_extract_tar(archive_path, extracted)
         source = _find_extracted_profile(extracted)

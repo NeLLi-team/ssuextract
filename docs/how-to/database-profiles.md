@@ -27,6 +27,12 @@ checks Zenodo for the latest database release, and verifies the release and
 archive checksums before installation. The bundled catalog is used if Zenodo
 cannot be reached during a first installation.
 
+Setup stops after five consecutive transient download failures. If the retained
+bytes fail verification or the server rejects their byte range, setup makes one
+clean restart for that condition. Run the same setup command again after a
+stopped transfer. The next run requests the remaining bytes and verifies the
+complete archive size and SHA-256 digest before extracting it.
+
 ## Update an installed profile
 
 Pipeline runs print the installed database version and check Zenodo for the

@@ -29,6 +29,14 @@ Archive extraction takes place in a staging directory. The profile becomes the
 installed profile after its manifest files and BLAST indexes validate. A failed
 replacement restores the installed profile.
 
+Archive downloads use a 60-second network read timeout and stop after five
+consecutive transient failures. A partial archive is keyed by profile, database
+version, archive SHA-256 digest, and host. A later setup run resumes it only when
+the server returns a matching HTTP byte range. A rejected range or failed
+checksum permits one clean restart for that condition. The installer checks the
+final byte count and SHA-256 digest before extraction. It removes the verified
+download cache after using the archive.
+
 `pixi run ssuextract` checks Zenodo before starting Nextflow. The check has a
 five-second total timeout. A valid installed profile remains usable when the
 check times out, Zenodo is unavailable, or the remote release contract fails

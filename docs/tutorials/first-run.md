@@ -34,7 +34,8 @@ Database profile [1, curated]:
 Press Enter to select `curated`. Press Enter again to accept
 `resources/database`, or enter another writable directory. The terminal reports
 the download percentage, extraction, file validation, and the installed
-database version.
+database version. If the download stops, rerun `pixi run setup`. Setup continues
+the selected database download from the retained partial archive.
 
 ## Run the bundled assembly
 

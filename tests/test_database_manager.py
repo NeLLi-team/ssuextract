@@ -13,6 +13,7 @@ from unittest import mock
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
+import database_download as downloader
 import database_manager as manager
 
 
@@ -71,6 +72,35 @@ class FakeResponse(io.BytesIO):
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
+
+
+class FakeHTTPResponse(FakeResponse):
+    def __init__(self, data: bytes, status: int, headers: dict[str, str]) -> None:
+        super().__init__(data)
+        self.status = status
+        self.headers = headers
+
+    def geturl(self) -> str:
+        return "https://example.org/curated.tar.gz"
+
+
+class InterruptingHTTPResponse(FakeHTTPResponse):
+    def __init__(
+        self,
+        data: bytes,
+        status: int,
+        headers: dict[str, str],
+        interrupt_after: int,
+    ) -> None:
+        super().__init__(data, status, headers)
+        self.remaining = interrupt_after
+
+    def read(self, size: int = -1) -> bytes:
+        if self.remaining == 0:
+            raise TimeoutError("simulated manager-level timeout")
+        chunk = super().read(min(size, self.remaining))
+        self.remaining -= len(chunk)
+        return chunk
 
 
 def tar_bytes(files: dict[str, bytes]) -> bytes:
@@ -472,7 +502,7 @@ class DatabaseManagerTests(unittest.TestCase):
             )
 
             def opener(url, timeout):
-                self.assertEqual(url, "https://example.org/curated.tar.gz")
+                self.assertEqual(url.full_url, "https://example.org/curated.tar.gz")
                 self.assertEqual(timeout, 60)
                 return FakeResponse(archive)
 
@@ -547,6 +577,109 @@ class DatabaseManagerTests(unittest.TestCase):
                 (installed / "blast" / "ssu.fake").read_bytes(), artifact
             )
             replace_and_sync.assert_called_once()
+
+    @mock.patch.object(manager.subprocess, "run", side_effect=blast_ok)
+    def test_manager_retry_resumes_retained_partial_and_removes_cache(self, run) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "databases"
+            artifact = b"valid-index"
+            manifest = {
+                "schema_version": 1,
+                "profile": "curated",
+                "version": "test-2",
+                "artifacts": [
+                    {
+                        "path": "blast/ssu.fake",
+                        "bytes": len(artifact),
+                        "sha256": sha256(artifact),
+                    }
+                ],
+                "blast_databases": {"16S": {"prefix": "blast/ssu"}},
+                "taxonomy_database": {"preferred": "blast/ssu.fake"},
+            }
+            archive = tar_bytes(
+                {
+                    "curated/manifest.json": json.dumps(manifest).encode(),
+                    "curated/blast/ssu.fake": artifact,
+                }
+            )
+            catalog = Path(tmp) / "catalog.json"
+            write_json(
+                catalog,
+                {
+                    "schema_version": 1,
+                    "default_profile": "curated",
+                    "profiles": {
+                        "curated": {
+                            "version": "test-2",
+                            "archive": {
+                                "url": "https://example.org/curated.tar.gz",
+                                "bytes": len(archive),
+                                "sha256": sha256(archive),
+                            },
+                        }
+                    },
+                },
+            )
+            first_ranges: list[str | None] = []
+
+            def response_for(request, interrupt: bool):
+                requested_range = request.get_header("Range")
+                offset = (
+                    int(requested_range.split("=")[1].split("-")[0])
+                    if requested_range
+                    else 0
+                )
+                body = archive[offset:]
+                status = 206 if offset else 200
+                headers = {"Content-Length": str(len(body))}
+                if offset:
+                    headers["Content-Range"] = (
+                        f"bytes {offset}-{len(archive) - 1}/{len(archive)}"
+                    )
+                response_type = InterruptingHTTPResponse if interrupt else FakeHTTPResponse
+                if interrupt:
+                    return response_type(body, status, headers, 10)
+                return response_type(body, status, headers)
+
+            def interrupted_opener(request, timeout):
+                first_ranges.append(request.get_header("Range"))
+                return response_for(request, interrupt=True)
+
+            with mock.patch.object(downloader.time, "sleep") as sleep:
+                with self.assertRaisesRegex(manager.InstallError, "stopped after 5 attempts"):
+                    manager.install_profile(
+                        root,
+                        "curated",
+                        catalog_path=catalog,
+                        opener=interrupted_opener,
+                    )
+            self.assertEqual(sleep.call_count, 4)
+            self.assertEqual(
+                first_ranges,
+                [None]
+                + [f"bytes={offset}-{len(archive) - 1}" for offset in (10, 20, 30, 40)],
+            )
+            partials = list(root.glob(".curated.download-*.part"))
+            self.assertEqual(len(partials), 1)
+            self.assertEqual(partials[0].stat().st_size, 50)
+            self.assertFalse((root / "curated").exists())
+
+            resumed_ranges: list[str | None] = []
+
+            def resumed_opener(request, timeout):
+                resumed_ranges.append(request.get_header("Range"))
+                return response_for(request, interrupt=False)
+
+            installed = manager.install_profile(
+                root,
+                "curated",
+                catalog_path=catalog,
+                opener=resumed_opener,
+            )
+            self.assertEqual((installed / "blast" / "ssu.fake").read_bytes(), artifact)
+            self.assertEqual(resumed_ranges, [f"bytes=50-{len(archive) - 1}"])
+            self.assertFalse(partials[0].exists())
 
     @mock.patch.object(manager.subprocess, "run", side_effect=blast_ok)
     def test_replacement_rename_failure_restores_previous_profile(self, run) -> None:
