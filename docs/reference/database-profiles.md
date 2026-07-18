@@ -37,9 +37,9 @@ checksum permits one clean restart for that condition. The installer checks the
 final byte count and SHA-256 digest before extraction. It removes the verified
 download cache after using the archive.
 
-Interactive terminals redraw one progress line with written bytes, transfer
-rate, and estimated time remaining. Non-interactive logs retain each timed
-update as a separate line.
+Interactive terminals redraw a width-bounded progress line with written bytes,
+transfer rate, and estimated time remaining. Non-interactive logs include the
+start, completion, and intermediate progress every 10 seconds.
 
 `pixi run ssuextract` checks Zenodo before starting Nextflow. The check has a
 five-second total timeout. A valid installed profile remains usable when the

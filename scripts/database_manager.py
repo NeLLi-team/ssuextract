@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 import uuid
 import warnings
@@ -46,6 +47,13 @@ SCHEMA_VERSION = 1
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_DOWNLOAD_PROGRESS = re.compile(
+    r"^Downloading archive: \[[=-]+\]\s+"
+    r"(?P<percent>[0-9]+(?:\.[0-9]+)?)% "
+    r"\((?P<written>.+?) of (?P<total>.+?)\) "
+    r"(?P<rate>.+?/s) ETA (?P<eta>\S+)$"
+)
+_NON_TTY_PROGRESS_INTERVAL = 10.0
 
 ProgressReporter = Callable[[str], None] | None
 
@@ -132,18 +140,88 @@ def _report(progress: ProgressReporter, message: str) -> None:
 
 
 class _ConsoleProgress:
-    def __init__(self, stream: TextIO) -> None:
+    def __init__(
+        self,
+        stream: TextIO,
+        clock: Callable[[], float] = time.monotonic,
+        terminal_columns: Callable[[], int] | None = None,
+        non_tty_interval: float = _NON_TTY_PROGRESS_INTERVAL,
+    ) -> None:
+        if non_tty_interval <= 0:
+            raise ValueError("non-TTY progress interval must be positive")
         self.stream = stream
+        self.clock = clock
+        self.terminal_columns = terminal_columns or self._terminal_columns
+        self.non_tty_interval = non_tty_interval
+        self.last_non_tty_progress: float | None = None
         self.live = False
+
+    def _terminal_columns(self) -> int:
+        try:
+            return os.get_terminal_size(self.stream.fileno()).columns
+        except (AttributeError, OSError, ValueError):
+            return shutil.get_terminal_size(fallback=(80, 24)).columns
+
+    @staticmethod
+    def _download_line(message: str, columns: int) -> str:
+        limit = max(1, columns - 1)
+        match = _DOWNLOAD_PROGRESS.fullmatch(message)
+        if match is None:
+            return f"Database: {message}"[:limit]
+
+        percent = float(match.group("percent"))
+        percent_text = f"{percent:5.1f}%"
+        written = match.group("written")
+        total = match.group("total")
+        rate = match.group("rate")
+        eta = match.group("eta")
+        prefix = "Database: "
+        tails = (
+            f" {percent_text} {written}/{total} {rate} ETA {eta}",
+            f" {percent_text} {written}/{total} {rate}",
+            f" {percent_text} {written} {rate}",
+            f" {percent_text} {written}",
+        )
+        for tail in tails:
+            available = limit - len(prefix) - len(tail) - 2
+            if available < 6:
+                continue
+            width = min(24, available)
+            filled = min(width, int(percent * width / 100))
+            bar = "=" * filled + "-" * (width - filled)
+            return f"{prefix}[{bar}]{tail}"
+
+        fallbacks = (
+            f"{prefix}{percent_text} {written} {rate}",
+            f"{prefix}{percent_text} {written}",
+            f"{prefix}{percent_text}",
+        )
+        for rendered in fallbacks:
+            if len(rendered) <= limit:
+                return rendered
+        return fallbacks[-1][:limit]
 
     def __call__(self, message: str) -> None:
         rendered = f"Database: {message}"
         is_download = message.startswith("Downloading archive: [")
         if self.stream.isatty() and is_download:
+            rendered = self._download_line(message, self.terminal_columns())
             self.stream.write(f"\r{rendered}\x1b[K")
             self.stream.flush()
             self.live = True
             return
+        if is_download:
+            match = _DOWNLOAD_PROGRESS.fullmatch(message)
+            percent = float(match.group("percent")) if match is not None else None
+            now = self.clock()
+            is_boundary = percent is not None and (percent <= 0 or percent >= 100)
+            if (
+                not is_boundary
+                and self.last_non_tty_progress is not None
+                and now - self.last_non_tty_progress < self.non_tty_interval
+            ):
+                return
+            self.last_non_tty_progress = now
         self.finish()
         print(rendered, file=self.stream, flush=True)
 

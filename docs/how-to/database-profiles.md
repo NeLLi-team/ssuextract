@@ -7,8 +7,8 @@ download sizes:
 pixi run setup
 ```
 
-Select a profile by number or name. The selection and database root are stored
-in `config/local.config` for later runs.
+Select a profile by number or name. If `config/local.config` contains a previous
+selection, the prompt labels it as the default; press Enter to keep it.
 
 ## Install the curated profile
 
@@ -27,8 +27,9 @@ checks Zenodo for the latest database release, and verifies the release and
 archive checksums before installation. The bundled catalog is used if Zenodo
 cannot be reached during a first installation.
 
-The terminal progress bar reports written bytes, transfer rate, and estimated
-time remaining. In a non-interactive log, each update is written on a new line.
+The terminal progress bar updates in place and fits the detected terminal
+width. Non-interactive logs report the start, completion, and intermediate
+progress every 10 seconds.
 
 Setup stops after five consecutive transient download failures. If the retained
 bytes fail verification or the server rejects their byte range, setup makes one

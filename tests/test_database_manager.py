@@ -276,22 +276,65 @@ class DatabaseManagerTests(unittest.TestCase):
 
     def test_console_progress_redraws_terminal_bar_and_finishes_line(self) -> None:
         stream = TtyBuffer()
-        progress = manager._ConsoleProgress(stream)
-        progress("Downloading archive: [------------------------]   0.0%")
-        progress("Downloading archive: [============------------]  50.0%")
+        progress = manager._ConsoleProgress(stream, terminal_columns=lambda: 60)
+        progress(
+            "Downloading archive: [------------------------]   0.0% "
+            "(0 B of 828.8 MiB) -- B/s ETA --:--"
+        )
+        progress(
+            "Downloading archive: [============------------]  50.0% "
+            "(414.4 MiB of 828.8 MiB) 1.0 MiB/s ETA 06:54"
+        )
         progress("Extracting archive...")
         rendered = stream.getvalue()
-        self.assertEqual(rendered.count("\rDatabase: Downloading archive:"), 2)
+        updates = [
+            part.split("\x1b[K", 1)[0]
+            for part in rendered.split("\r")[1:]
+        ]
+        self.assertEqual(rendered.count("\rDatabase: ["), 2)
+        self.assertTrue(all(len(update) <= 59 for update in updates))
         self.assertIn("\x1b[K\nDatabase: Extracting archive...\n", rendered)
         self.assertFalse(progress.live)
 
-    def test_console_progress_keeps_nonterminal_updates_on_separate_lines(self) -> None:
+    def test_console_progress_adapts_detail_to_terminal_width(self) -> None:
+        message = (
+            "Downloading archive: [============------------]  50.0% "
+            "(414.4 MiB of 828.8 MiB) 1.0 MiB/s ETA 06:54"
+        )
+        narrow = manager._ConsoleProgress._download_line(message, 40)
+        wide = manager._ConsoleProgress._download_line(message, 120)
+        self.assertLessEqual(len(narrow), 39)
+        self.assertLessEqual(len(wide), 119)
+        self.assertIn("[", narrow)
+        self.assertIn("50.0%", narrow)
+        self.assertIn("1.0 MiB/s", wide)
+        self.assertIn("ETA 06:54", wide)
+
+    def test_console_progress_rate_limits_nonterminal_updates(self) -> None:
         stream = io.StringIO()
-        progress = manager._ConsoleProgress(stream)
-        progress("Downloading archive: [------------------------]   0.0%")
-        progress("Downloading archive: [============------------]  50.0%")
+        times = iter((0.0, 1.0, 11.0, 12.0))
+        progress = manager._ConsoleProgress(stream, clock=lambda: next(times))
+        progress(
+            "Downloading archive: [------------------------]   0.0% "
+            "(0 B of 828.8 MiB) -- B/s ETA --:--"
+        )
+        progress(
+            "Downloading archive: [==----------------------]  10.0% "
+            "(82.9 MiB of 828.8 MiB) 1.0 MiB/s ETA 12:26"
+        )
+        progress(
+            "Downloading archive: [=====-------------------]  20.0% "
+            "(165.8 MiB of 828.8 MiB) 1.0 MiB/s ETA 11:03"
+        )
+        progress(
+            "Downloading archive: [========================] 100.0% "
+            "(828.8 MiB of 828.8 MiB) 1.0 MiB/s ETA 00:00"
+        )
         self.assertNotIn("\r", stream.getvalue())
-        self.assertEqual(stream.getvalue().count("Database: Downloading archive:"), 2)
+        self.assertEqual(stream.getvalue().count("Database: Downloading archive:"), 3)
+        self.assertNotIn(" 10.0%", stream.getvalue())
+        self.assertIn(" 20.0%", stream.getvalue())
+        self.assertIn("100.0%", stream.getvalue())
 
     @mock.patch.object(manager, "discover_latest_catalog")
     def test_update_check_reports_newer_verified_release(self, discover) -> None:

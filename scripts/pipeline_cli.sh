@@ -150,6 +150,7 @@ prompt_database_profile() {
     local default_profile="$1"
     local profiles=""
     local default_number=""
+    local profile_count=""
     local selection=""
     local selected=""
 
@@ -165,12 +166,16 @@ prompt_database_profile() {
         printf '%s\n' "${profiles}" |
             awk -F '\t' -v profile="${default_profile}" '$1 == profile {print NR; exit}'
     )
+    profile_count=$(printf '%s\n' "${profiles}" | awk 'END {print NR}')
     [[ -n "${default_number}" ]] || default_number=1
     printf 'Available database profiles:\n' >&2
     printf '%s\n' "${profiles}" |
         awk -F '\t' '{printf "  %d) %s v%s (%s) - %s\n", NR, $1, $2, $3, $4}' >&2
     while true; do
-        printf 'Database profile [%s, %s]: ' "${default_number}" "${default_profile}" >&2
+        printf 'Database profile (1-%s) [default: %s (%s)]: ' \
+            "${profile_count}" \
+            "${default_number}" \
+            "${default_profile}" >&2
         read -r selection
         if selected=$(profile_from_selection "${selection}" "${default_profile}" "${profiles}"); then
             printf '%s\n' "${selected}"

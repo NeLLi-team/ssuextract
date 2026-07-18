@@ -296,6 +296,38 @@ class DatabaseConfigTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Could not list database profiles", result.stderr)
 
+    def test_profile_prompt_labels_saved_default_and_keeps_both_choices(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_python = Path(tmp) / "fake-python"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'curated\\t1.0.1\\t345.4 MiB\\tPR2 and SILVA\\n'\n"
+                "printf 'img\\t1.0.1\\t828.8 MiB\\tIMG enhanced\\n'\n"
+            )
+            fake_python.chmod(0o755)
+            command = 'source "$1"; PYTHON="$2"; prompt_database_profile img'
+            result = subprocess.run(
+                ["bash", "-c", command, "bash", str(CLI), str(fake_python)],
+                input="1\n",
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            default_result = subprocess.run(
+                ["bash", "-c", command, "bash", str(CLI), str(fake_python)],
+                input="\n",
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.stdout, "curated\n")
+        self.assertEqual(default_result.stdout, "img\n")
+        self.assertIn("  1) curated v1.0.1", result.stderr)
+        self.assertIn("  2) img v1.0.1", result.stderr)
+        self.assertIn(
+            "Database profile (1-2) [default: 2 (img)]: ", result.stderr
+        )
+
     def test_run_update_notice_is_written_to_stderr(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fake_python = Path(tmp) / "fake-python"

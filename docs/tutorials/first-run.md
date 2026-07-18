@@ -28,15 +28,18 @@ Setup lists both database profiles:
 Available database profiles:
   1) curated v1.0.1 (345.4 MiB) - PR2 5.1.1 and SILVA 138.2
   2) img v1.0.1 (828.8 MiB) - Curated profile plus IMG 16S rRNA gene and 18S rRNA gene sequences
-Database profile [1, curated]:
+Database profile (1-2) [default: 1 (curated)]:
 ```
 
-Press Enter to select `curated`. Press Enter again to accept
-`resources/database`, or enter another writable directory. During the download,
-the terminal shows written bytes, transfer rate, and estimated time remaining.
-It then reports extraction, file validation, and the installed database version.
-If the download stops, rerun `pixi run setup`. Setup continues the selected
-database download from the retained partial archive.
+The current default appears in brackets. A previous selection becomes the
+default on later setup runs. Press Enter to keep it, or enter `1`, `2`,
+`curated`, or `img`. For this tutorial, select `curated`. Press Enter again to
+accept `resources/database`, or enter another writable directory.
+During the download, one terminal line shows written bytes, transfer rate, and
+estimated time remaining. It then reports extraction, file validation, and the
+installed database version. If the download stops, rerun `pixi run setup`.
+Setup continues the selected database download from the retained partial
+archive.
 
 ## Run the bundled assembly
 
