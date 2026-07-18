@@ -1,9 +1,10 @@
 {
   "browser_render": {
+    "figure_serialization": "plotly-json-sorted-v1",
+    "figure_sha256": "52d45a47086b811e705801eb9696c8185ea1b6c19cf7a9e9e54261a7630a2a00",
     "height": 630,
+    "html_path": "docs/assets/figures/img-ssu-locations.html",
     "png_scale": 2,
-    "source_path": "docs/assets/figures/img-ssu-locations.html",
-    "source_sha256": "e10d11d317f8e2b91acf974a01d96ca1f2549119182a2910aacbcfd2734ed1b6",
     "svg_scale": 1,
     "width": 1200
   },
@@ -39,12 +40,12 @@
       "sha256": "4c14bc15a957ecb4b699e743b7bbfa3946573963c30fb32d3b73391a972e36f8"
     },
     {
-      "bytes": 5245018,
+      "bytes": 5249376,
       "path": "docs/assets/figures/img-ssu-locations.html",
-      "sha256": "e10d11d317f8e2b91acf974a01d96ca1f2549119182a2910aacbcfd2734ed1b6"
+      "sha256": "0283257150c68c2b2a0397dd99fc5350a1e89beb2defe166ea9fdf7fd4834d4b"
     }
   ],
-  "schema_version": 3,
+  "schema_version": 4,
   "source": {
     "bytes": 7464,
     "path": "docs/data/database_composition_provenance.json",
