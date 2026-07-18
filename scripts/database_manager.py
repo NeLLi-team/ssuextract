@@ -19,7 +19,7 @@ import urllib.request
 import uuid
 import warnings
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Callable
+from typing import BinaryIO, Callable, TextIO
 from urllib.parse import urlparse
 
 from atomic_io import fsync_directory, replace_and_fsync
@@ -129,6 +129,29 @@ def _sha256(path: Path) -> str:
 def _report(progress: ProgressReporter, message: str) -> None:
     if progress is not None:
         progress(message)
+
+
+class _ConsoleProgress:
+    def __init__(self, stream: TextIO) -> None:
+        self.stream = stream
+        self.live = False
+
+    def __call__(self, message: str) -> None:
+        rendered = f"Database: {message}"
+        is_download = message.startswith("Downloading archive: [")
+        if self.stream.isatty() and is_download:
+            self.stream.write(f"\r{rendered}\x1b[K")
+            self.stream.flush()
+            self.live = True
+            return
+        self.finish()
+        print(rendered, file=self.stream, flush=True)
+
+    def finish(self) -> None:
+        if self.live:
+            self.stream.write("\n")
+            self.stream.flush()
+            self.live = False
 
 
 def _human_size(size: int) -> str:
@@ -864,7 +887,7 @@ def _print_update_result(result: dict[str, str], profile: str, output_format: st
     if result["status"] == "update_available":
         print(
             f"Database update available for {profile!r}: v{installed} -> v{latest}. "
-            f"Run 'pixi run setup -- --database_profile {profile} --update'."
+            f"Run 'pixi run setup --database_profile {profile} --update'."
         )
     elif result["status"] == "current":
         print(f"Database profile {profile!r}: installed v{installed}; latest v{latest}.")
@@ -882,6 +905,7 @@ def _print_update_result(result: dict[str, str], profile: str, output_format: st
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    progress = _ConsoleProgress(sys.stderr)
     try:
         if args.command == "profiles":
             catalog = load_catalog(args.catalog)
@@ -930,14 +954,15 @@ def main(argv: list[str] | None = None) -> int:
                     replace=args.force,
                     latest=args.latest,
                     timeout=args.timeout,
-                    progress=lambda message: print(
-                        f"Database: {message}", file=sys.stderr, flush=True
-                    ),
+                    progress=progress,
                 )
             )
     except DatabaseError as error:
+        progress.finish()
         print(f"database-manager: {error}", file=sys.stderr)
         return 2
+    finally:
+        progress.finish()
     return 0
 
 

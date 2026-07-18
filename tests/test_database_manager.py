@@ -102,6 +102,14 @@ class InterruptingHTTPResponse(FakeHTTPResponse):
         self.remaining -= len(chunk)
         return chunk
 
+    def read1(self, size: int = -1) -> bytes:
+        return self.read(size)
+
+
+class TtyBuffer(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
 
 def tar_bytes(files: dict[str, bytes]) -> bytes:
     output = io.BytesIO()
@@ -262,8 +270,28 @@ class DatabaseManagerTests(unittest.TestCase):
                 opener=lambda url, timeout: FakeResponse(data),
                 progress=messages.append,
             )
-        self.assertIn("Downloading archive: 0% of 100 B", messages)
-        self.assertTrue(any("Downloading archive: 100%" in message for message in messages))
+        self.assertTrue(any("[------------------------]" in message for message in messages))
+        self.assertTrue(any("100.0%" in message for message in messages))
+        self.assertTrue(any("ETA" in message for message in messages))
+
+    def test_console_progress_redraws_terminal_bar_and_finishes_line(self) -> None:
+        stream = TtyBuffer()
+        progress = manager._ConsoleProgress(stream)
+        progress("Downloading archive: [------------------------]   0.0%")
+        progress("Downloading archive: [============------------]  50.0%")
+        progress("Extracting archive...")
+        rendered = stream.getvalue()
+        self.assertEqual(rendered.count("\rDatabase: Downloading archive:"), 2)
+        self.assertIn("\x1b[K\nDatabase: Extracting archive...\n", rendered)
+        self.assertFalse(progress.live)
+
+    def test_console_progress_keeps_nonterminal_updates_on_separate_lines(self) -> None:
+        stream = io.StringIO()
+        progress = manager._ConsoleProgress(stream)
+        progress("Downloading archive: [------------------------]   0.0%")
+        progress("Downloading archive: [============------------]  50.0%")
+        self.assertNotIn("\r", stream.getvalue())
+        self.assertEqual(stream.getvalue().count("Database: Downloading archive:"), 2)
 
     @mock.patch.object(manager, "discover_latest_catalog")
     def test_update_check_reports_newer_verified_release(self, discover) -> None:

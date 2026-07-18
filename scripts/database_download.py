@@ -20,8 +20,10 @@ from atomic_io import fsync_directory
 
 
 CHUNK_SIZE = 1024 * 1024
+NETWORK_READ_SIZE = 64 * 1024
 DEFAULT_ATTEMPTS = 5
 DEFAULT_TIMEOUT = 60.0
+DEFAULT_PROGRESS_INTERVAL = 1.0
 _CONTENT_RANGE = re.compile(r"^bytes ([0-9]+)-([0-9]+)/([0-9]+)$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
@@ -50,6 +52,40 @@ def _human_size(size: int) -> str:
 def _report(progress: ProgressReporter, message: str) -> None:
     if progress is not None:
         progress(message)
+
+
+def _format_eta(seconds: float) -> str:
+    rounded = max(0, int(seconds + 0.5))
+    hours, remainder = divmod(rounded, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _progress_message(size: int, expected_size: int, rate: float) -> str:
+    width = 24
+    filled = min(width, size * width // expected_size)
+    bar = "=" * filled + "-" * (width - filled)
+    percent = size * 100 / expected_size
+    if rate > 0:
+        rate_text = f"{_human_size(int(rate))}/s"
+        eta_text = _format_eta((expected_size - size) / rate)
+    else:
+        rate_text = "-- B/s"
+        eta_text = "--:--"
+    return (
+        f"Downloading archive: [{bar}] {percent:5.1f}% "
+        f"({_human_size(size)} of {_human_size(expected_size)}) "
+        f"{rate_text} ETA {eta_text}"
+    )
+
+
+def _read_available(response: BinaryIO) -> bytes:
+    read1 = getattr(response, "read1", None)
+    if callable(read1):
+        return read1(NETWORK_READ_SIZE)
+    return response.read(NETWORK_READ_SIZE)
 
 
 def _header(response: BinaryIO, name: str) -> str | None:
@@ -221,6 +257,8 @@ def download_verified_archive(
     timeout: float = DEFAULT_TIMEOUT,
     attempts: int = DEFAULT_ATTEMPTS,
     sleeper: Callable[[float], None] | None = None,
+    clock: Callable[[], float] | None = None,
+    progress_interval: float = DEFAULT_PROGRESS_INTERVAL,
 ) -> None:
     """Download an HTTPS archive, retaining and resuming a release-bound partial file."""
 
@@ -229,8 +267,8 @@ def download_verified_archive(
         raise ValueError("database archive URL must use HTTPS")
     if expected_size <= 0 or _SHA256.fullmatch(expected_sha256) is None:
         raise ValueError("expected archive size and SHA-256 are invalid")
-    if timeout <= 0 or attempts <= 0:
-        raise ValueError("download timeout and attempts must be positive")
+    if timeout <= 0 or attempts <= 0 or progress_interval <= 0:
+        raise ValueError("download timeout, attempts, and progress interval must be positive")
     destination_path = Path(destination)
     try:
         destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -255,6 +293,7 @@ def download_verified_archive(
     clean_restart_used = False
     range_restart_used = False
     sleep = time.sleep if sleeper is None else sleeper
+    monotonic = time.monotonic if clock is None else clock
     attempt = 1
     while True:
         percent = size * 100 // expected_size
@@ -265,7 +304,7 @@ def download_verified_archive(
                 f"({percent}%).",
             )
         else:
-            _report(progress, f"Downloading archive: 0% of {_human_size(expected_size)}")
+            _report(progress, _progress_message(0, expected_size, 0))
 
         request = urllib.request.Request(url)
         if size:
@@ -318,12 +357,16 @@ def download_verified_archive(
                         "Archive server ignored the byte range; restarting safely from byte 0.",
                     )
                     size, digest = 0, hashlib.sha256()
-                next_percent = min(100, size * 100 // expected_size + 1) if size else 1
+                progress_started = monotonic()
+                progress_start_size = size
+                last_progress = progress_started
+                if size or ignored_range:
+                    _report(progress, _progress_message(size, expected_size, 0))
                 response_bytes = 0
                 with _open_output(destination_path, size) as output:
                     while True:
                         try:
-                            chunk = response.read(CHUNK_SIZE)
+                            chunk = _read_available(response)
                         except (
                             OSError,
                             http.client.HTTPException,
@@ -354,14 +397,19 @@ def download_verified_archive(
                         size += len(chunk)
                         response_bytes += len(chunk)
                         digest.update(chunk)
-                        current_percent = size * 100 // expected_size
-                        while current_percent >= next_percent and next_percent <= 100:
+                        now = monotonic()
+                        elapsed = now - progress_started
+                        if size == expected_size or now - last_progress >= progress_interval:
+                            rate = (
+                                (size - progress_start_size) / elapsed
+                                if elapsed > 0
+                                else 0
+                            )
                             _report(
                                 progress,
-                                f"Downloading archive: {next_percent}% "
-                                f"({_human_size(size)} of {_human_size(expected_size)})",
+                                _progress_message(size, expected_size, rate),
                             )
-                            next_percent += 1
+                            last_progress = now
                     output.flush()
                     os.fsync(output.fileno())
                 fsync_directory(destination_path.parent)

@@ -1,3 +1,5 @@
+import os
+import re
 import subprocess
 import stat
 import tempfile
@@ -86,6 +88,145 @@ class DatabaseConfigTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.stdout.strip(), "python3")
+
+    def test_version_does_not_launch_nextflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable_dir = Path(tmp)
+            nextflow = executable_dir / "nextflow"
+            nextflow.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'unexpected nextflow call\\n' >&2\n"
+                "exit 99\n"
+            )
+            nextflow.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; run_pipeline --version',
+                    "bash",
+                    str(CLI),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{executable_dir}:{os.environ['PATH']}",
+                },
+            )
+        self.assertEqual(result.stdout.strip(), "1.1.0")
+        self.assertEqual(result.stderr, "")
+
+    def test_nextflow_uses_safe_term_when_current_term_is_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable_dir = Path(tmp)
+            tput = executable_dir / "tput"
+            nextflow = executable_dir / "nextflow"
+            tput.write_text("#!/usr/bin/env bash\nexit 1\n")
+            nextflow.write_text("#!/usr/bin/env bash\nprintf '%s|%s\\n' \"$TERM\" \"$*\"\n")
+            tput.chmod(0o755)
+            nextflow.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; run_nextflow run workflow.nf --help',
+                    "bash",
+                    str(CLI),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{executable_dir}:{os.environ['PATH']}",
+                    "TERM": "xterm-kitty",
+                },
+            )
+        self.assertEqual(result.stdout.strip(), "xterm-256color|run workflow.nf --help")
+
+    def test_nextflow_keeps_supported_term(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable_dir = Path(tmp)
+            tput = executable_dir / "tput"
+            nextflow = executable_dir / "nextflow"
+            tput.write_text("#!/usr/bin/env bash\nexit 0\n")
+            nextflow.write_text("#!/usr/bin/env bash\nprintf '%s|%s\\n' \"$TERM\" \"$*\"\n")
+            tput.chmod(0o755)
+            nextflow.chmod(0o755)
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; run_nextflow run workflow.nf --help',
+                    "bash",
+                    str(CLI),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{executable_dir}:{os.environ['PATH']}",
+                    "TERM": "xterm-kitty",
+                },
+            )
+        self.assertEqual(result.stdout.strip(), "xterm-kitty|run workflow.nf --help")
+
+    def test_pipeline_injects_configured_database_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable_dir = Path(tmp)
+            tput = executable_dir / "tput"
+            nextflow = executable_dir / "nextflow"
+            tput.write_text("#!/usr/bin/env bash\nexit 0\n")
+            nextflow.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\"\n")
+            tput.chmod(0o755)
+            nextflow.chmod(0o755)
+            command = (
+                'source "$1"; '
+                'resolve_database_profile() { printf "curated\\n"; }; '
+                'resolve_database_path() { printf "/database\\n"; }; '
+                'write_database_config() { :; }; ensure_database() { :; }; '
+                'check_database_update() { :; }; '
+                'run_pipeline --querydir /queries --outdir /output'
+            )
+            result = subprocess.run(
+                ["bash", "-c", command, "bash", str(CLI)],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{executable_dir}:{os.environ['PATH']}",
+                    "TERM": "xterm-kitty",
+                },
+            )
+        self.assertEqual(
+            result.stdout.strip(),
+            f"run {REPO / 'main.nf'} --database_path /database "
+            "--database_profile curated --querydir /queries --outdir /output",
+        )
+
+    def test_public_commands_do_not_use_a_pixi_argument_separator(self) -> None:
+        public_docs = [
+            path
+            for path in sorted((REPO / "docs").rglob("*.md"))
+            if "handoffs" not in path.parts
+        ]
+        paths = [
+            REPO / "README.md",
+            REPO / "main.nf",
+            *public_docs,
+            *sorted((REPO / "scripts").glob("*.py")),
+            *sorted((REPO / "scripts").glob("*.sh")),
+        ]
+        text = "\n".join(path.read_text() for path in paths)
+        self.assertNotIn("pixi run setup -- --", text)
+        self.assertNotIn("pixi run ssuextract -- --", text)
+        self.assertIsNone(
+            re.search(r"^pixi run (?:setup|ssuextract).*\\$", text, re.MULTILINE)
+        )
 
     def test_plain_path_may_contain_database_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

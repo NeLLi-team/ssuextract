@@ -50,6 +50,23 @@ class InterruptingResponse(FakeResponse):
         remaining = self.interrupt_after - self.tell()
         return super().read(min(size, remaining))
 
+    def read1(self, size: int = -1) -> bytes:
+        return self.read(size)
+
+
+class AvailableBytesResponse(FakeResponse):
+    def __init__(self, data: bytes, available: int) -> None:
+        super().__init__(data, headers={"Content-Length": str(len(data))})
+        self.available = available
+        self.read1_calls = 0
+
+    def read(self, size: int = -1) -> bytes:
+        raise TimeoutError("full-buffer read waited too long")
+
+    def read1(self, size: int = -1) -> bytes:
+        self.read1_calls += 1
+        return super().read(min(size, self.available))
+
 
 def sha256(data: bytes) -> str:
     import hashlib
@@ -164,6 +181,49 @@ class DatabaseDownloadTests(unittest.TestCase):
 
         self.assertIsNone(requests[0].get_header("Range"))
         self.assertEqual(requests[1].get_header("Range"), "bytes=4-9")
+
+    def test_available_bytes_are_persisted_without_full_buffer_read(self) -> None:
+        data = b"0123456789"
+        response = AvailableBytesResponse(data, available=2)
+        messages: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "database.part"
+            downloader.download_verified_archive(
+                "https://example.org/database.tar.zst",
+                destination,
+                len(data),
+                sha256(data),
+                opener=lambda request, timeout: response,
+                progress=messages.append,
+            )
+            self.assertEqual(destination.read_bytes(), data)
+        self.assertGreater(response.read1_calls, 1)
+        self.assertTrue(any("100.0%" in message for message in messages))
+        self.assertTrue(any("ETA" in message for message in messages))
+
+    def test_progress_clock_controls_rate_eta_and_update_interval(self) -> None:
+        data = b"012345"
+        response = AvailableBytesResponse(data, available=2)
+        messages: list[str] = []
+        ticks = iter((0.0, 1.0, 2.0, 3.0))
+        with tempfile.TemporaryDirectory() as tmp:
+            downloader.download_verified_archive(
+                "https://example.org/database.tar.zst",
+                Path(tmp) / "database.part",
+                len(data),
+                sha256(data),
+                opener=lambda request, timeout: response,
+                progress=messages.append,
+                clock=lambda: next(ticks),
+                progress_interval=1.0,
+            )
+        self.assertTrue(
+            any(
+                "33.3%" in message and "2 B/s ETA 00:02" in message
+                for message in messages
+            )
+        )
+        self.assertEqual(sum("2 B/s" in message for message in messages), 3)
 
     def test_later_invocation_resumes_retained_partial(self) -> None:
         data = b"abcdefghij"

@@ -37,10 +37,14 @@ checksum permits one clean restart for that condition. The installer checks the
 final byte count and SHA-256 digest before extraction. It removes the verified
 download cache after using the archive.
 
+Interactive terminals redraw one progress line with written bytes, transfer
+rate, and estimated time remaining. Non-interactive logs retain each timed
+update as a separate line.
+
 `pixi run ssuextract` checks Zenodo before starting Nextflow. The check has a
 five-second total timeout. A valid installed profile remains usable when the
 check times out, Zenodo is unavailable, or the remote release contract fails
-validation. Updates require `pixi run setup -- --update` or confirmation in
+validation. Updates require `pixi run setup --update` or confirmation in
 interactive setup.
 
 ## Runtime files

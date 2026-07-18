@@ -33,6 +33,14 @@ has_information_flag() {
     return 1
 }
 
+run_nextflow() {
+    if [[ -n "${TERM:-}" ]] && ! tput colors >/dev/null 2>&1; then
+        TERM=xterm-256color command nextflow "$@"
+        return
+    fi
+    command nextflow "$@"
+}
+
 cli_has_option() {
     local option="$1"
     shift
@@ -362,7 +370,7 @@ setup_database() {
                     --latest \
                     --force
             else
-                printf "Run 'pixi run setup -- --database_profile %s --update' to update.\n" \
+                printf "Run 'pixi run setup --database_profile %s --update' to update.\n" \
                     "${profile}" >&2
             fi
             ;;
@@ -389,8 +397,12 @@ run_pipeline() {
     local profile=""
     local nextflow_args=()
 
+    if [[ "$#" -eq 1 && "$1" == "--version" ]]; then
+        "${PYTHON}" "${PROJECT_DIR}/scripts/check_version.py"
+        return
+    fi
     if has_information_flag "$@"; then
-        nextflow run "${PROJECT_DIR}/main.nf" "$@"
+        run_nextflow run "${PROJECT_DIR}/main.nf" "$@"
         return
     fi
 
@@ -403,11 +415,11 @@ run_pipeline() {
     check_database_update "${db_dir}" "${profile}"
 
     if cli_has_database_path "$@" && cli_has_database_profile "$@"; then
-        nextflow run "${PROJECT_DIR}/main.nf" "$@"
+        run_nextflow run "${PROJECT_DIR}/main.nf" "$@"
         return
     fi
 
-    nextflow_args=(nextflow run "${PROJECT_DIR}/main.nf")
+    nextflow_args=(run_nextflow run "${PROJECT_DIR}/main.nf")
     if ! cli_has_database_path "$@"; then
         nextflow_args+=(--database_path "${db_dir}")
     fi

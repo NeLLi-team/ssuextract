@@ -13,7 +13,7 @@ pixi install --frozen
 Check the installed version:
 
 ```bash
-pixi run ssuextract -- --version
+pixi run ssuextract --version
 ```
 
 ## Install the reference database
@@ -32,10 +32,11 @@ Database profile [1, curated]:
 ```
 
 Press Enter to select `curated`. Press Enter again to accept
-`resources/database`, or enter another writable directory. The terminal reports
-the download percentage, extraction, file validation, and the installed
-database version. If the download stops, rerun `pixi run setup`. Setup continues
-the selected database download from the retained partial archive.
+`resources/database`, or enter another writable directory. During the download,
+the terminal shows written bytes, transfer rate, and estimated time remaining.
+It then reports extraction, file validation, and the installed database version.
+If the download stops, rerun `pixi run setup`. Setup continues the selected
+database download from the retained partial archive.
 
 ## Run the bundled assembly
 

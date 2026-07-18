@@ -315,7 +315,7 @@ def loadDatabaseConfig(databasePath, profile) {
         if (profile.toString() != 'curated') {
             throw new IllegalArgumentException(
                 "Database profile '${profile}' is not installed under ${root}. " +
-                "Run 'pixi run setup -- --database_profile ${profile}'."
+                "Run 'pixi run setup --database_profile ${profile}'."
             )
         }
         def legacyPrefix = new File(root, 'silva-138-1_pr2-4-12').toString()
@@ -323,7 +323,7 @@ def loadDatabaseConfig(databasePath, profile) {
             if (!new File("${legacyPrefix}.${suffix}").isFile()) {
                 throw new IllegalArgumentException(
                     "Database profile '${profile}' is not installed under ${root}. " +
-                    "Run 'pixi run setup -- --database_profile ${profile}'."
+                    "Run 'pixi run setup --database_profile ${profile}'."
                 )
             }
         }
