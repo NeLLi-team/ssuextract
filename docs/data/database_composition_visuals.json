@@ -1,4 +1,12 @@
 {
+  "browser_render": {
+    "height": 630,
+    "png_scale": 2,
+    "source_path": "docs/assets/figures/img-ssu-locations.html",
+    "source_sha256": "e10d11d317f8e2b91acf974a01d96ca1f2549119182a2910aacbcfd2734ed1b6",
+    "svg_scale": 1,
+    "width": 1200
+  },
   "outputs": [
     {
       "bytes": 184337,
@@ -36,7 +44,7 @@
       "sha256": "e10d11d317f8e2b91acf974a01d96ca1f2549119182a2910aacbcfd2734ed1b6"
     }
   ],
-  "schema_version": 2,
+  "schema_version": 3,
   "source": {
     "bytes": 7464,
     "path": "docs/data/database_composition_provenance.json",

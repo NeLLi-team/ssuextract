@@ -24,6 +24,8 @@ jobs:
       - run: pixi run --manifest-path docs-env/pixi.toml register-kernel
       - run: pixi run --manifest-path docs-env/pixi.toml render-architecture
       - run: pixi run --manifest-path docs-env/pixi.toml execute-notebooks
+        env:
+          SSUEXTRACT_RENDER_STATIC_MAP: "0"
       - run: >-
           git diff --exit-code --
           docs/assets/figures/pipeline-architecture.svg
