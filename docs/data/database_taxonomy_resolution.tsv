@@ -1,7 +1,7 @@
 profile	version	domain	target_rank	total_sequences	resolved_sequences	unresolved_sequences	resolution_percent	named_lineages
-curated	1.0.1	Bacteria	phylum	388861	388750	111	99.971	96
-curated	1.0.1	Archaea	phylum	20182	20173	9	99.955	14
-curated	1.0.1	Eukaryota	supergroup	198605	198600	5	99.997	10
-img	1.0.1	Bacteria	phylum	857491	388750	468741	45.336	96
-img	1.0.1	Archaea	phylum	43767	20173	23594	46.092	14
-img	1.0.1	Eukaryota	supergroup	288908	198600	90308	68.742	10
+curated	1.0.2	Bacteria	phylum	388861	388750	111	99.971	96
+curated	1.0.2	Archaea	phylum	20182	20173	9	99.955	14
+curated	1.0.2	Eukaryota	supergroup	198605	198600	5	99.997	10
+img	1.0.2	Bacteria	phylum	857491	388750	468741	45.336	96
+img	1.0.2	Archaea	phylum	43767	20173	23594	46.092	14
+img	1.0.2	Eukaryota	supergroup	288908	198600	90308	68.742	10

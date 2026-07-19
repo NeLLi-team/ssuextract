@@ -26,8 +26,8 @@ Setup lists both database profiles:
 
 ```text
 Available database profiles:
-  1) curated v1.0.1 (345.4 MiB) - PR2 5.1.1 and SILVA 138.2
-  2) img v1.0.1 (828.8 MiB) - Curated profile plus IMG 16S rRNA gene and 18S rRNA gene sequences
+  1) curated v1.0.2 (345.4 MiB) - PR2 5.1.1 and SILVA 138.2
+  2) img v1.0.2 (840.9 MiB) - Curated profile plus IMG 16S rRNA gene and 18S rRNA gene sequences
 Database profile (1-2) [default: 1 (curated)]:
 ```
 
@@ -63,11 +63,12 @@ test -s results/smoke/cmsearch_summary.tab
 ```
 
 The first file contains one row per extracted region. The second contains
-per-sample counts by annotation category. To view the sample, marker model,
-coordinates, reference source, and taxonomy for each annotation:
+per-sample counts by annotation category. View the sample, marker model,
+coordinates, matched sequence, reference source, final taxonomy, and centroid
+evidence:
 
 ```bash
-cut -f2,3,5,14,15 results/smoke/cmsearch_summary.tsv
+cut -f2,3,5,9,14,15,23-25 results/smoke/cmsearch_summary.tsv
 ```
 
 ## Inspect an extracted sequence

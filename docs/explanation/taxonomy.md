@@ -27,7 +27,10 @@ Equal-best runtime hits to such a sequence retain the ambiguous state.
 
 Exact matches to SILVA or PR2 retain the complete native taxonomy. Other IMG
 sequences can receive similarity-derived assignments. Cluster-only assignments
-stop at domain; lower ranks are not propagated.
+stop at domain; lower ranks are not propagated to the member sequence. Detailed
+output reports the matched sequence in `blast_sseqid`, its cluster centroid names
+in `centroid_names`, and the calibrated taxonomy supported for those centroids in
+`centroid_taxonomy`.
 
 The classifier retains candidate ties within 98% of the best bit score and
 requires at least 80% query coverage. It checks one hit beyond the 500-candidate

@@ -155,6 +155,9 @@ class TaxonomyAssignment:
     compartment: str
     assignment_method: str
     evidence: str = ""
+    centroid_name: str = ""
+    centroid_taxonomy: tuple[str, ...] = ()
+    centroid_taxonomy_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -168,6 +171,9 @@ class PreferredTaxonomy:
     assignment_method: str
     cross_domain_conflict: bool
     taxonomy_alternatives: str = ""
+    centroid_names: str = ""
+    centroid_taxonomy: tuple[str, ...] = ()
+    centroid_taxonomy_source: str = ""
 
 
 @dataclass(frozen=True)

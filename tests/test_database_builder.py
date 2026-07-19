@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -36,6 +37,9 @@ def assignment(
     *,
     method: str = "native",
     compartment: str = "",
+    centroid_name: str = "",
+    centroid_taxonomy: tuple[str, ...] = (),
+    centroid_taxonomy_source: str = "",
 ) -> builder.TaxonomyAssignment:
     return builder.TaxonomyAssignment(
         taxonomy_assignment_id="TAX_" + identifier,
@@ -47,6 +51,9 @@ def assignment(
         compartment=compartment,
         assignment_method=method,
         evidence="test evidence" if method != "native" else "",
+        centroid_name=centroid_name,
+        centroid_taxonomy=centroid_taxonomy,
+        centroid_taxonomy_source=centroid_taxonomy_source,
     )
 
 
@@ -519,12 +526,208 @@ class TaxonomyPolicyTests(unittest.TestCase):
                     "method": "updated_reference_cluster",
                     "evidence": "cluster C1 matched PR2 sequence X",
                     "compartment": "nucleus",
+                    "centroid_name": "IMG_centroid_1",
+                    "centroid_taxonomy": "Eukaryota;TSAR;Alveolata",
+                    "centroid_taxonomy_source": "PR2",
                 }
             ],
             model.source_records,
         )
         completed = builder.add_taxonomy_assignments(model, derived)
         builder.validate_release(completed)
+        with self.assertRaisesRegex(builder.TaxonomyError, "prefix of the centroid"):
+            builder.ingest_derived_cluster_assignments(
+                [
+                    {
+                        "source_identifier": record.source_identifier,
+                        "taxonomy": "Eukaryota;TSAR",
+                        "taxonomy_source": "PR2",
+                        "method": "updated_reference_cluster",
+                        "evidence": "test evidence",
+                        "centroid_name": "IMG_centroid_1",
+                        "centroid_taxonomy": "Eukaryota;Archaeplastida",
+                        "centroid_taxonomy_source": "PR2",
+                    }
+                ],
+                model.source_records,
+            )
+        with self.assertRaisesRegex(builder.TaxonomyError, "require a centroid name"):
+            builder.ingest_derived_cluster_assignments(
+                [
+                    {
+                        "source_identifier": record.source_identifier,
+                        "taxonomy": "Unclassified",
+                        "taxonomy_source": "SILVA+PR2",
+                        "method": "updated_reference_unclassified",
+                        "evidence": "test evidence",
+                    }
+                ],
+                model.source_records,
+            )
+
+    def test_release_rejects_malformed_centroid_evidence(self) -> None:
+        record = builder.PreparedSourceRecord(
+            "IMG",
+            "2025",
+            "IMG_3300000305.a_contig",
+            "IMG_3300000305.a_contig",
+            "ATGC",
+            "18S",
+            taxon_oid="3300000305",
+        )
+        model = builder.build_deduplicated_model([record])
+        derived = builder.ingest_derived_cluster_assignments(
+            [
+                {
+                    "source_identifier": record.source_identifier,
+                    "taxonomy": "Eukaryota;TSAR",
+                    "taxonomy_source": "PR2",
+                    "method": "updated_reference_cluster",
+                    "evidence": "test evidence",
+                    "centroid_name": "IMG_centroid_1",
+                    "centroid_taxonomy": "Eukaryota;TSAR;Alveolata",
+                    "centroid_taxonomy_source": "PR2",
+                }
+            ],
+            model.source_records,
+        )
+        completed = builder.add_taxonomy_assignments(model, derived)
+        assignment_row = completed.taxonomy_assignments[0]
+        preferred_row = completed.preferred_taxonomy[0]
+        cases = {
+            "invalid centroid name": replace(
+                completed,
+                taxonomy_assignments=(
+                    replace(assignment_row, centroid_name="IMG_centroid|second"),
+                ),
+            ),
+            "invalid cluster centroid evidence": replace(
+                completed,
+                taxonomy_assignments=(
+                    replace(
+                        assignment_row,
+                        centroid_taxonomy=("Eukaryota", "Archaeplastida"),
+                    ),
+                ),
+            ),
+            "missing cluster centroid name": replace(
+                completed,
+                taxonomy_assignments=(replace(assignment_row, centroid_name=""),),
+            ),
+            "invalid centroid names": replace(
+                completed,
+                preferred_taxonomy=(
+                    replace(preferred_row, centroid_names='["b","a","a"]'),
+                ),
+            ),
+            "invalid centroid taxonomy": replace(
+                completed,
+                preferred_taxonomy=(
+                    replace(preferred_row, centroid_taxonomy=("Bacteria",)),
+                ),
+            ),
+            "orphan centroid taxonomy": replace(
+                completed,
+                preferred_taxonomy=(replace(preferred_row, centroid_names=""),),
+            ),
+        }
+        for error, malformed in cases.items():
+            with self.subTest(error=error):
+                with self.assertRaisesRegex(builder.ReleaseValidationError, error):
+                    builder.validate_release(malformed)
+
+    def test_multiple_img_centroids_are_retained_with_taxonomy_lca(self) -> None:
+        preferred = builder.select_preferred_taxonomy(
+            "SSU_test",
+            [
+                assignment(
+                    "a",
+                    ("Bacteria",),
+                    "SILVA",
+                    method="updated_reference_cluster",
+                    centroid_name="centroid-b",
+                    centroid_taxonomy=("Bacteria", "Patescibacteria", "Parcubacteria"),
+                    centroid_taxonomy_source="SILVA",
+                ),
+                assignment(
+                    "b",
+                    ("Bacteria",),
+                    "SILVA",
+                    method="updated_reference_cluster",
+                    centroid_name="centroid-a",
+                    centroid_taxonomy=(
+                        "Bacteria",
+                        "Patescibacteria",
+                        "Parcubacteria",
+                        "Candidatus Campbellbacteria",
+                    ),
+                    centroid_taxonomy_source="SILVA",
+                ),
+            ],
+        )
+        self.assertEqual(
+            json.loads(preferred.centroid_names),
+            ["centroid-a", "centroid-b"],
+        )
+        self.assertEqual(
+            preferred.centroid_taxonomy,
+            ("Bacteria", "Patescibacteria", "Parcubacteria"),
+        )
+        self.assertEqual(preferred.centroid_taxonomy_source, "SILVA")
+
+    def test_centroid_taxonomy_sources_are_tokenized_before_merging(self) -> None:
+        preferred = builder.select_preferred_taxonomy(
+            "SSU_test",
+            [
+                assignment(
+                    "a",
+                    ("Eukaryota",),
+                    "PR2",
+                    method="updated_reference_cluster",
+                    centroid_name="centroid-a",
+                    centroid_taxonomy=("Eukaryota", "TSAR"),
+                    centroid_taxonomy_source="PR2+SILVA",
+                ),
+                assignment(
+                    "b",
+                    ("Eukaryota",),
+                    "PR2",
+                    method="updated_reference_cluster",
+                    centroid_name="centroid-b",
+                    centroid_taxonomy=("Eukaryota", "TSAR", "Alveolata"),
+                    centroid_taxonomy_source="SILVA",
+                ),
+            ],
+        )
+        self.assertEqual(preferred.centroid_taxonomy_source, "PR2+SILVA")
+
+    def test_cross_domain_centroids_do_not_report_a_source_without_taxonomy(self) -> None:
+        preferred = builder.select_preferred_taxonomy(
+            "SSU_test",
+            [
+                assignment(
+                    "a",
+                    ("Bacteria",),
+                    "SILVA",
+                    method="updated_reference_cluster",
+                    centroid_name="centroid-a",
+                    centroid_taxonomy=("Bacteria", "Patescibacteria"),
+                    centroid_taxonomy_source="SILVA",
+                ),
+                assignment(
+                    "b",
+                    ("Eukaryota",),
+                    "PR2",
+                    method="updated_reference_cluster",
+                    centroid_name="centroid-b",
+                    centroid_taxonomy=("Eukaryota", "TSAR"),
+                    centroid_taxonomy_source="PR2",
+                ),
+            ],
+        )
+        self.assertTrue(preferred.cross_domain_conflict)
+        self.assertEqual(preferred.centroid_taxonomy, ())
+        self.assertEqual(preferred.centroid_taxonomy_source, "")
 
     def test_release_rejects_pr2_compartment_suffixes(self) -> None:
         model = builder.build_deduplicated_model(
@@ -744,10 +947,24 @@ class PrivacyAndOutputTests(unittest.TestCase):
                         [str(output / "img_location.parquet")],
                     ).fetchall()
                 }
+                preferred_columns = {
+                    row[0]
+                    for row in connection.execute(
+                        "DESCRIBE SELECT * FROM read_parquet(?)",
+                        [str(output / "preferred_taxonomy.parquet")],
+                    ).fetchall()
+                }
             finally:
                 connection.close()
             self.assertEqual(columns, set(builder.IMG_LOCATION_COLUMNS))
             self.assertEqual(sequence_columns, {"sequence_id", "length", "sha256", "markers"})
+            self.assertTrue(
+                {
+                    "centroid_names",
+                    "centroid_taxonomy",
+                    "centroid_taxonomy_source",
+                }.issubset(preferred_columns)
+            )
 
 
 class FetchTests(unittest.TestCase):

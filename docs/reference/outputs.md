@@ -11,6 +11,24 @@
 | `m8/merged.m8` | Deterministically merged BLAST output. |
 | `pipeline_info/` | Nextflow timeline, report, trace, and DAG. |
 
+## Detailed taxonomy fields
+
+| Column | Contents |
+| --- | --- |
+| `blast_sseqid` | Stable identifier of the selected database sequence. |
+| `centroid_names` | Cluster centroid names associated with that sequence, separated by `|` when exact-sequence deduplication links more than one centroid. Empty for native SILVA and PR2 records. |
+| `centroid_taxonomy` | Lowest common calibrated SILVA or PR2 taxonomy supported for those centroids before the cluster-member propagation limit is applied. |
+| `centroid_taxonomy_source` | `SILVA`, `PR2`, or a joined source value for the centroid taxonomy. |
+| `reference_source` | Source of the selected database sequence: `SILVA`, `PR2`, `IMG`, or an explicit joined value. |
+| `taxonomy` | Taxonomy assigned to the selected sequence. IMG cluster-member assignments stop at domain. |
+| `taxonomy_assignment_method` | Native, lowest-common-ancestor, ambiguity, or IMG cluster-assignment method. |
+
+Exact-sequence deduplication can associate one database sequence with more than
+one source cluster. `centroid_names` retains every centroid among the selected
+taxonomy assignments; `centroid_taxonomy` is their lowest common taxonomy.
+SILVA centroid names omit the semicolon-delimited lineage from the source
+header. PR2 centroid names retain the original public PR2 header label.
+
 ## Counting behavior
 
 `cmsearch_summary.tsv` retains hits after overlapping RF00177 and RF01960

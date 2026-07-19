@@ -1,18 +1,23 @@
 # Database composition
 
-Database version 1.0.1 uses SILVA 138.2 and PR2 5.1.1 in the `curated`
-profile. The `img` profile contains the same references plus IMG 16S rRNA gene
-and 18S rRNA gene sequences from eukcensus 2025.
+Database version 1.0.2 is archived at
+[Zenodo](https://doi.org/10.5281/zenodo.21443919). It uses SILVA 138.2 and PR2
+5.1.1 in the `curated` profile. The `img` profile contains the same references
+plus IMG 16S rRNA gene and 18S rRNA gene sequences from eukcensus 2025.
 
 ## Profiles
 
 | Profile | Source records | Unique sequences | 16S rRNA gene index | 18S rRNA gene index | Download size |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `curated` | 683,597 | 609,298 | 416,021 | 193,282 | 345.4 MiB |
-| `img` | 1,680,777 | 1,396,949 | 1,067,340 | 329,614 | 828.8 MiB |
+| `img` | 1,680,777 | 1,396,949 | 1,067,340 | 329,614 | 840.9 MiB |
 
 Five exact sequences belong to both rRNA gene indexes. Each profile stores an
 exact sequence once and records both marker memberships.
+
+IMG-derived records keep the conservative member assignment separate from the
+centroid used to classify the sequence cluster. The database stores centroid
+name, calibrated taxonomy, and taxonomy source as evidence fields.
 
 ### Source releases
 
@@ -40,7 +45,7 @@ domains retain both alternatives and are reported as ambiguous.
 | Ambiguous | 1,650 | 1,650 |
 
 The target ranks are phylum for Bacteria and Archaea and PR2 supergroup for
-Eukaryota. In database version 1.0.1, IMG sequences with a preferred domain assignment
+Eukaryota. In database version 1.0.2, IMG sequences with a preferred domain assignment
 stop at domain; 205,133 sequences remain unclassified at domain. The
 target-rank resolution analysis includes domain-only sequences in the relevant
 domain denominator and excludes unclassified and ambiguous assignments.

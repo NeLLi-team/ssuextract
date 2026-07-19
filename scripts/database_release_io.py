@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import tempfile
 from collections import defaultdict
@@ -100,6 +101,28 @@ def validate_release(model: DatabaseModel, img_locations: Iterable[ImgLocation] 
             pr2_assignment_suffixes += 1
             if len(pr2_assignment_suffix_examples) < 5:
                 pr2_assignment_suffix_examples.append(assignment.taxonomy_assignment_id)
+        if assignment.centroid_name:
+            if any(character in assignment.centroid_name for character in "\r\n\t|"):
+                errors.append(
+                    f"invalid centroid name: {assignment.taxonomy_assignment_id}"
+                )
+            if assignment.assignment_method == "updated_reference_cluster" and (
+                not assignment.centroid_taxonomy
+                or not assignment.centroid_taxonomy_source
+                or assignment.centroid_taxonomy[: len(assignment.taxonomy)]
+                != assignment.taxonomy
+            ):
+                errors.append(
+                    "invalid cluster centroid evidence: "
+                    f"{assignment.taxonomy_assignment_id}"
+                )
+        elif assignment.assignment_method in {
+            "updated_reference_cluster",
+            "updated_reference_unclassified",
+        }:
+            errors.append(
+                f"missing cluster centroid name: {assignment.taxonomy_assignment_id}"
+            )
     if pr2_assignment_suffixes:
         errors.append(
             f"PR2 compartment suffix remains in {pr2_assignment_suffixes} "
@@ -143,6 +166,35 @@ def validate_release(model: DatabaseModel, img_locations: Iterable[ImgLocation] 
             and record.taxonomy_alternatives
         ):
             errors.append(f"unresolved cross-domain taxonomy conflict for {record.sequence_id}")
+        if record.centroid_names:
+            try:
+                centroid_names = json.loads(record.centroid_names)
+            except json.JSONDecodeError:
+                centroid_names = None
+            valid_centroid_names = (
+                isinstance(centroid_names, list)
+                and bool(centroid_names)
+                and all(
+                    isinstance(name, str)
+                    and name
+                    and not any(character in name for character in "\r\n\t|")
+                    for name in centroid_names
+                )
+            )
+            if valid_centroid_names:
+                valid_centroid_names = centroid_names == sorted(set(centroid_names))
+            if not valid_centroid_names:
+                errors.append(f"invalid centroid names for {record.sequence_id}")
+            if record.centroid_taxonomy and (
+                not record.centroid_taxonomy_source
+                or (
+                    record.domain not in {"ambiguous", "Unclassified"}
+                    and record.centroid_taxonomy[0] != record.domain
+                )
+            ):
+                errors.append(f"invalid centroid taxonomy for {record.sequence_id}")
+        elif record.centroid_taxonomy or record.centroid_taxonomy_source:
+            errors.append(f"orphan centroid taxonomy for {record.sequence_id}")
     if preferred_domain_mismatches:
         errors.append(
             f"preferred taxonomy domain mismatch in {preferred_domain_mismatches} rows; "
@@ -301,6 +353,9 @@ def write_taxonomy_assignments_parquet(
             record.compartment,
             record.assignment_method,
             record.evidence,
+            record.centroid_name,
+            ";".join(record.centroid_taxonomy),
+            record.centroid_taxonomy_source,
         )
         for record in sorted(records, key=lambda item: item.taxonomy_assignment_id)
     ]
@@ -309,8 +364,9 @@ def write_taxonomy_assignments_parquet(
         """CREATE TABLE release_table(
             taxonomy_assignment_id VARCHAR, source_record_id VARCHAR, sequence_id VARCHAR,
             taxonomy VARCHAR, taxonomy_source VARCHAR, domain VARCHAR, compartment VARCHAR,
-            assignment_method VARCHAR, evidence VARCHAR)""",
-        "INSERT INTO release_table VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            assignment_method VARCHAR, evidence VARCHAR, centroid_name VARCHAR,
+            centroid_taxonomy VARCHAR, centroid_taxonomy_source VARCHAR)""",
+        "INSERT INTO release_table VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
 
@@ -329,6 +385,9 @@ def write_preferred_taxonomy_parquet(
             record.assignment_method,
             record.cross_domain_conflict,
             record.taxonomy_alternatives,
+            record.centroid_names,
+            ";".join(record.centroid_taxonomy),
+            record.centroid_taxonomy_source,
         )
         for record in sorted(records, key=lambda item: item.sequence_id)
     ]
@@ -338,8 +397,9 @@ def write_preferred_taxonomy_parquet(
             sequence_id VARCHAR, reference_source VARCHAR, taxonomy VARCHAR,
             taxonomy_source VARCHAR, domain VARCHAR, compartment VARCHAR,
             assignment_method VARCHAR, cross_domain_conflict BOOLEAN,
-            taxonomy_alternatives VARCHAR)""",
-        "INSERT INTO release_table VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            taxonomy_alternatives VARCHAR, centroid_names VARCHAR,
+            centroid_taxonomy VARCHAR, centroid_taxonomy_source VARCHAR)""",
+        "INSERT INTO release_table VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
 

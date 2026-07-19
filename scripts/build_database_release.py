@@ -116,6 +116,34 @@ def taxonomy_priority(assignment: TaxonomyAssignment) -> int:
     return 20
 
 
+def _centroid_summary(
+    assignments: Iterable[TaxonomyAssignment],
+) -> tuple[str, tuple[str, ...], str]:
+    evidence = [assignment for assignment in assignments if assignment.centroid_name]
+    if not evidence:
+        return "", (), ""
+    names = sorted({assignment.centroid_name for assignment in evidence})
+    taxonomies = [
+        assignment.centroid_taxonomy
+        for assignment in evidence
+        if assignment.centroid_taxonomy
+    ]
+    taxonomy = _shared_lca(taxonomies) if taxonomies else ()
+    sources = sorted(
+        {
+            source
+            for assignment in evidence
+            for source in assignment.centroid_taxonomy_source.split("+")
+            if source
+        }
+    )
+    return (
+        json.dumps(names, ensure_ascii=True, separators=(",", ":")),
+        taxonomy,
+        "+".join(sources) if taxonomy else "",
+    )
+
+
 def select_preferred_taxonomy(
     sequence_id: str, assignments: Iterable[TaxonomyAssignment]
 ) -> PreferredTaxonomy:
@@ -127,6 +155,7 @@ def select_preferred_taxonomy(
     # SILVA or PR2 match into a false cross-domain ambiguity.
     best_priority = min(taxonomy_priority(assignment) for assignment in candidates)
     best = [assignment for assignment in candidates if taxonomy_priority(assignment) == best_priority]
+    centroid_names, centroid_taxonomy, centroid_taxonomy_source = _centroid_summary(best)
     domains = {
         assignment.domain
         for assignment in best
@@ -168,6 +197,9 @@ def select_preferred_taxonomy(
             taxonomy_alternatives=json.dumps(
                 alternatives, ensure_ascii=True, separators=(",", ":"), sort_keys=True
             ),
+            centroid_names=centroid_names,
+            centroid_taxonomy=centroid_taxonomy,
+            centroid_taxonomy_source=centroid_taxonomy_source,
         )
     taxonomy = lowest_common_ancestor(assignment.taxonomy for assignment in best)
     if not taxonomy:
@@ -191,6 +223,9 @@ def select_preferred_taxonomy(
         ),
         assignment_method="lowest_common_ancestor" if disagreement else best[0].assignment_method,
         cross_domain_conflict=cross_domain_conflict,
+        centroid_names=centroid_names,
+        centroid_taxonomy=centroid_taxonomy,
+        centroid_taxonomy_source=centroid_taxonomy_source,
     )
 
 
@@ -307,6 +342,11 @@ def ingest_derived_cluster_assignments(
         taxonomy_source = str(row.get("taxonomy_source", "")).strip()
         method = str(row.get("method", row.get("assignment_method", ""))).strip()
         evidence = str(row.get("evidence", "")).strip()
+        centroid_name = str(row.get("centroid_name", "")).strip()
+        centroid_taxonomy_text = str(row.get("centroid_taxonomy", "")).strip()
+        centroid_taxonomy_source = str(
+            row.get("centroid_taxonomy_source", "")
+        ).strip()
         if source_identifier not in by_identifier:
             raise TaxonomyError(f"Unknown IMG source_identifier on assignment row {row_number}")
         if not taxonomy_source or method not in {
@@ -319,6 +359,30 @@ def ingest_derived_cluster_assignments(
                 "and evidence"
             )
         taxonomy = _taxonomy_tuple(row.get("taxonomy", ""))
+        centroid_taxonomy = (
+            _taxonomy_tuple(centroid_taxonomy_text)
+            if centroid_taxonomy_text
+            else ()
+        )
+        if any(character in centroid_name for character in "\r\n\t|"):
+            raise TaxonomyError(
+                f"Derived IMG assignment has an invalid centroid name on row {row_number}"
+            )
+        if method == "updated_reference_cluster":
+            if not centroid_name or not centroid_taxonomy or not centroid_taxonomy_source:
+                raise TaxonomyError(
+                    "Cluster-derived IMG assignments require centroid name, taxonomy, "
+                    "and taxonomy source"
+                )
+            if centroid_taxonomy[: len(taxonomy)] != taxonomy:
+                raise TaxonomyError(
+                    "Cluster-derived IMG member taxonomy must be a prefix of the "
+                    "centroid taxonomy"
+                )
+        elif method == "updated_reference_unclassified" and not centroid_name:
+            raise TaxonomyError(
+                "Unclassified IMG cluster assignments require a centroid name"
+            )
         compartment = str(row.get("compartment", "")).strip()
         for source_record in by_identifier[source_identifier]:
             assignment_id = _stable_id(
@@ -329,6 +393,9 @@ def ingest_derived_cluster_assignments(
                 compartment,
                 method,
                 evidence,
+                centroid_name,
+                ";".join(centroid_taxonomy),
+                centroid_taxonomy_source,
             )
             assignments.append(
                 TaxonomyAssignment(
@@ -341,6 +408,9 @@ def ingest_derived_cluster_assignments(
                     compartment,
                     method,
                     evidence,
+                    centroid_name,
+                    centroid_taxonomy,
+                    centroid_taxonomy_source,
                 )
             )
     return tuple(sorted(assignments, key=lambda assignment: assignment.taxonomy_assignment_id))

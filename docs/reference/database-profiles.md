@@ -56,14 +56,15 @@ interactive setup.
 | `blast/16S.*` | BLAST v5 nucleotide index for 16S rRNA genes. |
 | `blast/18S.*` | BLAST v5 nucleotide index for 18S rRNA genes. |
 | `tables/sequences.parquet` | Content-addressed sequence identifiers, lengths, hashes, and marker membership. |
-| `tables/preferred_taxonomy.parquet` | Selected taxonomy and explicit cross-domain conflict state. |
+| `tables/preferred_taxonomy.parquet` | Selected sequence taxonomy, centroid names and taxonomy, and explicit cross-domain conflict state. |
 | `tables/source_records.parquet` | Normalized source record provenance. |
 | `tables/taxonomy_assignments.parquet` | Native and derived taxonomy evidence. |
 | `tables/img_location.parquet` | IMG taxon identifier and valid latitude/longitude values. |
 
 Raw source FASTA files, source project descriptions, contacts, email addresses,
-comments, cluster tables, and centroid identifiers are not distributed in a
-runtime profile.
+comments, and cluster tables are not distributed in a runtime profile. The IMG
+profile retains only the centroid names required to interpret cluster-derived
+taxonomy.
 
 ## Curated profile counts
 

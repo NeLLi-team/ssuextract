@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.1] - 2026-07-19
+
+### Fixed
+
+- Report the matched database sequence separately from the centroid used to classify
+  an IMG cluster.
+- Append centroid names, calibrated centroid taxonomy, and centroid taxonomy source
+  to detailed output tables without changing existing column positions.
+- Publish database version 1.0.2 with the centroid evidence required by these output
+  fields. Sequence content and preferred member assignments are unchanged from
+  database version 1.0.1.
+
 ## [1.1.0] - 2026-07-11
 
 ### Fixed

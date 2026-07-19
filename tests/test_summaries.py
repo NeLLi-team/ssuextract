@@ -11,7 +11,7 @@ import duckdb
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
-from annotate_hits import SUMMARY_FIELDS, annotate_hits
+from annotate_hits import SUMMARY_FIELDS, annotate_hits, load_taxonomy_records
 from finalize_summaries import (
     load_metadata,
     load_summary_rows,
@@ -29,7 +29,12 @@ def write_tsv(path: Path, fields: list[str], rows: list[dict[str, object]]) -> N
         writer.writerows(rows)
 
 
-def write_taxonomy_parquet(path: Path, rows: list[tuple[str, ...]]) -> None:
+def write_taxonomy_parquet(
+    path: Path,
+    rows: list[tuple[str, ...]],
+    *,
+    include_centroids: bool = False,
+) -> None:
     connection = duckdb.connect(":memory:")
     connection.execute(
         """
@@ -43,13 +48,28 @@ def write_taxonomy_parquet(path: Path, rows: list[tuple[str, ...]]) -> None:
             assignment_method VARCHAR,
             cross_domain_conflict BOOLEAN,
             taxonomy_alternatives VARCHAR
+            {centroid_columns}
         )
-        """
+        """.format(
+            centroid_columns=(
+                ", centroid_names VARCHAR, centroid_taxonomy VARCHAR, "
+                "centroid_taxonomy_source VARCHAR"
+                if include_centroids
+                else ""
+            )
+        )
     )
     if rows:
+        normalized = [(*row, False, "") if len(row) == 7 else row for row in rows]
+        if include_centroids:
+            normalized = [
+                (*row, "", "", "") if len(row) == 9 else row for row in normalized
+            ]
         connection.executemany(
-            "INSERT INTO taxonomy VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [(*row, False, "") if len(row) == 7 else row for row in rows],
+            "INSERT INTO taxonomy VALUES ("
+            + ", ".join("?" for _ in range(12 if include_centroids else 9))
+            + ")",
+            normalized,
         )
     connection.execute("COPY taxonomy TO ? (FORMAT PARQUET, COMPRESSION ZSTD)", [str(path)])
     connection.close()
@@ -205,6 +225,108 @@ class AnnotationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "Missing taxonomy metadata"):
                 annotate_hits(hits, m8, output, taxonomy)
+
+    def test_selected_best_hit_reports_its_centroid_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hits = root / "sample.hits.tsv"
+            m8 = root / "sample.m8"
+            taxonomy = root / "taxonomy.parquet"
+            output = root / "sample.summary.tsv"
+            row = dict.fromkeys(HIT_FIELDS, "")
+            row.update(
+                name="query1",
+                sample="sample",
+                model="RF00177",
+                length=4,
+                coordinates="1-4",
+                strand="+",
+                sequence_type="simple",
+                contig_name="contig1",
+                is_assembled="False",
+            )
+            write_tsv(hits, HIT_FIELDS, [row])
+            m8.write_text(
+                "query1\tSSU_img\t99\t4\t0\t0\t1\t4\t1\t4\t0\t20\n",
+                encoding="ascii",
+            )
+            write_taxonomy_parquet(
+                taxonomy,
+                [
+                    (
+                        "SSU_img",
+                        "IMG",
+                        "Bacteria",
+                        "SILVA",
+                        "Bacteria",
+                        "",
+                        "updated_reference_cluster",
+                        False,
+                        "",
+                        '["IMG_centroid_1","REF_SILVA_AB123.1.1500"]',
+                        "Bacteria;Bacteroidota;Bacteroidia;Flavobacteriales;Flavobacteriaceae",
+                        "SILVA",
+                    )
+                ],
+                include_centroids=True,
+            )
+            annotate_hits(hits, m8, output, taxonomy)
+            with output.open(newline="") as handle:
+                result = next(csv.DictReader(handle, delimiter="\t"))
+            raw_output = output.read_text()
+
+        self.assertEqual(result["blast_sseqid"], "SSU_img")
+        self.assertEqual(
+            result["centroid_names"],
+            "IMG_centroid_1|REF_SILVA_AB123.1.1500",
+        )
+        self.assertNotIn('""', raw_output)
+        self.assertEqual(
+            result["centroid_taxonomy"],
+            "Bacteria;Bacteroidota;Bacteroidia;Flavobacteriales;Flavobacteriaceae",
+        )
+        self.assertEqual(result["centroid_taxonomy_source"], "SILVA")
+
+    def test_invalid_centroid_names_json_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            taxonomy = Path(tmp) / "taxonomy.parquet"
+            write_taxonomy_parquet(
+                taxonomy,
+                [
+                    (
+                        "SSU_img",
+                        "IMG",
+                        "Bacteria",
+                        "SILVA",
+                        "Bacteria",
+                        "",
+                        "updated_reference_cluster",
+                        False,
+                        "",
+                        "not-json",
+                        "Bacteria;Bacteroidota",
+                        "SILVA",
+                    )
+                ],
+                include_centroids=True,
+            )
+            with self.assertRaisesRegex(ValueError, "Invalid centroid_names JSON"):
+                load_taxonomy_records(taxonomy, {"SSU_img"})
+
+    def test_incomplete_centroid_schema_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            taxonomy = Path(tmp) / "taxonomy.parquet"
+            connection = duckdb.connect(":memory:")
+            connection.execute(
+                "CREATE TABLE taxonomy (sequence_id VARCHAR, centroid_names VARCHAR)"
+            )
+            connection.execute(
+                "COPY taxonomy TO ? (FORMAT PARQUET, COMPRESSION ZSTD)",
+                [str(taxonomy)],
+            )
+            connection.close()
+            with self.assertRaisesRegex(ValueError, "incomplete centroid schema"):
+                load_taxonomy_records(taxonomy, {"SSU_img"})
 
     def test_truncated_equal_best_set_backs_taxonomy_off_to_domain(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

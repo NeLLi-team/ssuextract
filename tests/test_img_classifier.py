@@ -84,6 +84,18 @@ class BlastParsingTests(unittest.TestCase):
 
 
 class ClassificationPolicyTests(unittest.TestCase):
+    def test_centroid_display_name_removes_only_silva_lineage_text(self) -> None:
+        self.assertEqual(
+            classifier.centroid_name(
+                "REF_SILVA_AB123.1.1500;Bacteria;Bacteroidota"
+            ),
+            "REF_SILVA_AB123.1.1500",
+        )
+        spr = "REF_SPR_KC486120.1.1650_Eukaryota_SAR_Alveolata"
+        self.assertEqual(classifier.centroid_name(spr), spr)
+        with self.assertRaisesRegex(ValueError, "invalid display name"):
+            classifier.centroid_name("IMG_centroid|second")
+
     def test_tied_candidates_use_lca_and_ignore_input_order(self) -> None:
         cluster_rows = clusters(("C1", "centroid", ["IMG_2", "IMG_1"]))
         records = {
@@ -272,8 +284,15 @@ class ClassificationPolicyTests(unittest.TestCase):
             propagation_rank_cap=0,
         )
         self.assertEqual(outcomes[0]["taxonomy"], "Eukaryota")
+        self.assertEqual(outcomes[0]["centroid_taxonomy"], ";".join(species_path))
         self.assertFalse(outcomes[0]["species_called"])
         self.assertEqual(assignments[0]["taxonomy"], "Eukaryota")
+        self.assertEqual(assignments[0]["centroid"], "centroid")
+        self.assertEqual(assignments[0]["centroid_name"], "centroid")
+        self.assertEqual(
+            assignments[0]["centroid_taxonomy"], ";".join(species_path)
+        )
+        self.assertEqual(assignments[0]["centroid_taxonomy_source"], "PR2")
 
     def test_failed_pr2_16s_stratum_unclassifies_exact_and_nonexact_hits(self) -> None:
         cluster_rows = clusters(("C1", "centroid", ["IMG_1"]))

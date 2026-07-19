@@ -49,6 +49,9 @@ ASSIGNMENT_FIELDS = (
     "compartment",
     "cluster_id",
     "centroid",
+    "centroid_name",
+    "centroid_taxonomy",
+    "centroid_taxonomy_source",
     "evidence_id",
 )
 MIN_QUERY_COVERAGE = Decimal("80")
@@ -152,6 +155,17 @@ def _common_value(values: Iterable[str]) -> str:
 
 def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def centroid_name(value: str) -> str:
+    """Return a display name without SILVA lineage text embedded in the header."""
+
+    name = value.strip()
+    if name.startswith("REF_SILVA_"):
+        name = name.split(";", 1)[0]
+    if not name or any(character in name for character in "\r\n\t|"):
+        raise ValueError("cluster centroid has an invalid display name")
+    return name
 
 
 def _classify_cluster(
@@ -316,6 +330,7 @@ def _classify_cluster(
     exact_pr2_species = _is_pr2_species_path(taxonomy, records) and candidates_exact_and_agreeing
     if calibration_rank_cap is not None and not exact_pr2_species:
         taxonomy = taxonomy[: calibration_rank_cap + 1]
+    centroid_taxonomy = taxonomy
     if propagation_rank_cap is not None:
         if propagation_rank_cap < 0:
             raise ValueError("propagation_rank_cap must be non-negative")
@@ -327,6 +342,8 @@ def _classify_cluster(
         "reason": "",
         "taxonomy": ";".join(taxonomy),
         "taxonomy_source": taxonomy_sources,
+        "centroid_taxonomy": ";".join(centroid_taxonomy),
+        "centroid_taxonomy_source": taxonomy_sources,
         "domain": taxonomy[0],
         "compartment": compartment,
         "assignment_method": "updated_reference_cluster",
@@ -422,6 +439,9 @@ def classify_clusters(
                             "compartment": "",
                             "cluster_id": cluster.cluster_id,
                             "centroid": cluster.centroid,
+                            "centroid_name": centroid_name(cluster.centroid),
+                            "centroid_taxonomy": "",
+                            "centroid_taxonomy_source": "",
                             "evidence_id": evidence_id,
                         }
                     )
@@ -449,6 +469,11 @@ def classify_clusters(
                     "compartment": str(outcome["compartment"]),
                     "cluster_id": cluster.cluster_id,
                     "centroid": cluster.centroid,
+                    "centroid_name": centroid_name(cluster.centroid),
+                    "centroid_taxonomy": str(outcome["centroid_taxonomy"]),
+                    "centroid_taxonomy_source": str(
+                        outcome["centroid_taxonomy_source"]
+                    ),
                     "evidence_id": str(outcome["evidence_id"]),
                 }
             )

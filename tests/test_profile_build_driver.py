@@ -26,7 +26,7 @@ class ProfileBuildDriverTests(unittest.TestCase):
                 "archives",
             ]
         )
-        self.assertEqual(args.version, "1.0.1")
+        self.assertEqual(args.version, "1.0.2")
 
     def test_search_and_classification_qc_bind_the_same_portable_provenance(self) -> None:
         calibration = {"sha256": "a" * 64, "schema_version": 2}
@@ -270,6 +270,8 @@ class ProfileBuildDriverTests(unittest.TestCase):
 
     def test_evidence_catalog_rejects_classified_failed_or_wrong_cap_outcomes(self) -> None:
         base_outcome = {
+            "cluster_id": "cluster-1",
+            "centroid": "centroid-1",
             "classification_status": "classified",
             "reason": "",
             "candidates": [
@@ -281,6 +283,8 @@ class ProfileBuildDriverTests(unittest.TestCase):
             ],
             "taxonomy": "Bacteria",
             "taxonomy_source": "SILVA",
+            "centroid_taxonomy": "Bacteria",
+            "centroid_taxonomy_source": "SILVA",
             "domain": "Bacteria",
             "assignment_method": "updated_reference_cluster",
             "calibration_rank_cap": 0,
@@ -331,6 +335,8 @@ class ProfileBuildDriverTests(unittest.TestCase):
     def test_evidence_catalog_rejects_forged_failed_stratum_evidence(self) -> None:
         key = "16S|PR2|Eukaryota"
         outcome = {
+            "cluster_id": "cluster-1",
+            "centroid": "centroid-1",
             "classification_status": "unclassified",
             "reason": "calibration_stratum_failed",
             "candidates": [
@@ -409,6 +415,10 @@ class ProfileBuildDriverTests(unittest.TestCase):
                 "assignment_method",
                 "evidence",
                 "compartment",
+                "centroid",
+                "centroid_name",
+                "centroid_taxonomy",
+                "centroid_taxonomy_source",
             ]
             with path.open("w", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
@@ -421,6 +431,10 @@ class ProfileBuildDriverTests(unittest.TestCase):
                         "assignment_method": "updated_reference_unclassified",
                         "evidence": "no hit",
                         "compartment": "",
+                        "centroid": "centroid-1",
+                        "centroid_name": "centroid-1",
+                        "centroid_taxonomy": "",
+                        "centroid_taxonomy_source": "",
                     }
                 )
             rows = list(profiles.read_assignment_rows([path]))
@@ -492,6 +506,8 @@ class ProfileBuildDriverTests(unittest.TestCase):
                 ],
                 "taxonomy": "Bacteria",
                 "taxonomy_source": "SILVA",
+                "centroid_taxonomy": "Bacteria",
+                "centroid_taxonomy_source": "SILVA",
                 "domain": "Bacteria",
                 "assignment_method": "updated_reference_cluster",
                 "truncated": False,
@@ -510,6 +526,10 @@ class ProfileBuildDriverTests(unittest.TestCase):
                 "assignment_method",
                 "evidence",
                 "compartment",
+                "centroid",
+                "centroid_name",
+                "centroid_taxonomy",
+                "centroid_taxonomy_source",
                 "evidence_id",
             ]
             with assignments.open("w", newline="", encoding="utf-8") as handle:
@@ -523,6 +543,10 @@ class ProfileBuildDriverTests(unittest.TestCase):
                         "assignment_method": "updated_reference_cluster",
                         "evidence": f"centroid_blast_lca evidence_id={old_id}",
                         "compartment": "",
+                        "centroid": "private-centroid",
+                        "centroid_name": "private-centroid",
+                        "centroid_taxonomy": "Bacteria",
+                        "centroid_taxonomy_source": "SILVA",
                         "evidence_id": old_id,
                     }
                 )

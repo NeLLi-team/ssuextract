@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import duckdb
@@ -38,6 +38,9 @@ SUMMARY_FIELDS = [
     "taxonomy_alternatives",
     "blast_tied_subjects",
     "blast_ties_truncated",
+    "centroid_names",
+    "centroid_taxonomy",
+    "centroid_taxonomy_source",
 ]
 
 
@@ -59,6 +62,9 @@ class TaxonomyRecord:
     assignment_method: str
     cross_domain_conflict: bool
     taxonomy_alternatives: str
+    centroid_names: str
+    centroid_taxonomy: str
+    centroid_taxonomy_source: str
 
 
 def load_best_blast_hits(m8_file: str | Path) -> dict[str, list[BlastHit]]:
@@ -109,24 +115,51 @@ def load_taxonomy_records(
     if not subjects:
         return {}
     placeholders = ",".join("?" for _ in subjects)
-    query = f"""
-        SELECT
-            sequence_id,
-            reference_source,
-            taxonomy,
-            taxonomy_source,
-            domain,
-            compartment,
-            assignment_method,
-            cross_domain_conflict,
-            taxonomy_alternatives
-        FROM read_parquet(?)
-        WHERE sequence_id IN ({placeholders})
-    """
     parameters = [str(Path(taxonomy_file)), *sorted(subjects)]
     connection = duckdb.connect(":memory:")
     try:
         connection.execute("SET threads = 1")
+        columns = {
+            str(row[0])
+            for row in connection.execute(
+                "DESCRIBE SELECT * FROM read_parquet(?)",
+                [str(Path(taxonomy_file))],
+            ).fetchall()
+        }
+        centroid_columns = {
+            "centroid_names",
+            "centroid_taxonomy",
+            "centroid_taxonomy_source",
+        }
+        present_centroid_columns = centroid_columns.intersection(columns)
+        if present_centroid_columns and present_centroid_columns != centroid_columns:
+            raise ValueError("Preferred taxonomy has an incomplete centroid schema")
+        centroid_fields = (
+            ("centroid_names", "centroid_taxonomy", "centroid_taxonomy_source")
+            if present_centroid_columns
+            else (
+                "'' AS centroid_names",
+                "'' AS centroid_taxonomy",
+                "'' AS centroid_taxonomy_source",
+            )
+        )
+        query = f"""
+            SELECT
+                sequence_id,
+                reference_source,
+                taxonomy,
+                taxonomy_source,
+                domain,
+                compartment,
+                assignment_method,
+                cross_domain_conflict,
+                taxonomy_alternatives,
+                {centroid_fields[0]},
+                {centroid_fields[1]},
+                {centroid_fields[2]}
+            FROM read_parquet(?)
+            WHERE sequence_id IN ({placeholders})
+        """
         rows = connection.execute(query, parameters).fetchall()
     finally:
         connection.close()
@@ -144,7 +177,24 @@ def load_taxonomy_records(
             assignment_method=str(row[6] or ""),
             cross_domain_conflict=bool(row[7]),
             taxonomy_alternatives=str(row[8] or ""),
+            centroid_names=str(row[9] or ""),
+            centroid_taxonomy=str(row[10] or ""),
+            centroid_taxonomy_source=str(row[11] or ""),
         )
+        if records[sequence_id].centroid_names:
+            try:
+                names = json.loads(records[sequence_id].centroid_names)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"Invalid centroid_names JSON for {sequence_id}"
+                ) from error
+            if not isinstance(names, list) or not all(
+                isinstance(name, str) and name and "|" not in name for name in names
+            ):
+                raise ValueError(f"Invalid centroid_names JSON for {sequence_id}")
+            records[sequence_id] = replace(
+                records[sequence_id], centroid_names="|".join(names)
+            )
     missing = sorted(subjects - records.keys())
     if missing:
         preview = ", ".join(missing[:5])
@@ -253,6 +303,9 @@ def annotate_hits(
                 for hit in tied_hits
                 if hit.subject in taxonomy_records
             ]
+            blast_taxonomy = (
+                taxonomy_records.get(blast_hit.subject) if blast_hit else None
+            )
             ties_truncated = len(tied_hits) > max_targets
             concrete_domains = {
                 record.domain
@@ -311,6 +364,17 @@ def annotate_hits(
                     "sequence_type": row["sequence_type"],
                     "contig_name": row["contig_name"],
                     "blast_sseqid": blast_hit.subject if blast_hit else "",
+                    "centroid_names": (
+                        blast_taxonomy.centroid_names if blast_taxonomy else ""
+                    ),
+                    "centroid_taxonomy": (
+                        blast_taxonomy.centroid_taxonomy if blast_taxonomy else ""
+                    ),
+                    "centroid_taxonomy_source": (
+                        blast_taxonomy.centroid_taxonomy_source
+                        if blast_taxonomy
+                        else ""
+                    ),
                     "blast_pident": (
                         str(round(blast_hit.percent_identity, 2)) if blast_hit else ""
                     ),

@@ -84,6 +84,8 @@ EVIDENCE_FIELDS = (
     "truncated",
     "taxonomy",
     "taxonomy_source",
+    "centroid_taxonomy",
+    "centroid_taxonomy_source",
     "domain",
     "compartment",
     "assignment_method",
@@ -95,6 +97,7 @@ EVIDENCE_FIELDS = (
 FORBIDDEN_EVIDENCE_KEYS = {
     "cluster_id",
     "centroid",
+    "centroid_name",
     "img_member_count",
     "img_members",
     "source_identifier",
@@ -278,6 +281,10 @@ def validate_outcome_calibration(
     outcome: Mapping[str, object],
     calibration: Mapping[str, object],
 ) -> None:
+    if not str(outcome.get("cluster_id", "")).strip() or not str(
+        outcome.get("centroid", "")
+    ).strip():
+        raise builder.BuildError("IMG outcome lacks a cluster ID or centroid name")
     status = outcome.get("classification_status")
     reason = outcome.get("reason")
     if status != "classified" and reason != "calibration_stratum_failed":
@@ -315,6 +322,15 @@ def validate_outcome_calibration(
         expected_sources = "+".join(key.split("|", 2)[1] for key in required_keys)
         if outcome.get("taxonomy_source") != expected_sources:
             raise builder.BuildError("classified IMG outcome taxonomy source is inconsistent")
+        centroid_taxonomy = str(outcome.get("centroid_taxonomy", ""))
+        if (
+            not centroid_taxonomy
+            or centroid_taxonomy.split(";", 1)[0] != domain
+            or outcome.get("centroid_taxonomy_source") != expected_sources
+        ):
+            raise builder.BuildError(
+                "classified IMG outcome has inconsistent centroid taxonomy"
+            )
         return
     evidence = outcome.get("failed_calibration_strata")
     if _canonical_json(evidence) != _canonical_json(failed) or not failed:
@@ -576,6 +592,16 @@ def create_img_evidence_catalog(
                                     outcome.get("assignment_method", "")
                                 ),
                                 "compartment": str(outcome.get("compartment", "")),
+                                "centroid": str(outcome.get("centroid", "")),
+                                "centroid_name": classifier.centroid_name(
+                                    str(outcome.get("centroid", ""))
+                                ),
+                                "centroid_taxonomy": str(
+                                    outcome.get("centroid_taxonomy", "")
+                                ),
+                                "centroid_taxonomy_source": str(
+                                    outcome.get("centroid_taxonomy_source", "")
+                                ),
                             }
                         else:
                             resolution = {
@@ -584,6 +610,12 @@ def create_img_evidence_catalog(
                                 "taxonomy_source": "SILVA+PR2",
                                 "assignment_method": "updated_reference_unclassified",
                                 "compartment": "",
+                                "centroid": str(outcome.get("centroid", "")),
+                                "centroid_name": classifier.centroid_name(
+                                    str(outcome.get("centroid", ""))
+                                ),
+                                "centroid_taxonomy": "",
+                                "centroid_taxonomy_source": "",
                             }
                         previous = marker_mapping.setdefault(old_id, resolution)
                         if previous != resolution:
@@ -658,6 +690,10 @@ def read_assignment_rows(
                 "assignment_method",
                 "evidence",
                 "compartment",
+                "centroid",
+                "centroid_name",
+                "centroid_taxonomy",
+                "centroid_taxonomy_source",
             }
             missing = required - set(reader.fieldnames or ())
             if missing:
@@ -683,6 +719,10 @@ def read_assignment_rows(
                         "taxonomy_source",
                         "assignment_method",
                         "compartment",
+                        "centroid",
+                        "centroid_name",
+                        "centroid_taxonomy",
+                        "centroid_taxonomy_source",
                     ):
                         if str(row.get(field, "")).strip() != resolution[field]:
                             raise builder.BuildError(
@@ -760,6 +800,13 @@ def _provenance_details(
                     "are not documented"
                 ),
                 "cluster_tables_packaged": False,
+                "centroid_names_packaged": True,
+                "centroid_name_normalization": (
+                    "strip semicolon-delimited lineage text from REF_SILVA labels"
+                ),
+                "centroid_taxonomy_policy": (
+                    "calibrated SILVA/PR2 LCA before the cluster propagation cap"
+                ),
                 "img_metadata_columns": list(builder.IMG_LOCATION_COLUMNS),
                 "metadata_corrections": list(corrections),
             }
@@ -893,7 +940,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-config", type=Path, default=DEFAULT_SOURCE_CONFIG)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--archive-directory", type=Path, required=True)
-    parser.add_argument("--version", default="1.0.1")
+    parser.add_argument("--version", default="1.0.2")
     parser.add_argument("--notices", type=Path, default=DEFAULT_NOTICES)
     parser.add_argument(
         "--assignments",
