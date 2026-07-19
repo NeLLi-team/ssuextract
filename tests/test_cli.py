@@ -118,6 +118,96 @@ class DatabaseConfigTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "1.1.0")
         self.assertEqual(result.stderr, "")
 
+    def test_example_uses_both_bundled_assemblies(self) -> None:
+        command = 'source "$1"; printf "%s\\n" "${SMOKE_FASTAS[@]}"'
+        result = subprocess.run(
+            ["bash", "-c", command, "bash", str(CLI)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                str(REPO / "data" / "example" / "LKH462_P08_Rh.fna"),
+                str(REPO / "data" / "example" / "LKH565_P11_Ci.fna"),
+            ],
+        )
+
+    def test_example_version_does_not_require_a_database(self) -> None:
+        command = 'source "$1"; run_smoke --version'
+        result = subprocess.run(
+            ["bash", "-c", command, "bash", str(CLI)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.stdout.strip(), "1.1.0")
+        self.assertEqual(result.stderr, "")
+
+    def test_example_default_wiring_persists_curated_and_uses_two_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            first = temporary / "first.fna"
+            second = temporary / "second.fna"
+            fake_python = temporary / "fake-python"
+            captured_config = temporary / "config.txt"
+            captured_arguments = temporary / "arguments.txt"
+            first.write_text(">first\nACGT\n")
+            second.write_text(">second\nTGCA\n")
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$1\" == *database_manager.py && \"$2\" == version ]]; then\n"
+                "  printf '1.0.1\\n'\n"
+                "elif [[ \"$1\" == *validate_example_output.py ]]; then\n"
+                "  exit 0\n"
+                "else\n"
+                "  exit 99\n"
+                "fi\n"
+            )
+            fake_python.chmod(0o755)
+            command = (
+                'source "$1"; '
+                'SMOKE_FASTAS=("$2" "$3"); PYTHON="$4"; '
+                'CAPTURED_CONFIG="$5"; CAPTURED_ARGUMENTS="$6"; '
+                'resolve_database_profile() { printf "curated\\n"; }; '
+                'resolve_database_path() { printf "/database\\n"; }; '
+                'write_database_config() { printf "%s|%s\\n" "$1" "$2" '
+                '> "$CAPTURED_CONFIG"; }; '
+                'run_pipeline() { printf "%s\\n" "$@" '
+                '> "$CAPTURED_ARGUMENTS"; }; '
+                'run_smoke'
+            )
+            subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    command,
+                    "bash",
+                    str(CLI),
+                    str(first),
+                    str(second),
+                    str(fake_python),
+                    str(captured_config),
+                    str(captured_arguments),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            arguments = captured_arguments.read_text().splitlines()
+            config = captured_config.read_text().strip()
+        self.assertEqual(config, "/database|curated")
+        self.assertEqual(arguments[arguments.index("--threads_per_job") + 1], "2")
+        self.assertEqual(
+            arguments[arguments.index("--database_path") + 1],
+            "/database",
+        )
+        self.assertEqual(
+            arguments[arguments.index("--database_profile") + 1],
+            "curated",
+        )
+
     def test_nextflow_uses_safe_term_when_current_term_is_unsupported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executable_dir = Path(tmp)

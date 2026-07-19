@@ -7,7 +7,13 @@ CONFIG_FILE="${PROJECT_DIR}/config/local.config"
 DEFAULT_DB_DIR="${PROJECT_DIR}/resources/database"
 DEFAULT_DB_PROFILE="curated"
 DATABASE_MANAGER="${PROJECT_DIR}/scripts/database_manager.py"
-SMOKE_FASTA="${PROJECT_DIR}/data/example/LKH565_P11_Ci.fna"
+SMOKE_FASTAS=(
+    "${PROJECT_DIR}/data/example/LKH462_P08_Rh.fna"
+    "${PROJECT_DIR}/data/example/LKH565_P11_Ci.fna"
+)
+EXAMPLE_EXPECTATIONS="${PROJECT_DIR}/data/example/expected_annotations.tsv"
+EXAMPLE_VALIDATOR="${PROJECT_DIR}/scripts/validate_example_output.py"
+EXAMPLE_THREADS_PER_JOB=2
 PYTHON=${PYTHON:-python3}
 
 main() {
@@ -435,11 +441,44 @@ run_pipeline() {
 }
 
 run_smoke() {
+    local database_version=""
+    local db_dir=""
+    local profile=""
     local smoke_dir=""
+    local smoke_args=()
+    if has_information_flag "$@"; then
+        run_pipeline "$@"
+        return
+    fi
+    profile=$(resolve_database_profile "$@")
+    db_dir=$(resolve_database_path "$@")
+    if ! cli_has_database_path "$@" && ! cli_has_database_profile "$@"; then
+        write_database_config "${db_dir}" "${profile}"
+    fi
     smoke_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssuextract-smoke.XXXXXX")
     trap "rm -rf '${smoke_dir}'" EXIT
-    cp "${SMOKE_FASTA}" "${smoke_dir}/"
-    run_pipeline --querydir "${smoke_dir}" --outdir "${PROJECT_DIR}/results/smoke" --threads_per_job 1 "$@"
+    cp "${SMOKE_FASTAS[@]}" "${smoke_dir}/"
+    smoke_args=(
+        --querydir "${smoke_dir}"
+        --outdir "${PROJECT_DIR}/results/smoke"
+        --threads_per_job "${EXAMPLE_THREADS_PER_JOB}"
+    )
+    # Pass the resolved selection back to run_pipeline so setup and validation
+    # use the same database even when the original command had no profile flags.
+    if ! cli_has_database_path "$@"; then
+        smoke_args+=(--database_path "${db_dir}")
+    fi
+    if ! cli_has_database_profile "$@"; then
+        smoke_args+=(--database_profile "${profile}")
+    fi
+    run_pipeline "${smoke_args[@]}" "$@"
+    database_version=$("${PYTHON}" "${DATABASE_MANAGER}" version \
+        --root "${db_dir}" --profile "${profile}")
+    "${PYTHON}" "${EXAMPLE_VALIDATOR}" \
+        --summary "${PROJECT_DIR}/results/smoke/cmsearch_summary.tsv" \
+        --expectations "${EXAMPLE_EXPECTATIONS}" \
+        --profile "${profile}" \
+        --database-version "${database_version}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

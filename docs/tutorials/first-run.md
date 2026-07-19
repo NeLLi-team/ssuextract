@@ -41,11 +41,19 @@ installed database version. If the download stops, rerun `pixi run setup`.
 Setup continues the selected database download from the retained partial
 archive.
 
-## Run the bundled assembly
+## Run the bundled assemblies
 
 ```bash
 pixi run example
 ```
+
+The two assemblies contain 10 accepted loci: nine 16S rRNA gene annotations and
+one 18S rRNA gene annotation. The command checks every annotation against the
+selected database profile and stops if a marker, reference sequence, taxonomy,
+or assignment method differs from the expected result.
+The checked annotations are tied to the database version shown by setup. Update
+SSUextract when installing a later database release so the example contract and
+database remain in sync.
 
 The run creates `results/smoke/`. Check the two summary files:
 
@@ -55,7 +63,12 @@ test -s results/smoke/cmsearch_summary.tab
 ```
 
 The first file contains one row per extracted region. The second contains
-per-sample counts by annotation category.
+per-sample counts by annotation category. To view the sample, marker model,
+coordinates, reference source, and taxonomy for each annotation:
+
+```bash
+cut -f2,3,5,14,15 results/smoke/cmsearch_summary.tsv
+```
 
 ## Inspect an extracted sequence
 

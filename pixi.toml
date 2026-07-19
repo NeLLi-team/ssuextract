@@ -29,8 +29,8 @@ setup = { cmd = "bash scripts/pipeline_cli.sh setup", description = "Select, ins
 # Run the full pipeline
 ssuextract = { cmd = "bash scripts/pipeline_cli.sh run", description = "Run the full pipeline with automatic database setup" }
 
-# Run a one-file smoke test on the smaller bundled example
-example = { cmd = "bash scripts/pipeline_cli.sh smoke", description = "Run a one-file example on bundled data" }
+# Run the bundled two-assembly example
+example = { cmd = "bash scripts/pipeline_cli.sh smoke", description = "Run the bundled example with 16S rRNA gene and 18S rRNA gene annotations" }
 
 # Verification gates
 test-unit = { cmd = "python -m unittest discover -s tests -v", description = "Run Python unit tests" }
