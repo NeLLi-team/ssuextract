@@ -8,7 +8,7 @@ Run `pixi run ssuextract --help` for the installed version's generated help.
 | `--modeldir` | `resources/models` | Directory containing Infernal covariance models. |
 | `--outdir` | `results/<querydir>` | Output directory. |
 | `--database_path` | Configured path or `resources/database` | Root containing database profiles. |
-| `--database_profile` | `curated` | Profile name: `curated` or `img`. |
+| `--database_profile` | Saved profile or `curated` | Profile name: `curated` or `img`. The option overrides the saved profile for one run. |
 | `--model_marker_map` | `config/model_markers.json` | Covariance-model to marker mapping. |
 | `--max_blast_targets` | `500` | Candidate policy limit; one extra hit is fetched as a truncation sentinel. |
 | `--min_extract_length` | `500` | Minimum accepted hit length in nucleotides; `0` disables the filter. |

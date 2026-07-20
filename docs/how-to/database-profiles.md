@@ -8,7 +8,8 @@ pixi run setup
 ```
 
 Select a profile by number or name. If `config/local.config` contains a previous
-selection, the prompt labels it as the default; press Enter to keep it.
+selection, the prompt labels it as the default; press Enter to keep it. Bare
+`pixi run ssuextract` and `pixi run example` commands use this saved profile.
 
 ## Install the curated profile
 
@@ -40,7 +41,20 @@ complete archive size and SHA-256 digest before extracting it.
 ## Update an installed profile
 
 Pipeline runs print the installed database version and check Zenodo for the
-latest release. An available update does not interrupt the run.
+latest release. An interactive run asks before starting Nextflow when an update
+is available:
+
+```text
+Database update available for img: v1.0.1 -> v1.0.2.
+Update database now? [y/N]:
+```
+
+Enter `y` to download, validate, and install the release. Any other response
+keeps the installed profile for that run. Non-interactive runs print the update
+command and continue with the installed profile.
+
+If the update fails, the installed profile remains in place and Nextflow does
+not start. Rerun the command to resume the download or repeat the release check.
 
 Install the suggested update:
 
@@ -48,15 +62,19 @@ Install the suggested update:
 pixi run setup --database_profile curated --update
 ```
 
-Without `--update`, interactive setup asks before replacing an installed
-profile. The existing profile remains in place until the downloaded archive and
-its contents pass validation.
+Interactive `pixi run setup` without `--update` uses the same confirmation
+prompt.
+
+The existing profile remains in place until the downloaded archive and its
+contents pass validation.
 
 ## Select a profile for one run
 
 ```bash
 pixi run ssuextract --querydir data/my_dataset --outdir results/my_dataset-img --database_profile img
 ```
+
+This option applies to one run and does not change the profile saved by setup.
 
 ## Use another database root
 
@@ -65,5 +83,10 @@ pixi run ssuextract --database_path /path/to/ssuextract-databases --database_pro
 ```
 
 The root must contain the selected profile directory and its `manifest.json`.
+Pipeline runs with an explicit `--database_path` report available releases but
+do not offer to replace the custom database root. Use `pixi run setup` with the
+same path and `--update` to replace it. The terminal prints this complete setup
+command when an update is available.
+
 See [database profiles](../reference/database-profiles.md) for the installed
 files and taxonomy sources.

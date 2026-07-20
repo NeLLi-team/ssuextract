@@ -41,11 +41,12 @@ Interactive terminals redraw a width-bounded progress line with written bytes,
 transfer rate, and estimated time remaining. Non-interactive logs include the
 start, completion, and intermediate progress every 10 seconds.
 
-`pixi run ssuextract` checks Zenodo before starting Nextflow. The check has a
-five-second total timeout. A valid installed profile remains usable when the
-check times out, Zenodo is unavailable, or the remote release contract fails
-validation. Updates require `pixi run setup --update` or confirmation in
-interactive setup.
+`pixi run ssuextract` and `pixi run example` check Zenodo before starting
+Nextflow. The check has a five-second total timeout. Interactive runs offer to
+install an available release. Non-interactive runs and runs with an explicit
+`--database_path` report the update and continue with the installed profile. A
+valid installed profile remains usable when the check times out, Zenodo is
+unavailable, or the remote release contract fails validation.
 
 ## Runtime files
 

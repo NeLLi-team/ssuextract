@@ -22,9 +22,11 @@ pixi run setup
 pixi run example
 ```
 
-`pixi run setup` lists the database profiles and defaults to `curated`. The
-example writes extracted sequences, per-hit annotations, category counts, and
-Nextflow reports under `results/smoke/`.
+`pixi run setup` lists the database profiles. A new checkout defaults to
+`curated`; later runs use the saved selection. Before Nextflow starts, an
+interactive run offers to install a newer database release when one is
+available. The example writes extracted sequences, per-hit annotations,
+category counts, and Nextflow reports under `results/smoke/`.
 
 ## Steps
 

@@ -872,6 +872,7 @@ def install_profile(
     timeout: float = 5.0,
     metadata_opener: Callable[..., BinaryIO] = urllib.request.urlopen,
     progress: ProgressReporter = None,
+    require_version: str | None = None,
 ) -> Path:
     """Download, validate, and publish one profile under an install lock."""
 
@@ -884,6 +885,16 @@ def install_profile(
         metadata_opener,
         progress,
     )
+    if require_version is not None:
+        expected = _require_identifier(
+            require_version, "required database version", InstallError
+        )
+        selected = catalog["profiles"][profile]["version"]
+        if selected != expected:
+            raise InstallError(
+                f"Database release changed during update: expected v{expected}, "
+                f"selected v{selected}; run the command again"
+            )
     root_path = Path(root).resolve()
     root_path.mkdir(parents=True, exist_ok=True)
     with _profile_install_lock(root_path):
@@ -938,6 +949,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     install.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     install.add_argument("--blastdbcmd", default="blastdbcmd")
     install.add_argument("--force", action="store_true")
+    install.add_argument(
+        "--require-version",
+        help="install only when discovery selects this exact database version",
+    )
     install.add_argument(
         "--latest",
         action="store_true",
@@ -1033,6 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
                     latest=args.latest,
                     timeout=args.timeout,
                     progress=progress,
+                    require_version=args.require_version,
                 )
             )
     except DatabaseError as error:

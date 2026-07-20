@@ -17,11 +17,13 @@ pixi run example
 ```
 
 `pixi run setup` lists the `curated` and `img` profiles with their database
-versions and download sizes. Select a profile by number or name. During a
-download, one terminal line shows written bytes, transfer rate, and estimated
-time remaining. Rerun the same setup command after an interrupted transfer;
-it continues from the retained partial archive and verifies the completed
-archive before extraction.
+versions and download sizes. Select a profile by number or name. That selection
+becomes the default for later pipeline runs. Interactive runs check Zenodo and
+offer to install a newer release before Nextflow starts. During a download, one
+terminal line shows written bytes, transfer rate, and estimated time remaining.
+Rerun the same setup command after an interrupted transfer; it continues from
+the retained partial archive and verifies the completed archive before
+extraction.
 
 Documentation: [tutorial](https://nelli-team.github.io/ssuextract/tutorials/first-run/),
 [parameters](https://nelli-team.github.io/ssuextract/reference/cli/),

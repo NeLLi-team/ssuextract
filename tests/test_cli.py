@@ -9,6 +9,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 CLI = REPO / "scripts" / "pipeline_cli.sh"
+DATABASE_MANAGER = REPO / "scripts" / "database_manager.py"
 
 
 def read_config(path: Path) -> str:
@@ -199,14 +200,8 @@ class DatabaseConfigTests(unittest.TestCase):
             config = captured_config.read_text().strip()
         self.assertEqual(config, "/database|curated")
         self.assertEqual(arguments[arguments.index("--threads_per_job") + 1], "2")
-        self.assertEqual(
-            arguments[arguments.index("--database_path") + 1],
-            "/database",
-        )
-        self.assertEqual(
-            arguments[arguments.index("--database_profile") + 1],
-            "curated",
-        )
+        self.assertNotIn("--database_path", arguments)
+        self.assertNotIn("--database_profile", arguments)
 
     def test_nextflow_uses_safe_term_when_current_term_is_unsupported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -297,6 +292,131 @@ class DatabaseConfigTests(unittest.TestCase):
             f"run {REPO / 'main.nf'} --database_path /database "
             "--database_profile curated --querydir /queries --outdir /output",
         )
+
+    def test_pipeline_disables_update_prompt_for_explicit_database_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable_dir = Path(tmp)
+            tput = executable_dir / "tput"
+            nextflow = executable_dir / "nextflow"
+            captured = executable_dir / "update-prompt.txt"
+            tput.write_text("#!/usr/bin/env bash\nexit 0\n")
+            nextflow.write_text("#!/usr/bin/env bash\nexit 0\n")
+            tput.chmod(0o755)
+            nextflow.chmod(0o755)
+            command = (
+                'source "$1"; CAPTURED="$2"; '
+                'ensure_database() { :; }; '
+                'check_database_update() { printf "%s|%s\\n" "$3" "$5" '
+                '> "$CAPTURED"; }; '
+                'run_pipeline --database_path /custom --database_profile img '
+                '--querydir /queries --outdir /output'
+            )
+            subprocess.run(
+                ["bash", "-c", command, "bash", str(CLI), str(captured)],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{executable_dir}:{os.environ['PATH']}",
+                    "TERM": "xterm-kitty",
+                },
+            )
+            captured_value = captured.read_text().strip()
+        self.assertEqual(captured_value, "0|1")
+
+    def test_pipeline_allows_update_prompt_for_saved_database_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable_dir = Path(tmp)
+            tput = executable_dir / "tput"
+            nextflow = executable_dir / "nextflow"
+            captured = executable_dir / "update-prompt.txt"
+            tput.write_text("#!/usr/bin/env bash\nexit 0\n")
+            nextflow.write_text("#!/usr/bin/env bash\nexit 0\n")
+            tput.chmod(0o755)
+            nextflow.chmod(0o755)
+            command = (
+                'source "$1"; CAPTURED="$2"; '
+                'resolve_database_profile() { printf "img\\n"; }; '
+                'resolve_database_path() { printf "/managed\\n"; }; '
+                'write_database_config() { :; }; ensure_database() { :; }; '
+                'check_database_update() { printf "%s|%s\\n" "$3" "$5" '
+                '> "$CAPTURED"; }; '
+                'run_pipeline --querydir /queries --outdir /output'
+            )
+            subprocess.run(
+                ["bash", "-c", command, "bash", str(CLI), str(captured)],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{executable_dir}:{os.environ['PATH']}",
+                    "TERM": "xterm-kitty",
+                },
+            )
+            captured_value = captured.read_text().strip()
+        self.assertEqual(captured_value, "1|0")
+
+    def test_pipeline_continues_after_noninteractive_database_notices(self) -> None:
+        cases = (
+            (
+                "unavailable\t1.0.1\t-\toffline",
+                "Database update check unavailable: offline",
+            ),
+            (
+                "update_available\t1.0.1\t1.0.2\t-",
+                "Run: pixi run setup --database_profile curated --update",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            executable_dir = Path(tmp)
+            tput = executable_dir / "tput"
+            nextflow = executable_dir / "nextflow"
+            fake_python = executable_dir / "fake-python"
+            tput.write_text("#!/usr/bin/env bash\nexit 0\n")
+            nextflow.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$*\"\n")
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$2\" == version ]]; then\n"
+                "  echo 1.0.1\n"
+                "elif [[ \"$2\" == check-update ]]; then\n"
+                "  printf '%s\\n' \"$UPDATE_STATUS\"\n"
+                "fi\n"
+            )
+            for executable in (tput, nextflow, fake_python):
+                executable.chmod(0o755)
+            command = (
+                'source "$1"; PYTHON="$2"; '
+                'resolve_database_profile() { printf "curated\\n"; }; '
+                'resolve_database_path() { printf "/database\\n"; }; '
+                'write_database_config() { :; }; ensure_database() { :; }; '
+                'run_pipeline --querydir /queries --outdir /output'
+            )
+            for update_status, expected_notice in cases:
+                with self.subTest(update_status=update_status):
+                    result = subprocess.run(
+                        [
+                            "bash",
+                            "-c",
+                            command,
+                            "bash",
+                            str(CLI),
+                            str(fake_python),
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        env={
+                            **os.environ,
+                            "PATH": f"{executable_dir}:{os.environ['PATH']}",
+                            "TERM": "xterm-kitty",
+                            "UPDATE_STATUS": update_status,
+                        },
+                    )
+                    self.assertIn(f"run {REPO / 'main.nf'}", result.stdout)
+                    self.assertIn(expected_notice, result.stderr)
+                    self.assertNotIn("Update database now?", result.stderr)
 
     def test_public_commands_do_not_use_a_pixi_argument_separator(self) -> None:
         public_docs = [
@@ -426,7 +546,7 @@ class DatabaseConfigTests(unittest.TestCase):
                 "if [[ \"$2\" == version ]]; then\n"
                 "  echo 1.0.0\n"
                 "elif [[ \"$2\" == check-update ]]; then\n"
-                "  echo \"Database profile 'curated': installed v1.0.0; latest v1.0.0.\"\n"
+                "  printf 'current\\t1.0.0\\t1.0.0\\t-\\n'\n"
                 "fi\n"
             )
             fake_python.chmod(0o755)
@@ -442,7 +562,161 @@ class DatabaseConfigTests(unittest.TestCase):
             )
         self.assertEqual(result.stdout, "")
         self.assertIn("Checking Zenodo for database updates", result.stderr)
-        self.assertIn("installed v1.0.0; latest v1.0.0", result.stderr)
+        self.assertIn("Database profile curated is current at v1.0.0", result.stderr)
+
+    def test_run_update_prompt_installs_before_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            fake_python = temporary / "fake-python"
+            captured = temporary / "install-arguments.txt"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "case \"$2\" in\n"
+                "  version) echo 1.0.2 ;;\n"
+                "  check-update) printf 'update_available\\t1.0.1\\t1.0.2\\t-\\n' ;;\n"
+                "  install) printf '%s\\n' \"$*\" > \"$CAPTURED_INSTALL\" ;;\n"
+                "  validate) exit 0 ;;\n"
+                "  *) exit 99 ;;\n"
+                "esac\n"
+            )
+            fake_python.chmod(0o755)
+            command = (
+                'source "$1"; PYTHON="$2"; '
+                'can_prompt_for_database_update() { return 0; }; '
+                'check_database_update /database img 1'
+            )
+            result = subprocess.run(
+                ["bash", "-c", command, "bash", str(CLI), str(fake_python)],
+                input="y\n",
+                check=True,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "CAPTURED_INSTALL": str(captured)},
+            )
+            captured_arguments = captured.read_text().strip()
+        self.assertEqual(
+            captured_arguments,
+            f"{DATABASE_MANAGER} install --root /database --profile img --latest "
+            "--require-version 1.0.2 --force",
+        )
+        self.assertIn(
+            "Database update available for img: v1.0.1 -> v1.0.2",
+            result.stderr,
+        )
+        self.assertIn("Update database now? [y/N]:", result.stderr)
+        self.assertIn("Database profile img v1.0.2 ready at /database", result.stderr)
+
+    def test_run_update_prompt_decline_keeps_installed_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            fake_python = temporary / "fake-python"
+            captured = temporary / "install-arguments.txt"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$2\" == version ]]; then\n"
+                "  echo 1.0.1\n"
+                "elif [[ \"$2\" == check-update ]]; then\n"
+                "  printf 'update_available\\t1.0.1\\t1.0.2\\t-\\n'\n"
+                "elif [[ \"$2\" == install ]]; then\n"
+                "  printf '%s\\n' \"$*\" > \"$CAPTURED_INSTALL\"\n"
+                "fi\n"
+            )
+            fake_python.chmod(0o755)
+            command = (
+                'source "$1"; PYTHON="$2"; '
+                'can_prompt_for_database_update() { return 0; }; '
+                'check_database_update /database curated 1'
+            )
+            result = subprocess.run(
+                ["bash", "-c", command, "bash", str(CLI), str(fake_python)],
+                input="n\n",
+                check=True,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "CAPTURED_INSTALL": str(captured)},
+            )
+            install_was_called = captured.exists()
+        self.assertFalse(install_was_called)
+        self.assertIn("Update database now? [y/N]:", result.stderr)
+        self.assertIn(
+            "pixi run setup --database_profile curated --update",
+            result.stderr,
+        )
+
+    def test_run_update_notice_includes_explicit_database_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_python = Path(tmp) / "fake-python"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"$2\" == version ]]; then\n"
+                "  echo 1.0.1\n"
+                "elif [[ \"$2\" == check-update ]]; then\n"
+                "  printf 'update_available\\t1.0.1\\t1.0.2\\t-\\n'\n"
+                "fi\n"
+            )
+            fake_python.chmod(0o755)
+            command = (
+                'source "$1"; PYTHON="$2"; '
+                'check_database_update "/custom database" curated 0 0 1'
+            )
+            result = subprocess.run(
+                ["bash", "-c", command, "bash", str(CLI), str(fake_python)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        self.assertIn(
+            "--database_path /custom\\ database --database_profile curated --update",
+            result.stderr,
+        )
+
+    def test_failed_run_update_stops_before_pipeline_with_old_profile_intact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_python = Path(tmp) / "fake-python"
+            fake_python.write_text(
+                "#!/usr/bin/env bash\n"
+                "case \"$2\" in\n"
+                "  version) echo 1.0.1 ;;\n"
+                "  check-update) printf 'update_available\\t1.0.1\\t1.0.2\\t-\\n' ;;\n"
+                "  install) exit 2 ;;\n"
+                "  *) exit 99 ;;\n"
+                "esac\n"
+            )
+            fake_python.chmod(0o755)
+            command = (
+                'source "$1"; PYTHON="$2"; '
+                'can_prompt_for_database_update() { return 0; }; '
+                'check_database_update /database img 1'
+            )
+            result = subprocess.run(
+                ["bash", "-c", command, "bash", str(CLI), str(fake_python)],
+                input="y\n",
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Database update failed; profile img remains installed and the pipeline was not started.",
+            result.stderr,
+        )
+
+    def test_setup_update_forces_shared_update_install_path(self) -> None:
+        command = (
+            'source "$1"; '
+            'resolve_setup_database_profile() { printf "img\\n"; }; '
+            'resolve_database_path() { printf "/database\\n"; }; '
+            'write_database_config() { :; }; database_ready() { return 0; }; '
+            'ensure_database() { :; }; database_version() { printf "1.0.1\\n"; }; '
+            'check_database_update() { printf "%s|%s|%s|%s\\n" "$@"; }; '
+            'setup_database --database_profile img --update'
+        )
+        result = subprocess.run(
+            ["bash", "-c", command, "bash", str(CLI)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.stdout.strip(), "/database|img|1|1")
 
 
 if __name__ == "__main__":

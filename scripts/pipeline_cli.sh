@@ -318,26 +318,9 @@ ensure_database() {
 check_database_update() {
     local db_dir="$1"
     local profile="$2"
-    if ! database_version "${db_dir}" "${profile}" >/dev/null; then
-        return 0
-    fi
-    printf 'Checking Zenodo for database updates...\n' >&2
-    "${PYTHON}" "${DATABASE_MANAGER}" check-update \
-        --root "${db_dir}" \
-        --profile "${profile}" >&2
-}
-
-setup_requests_update() {
-    local arg
-    for arg in "$@"; do
-        [[ "${arg}" == "--update" ]] && return 0
-    done
-    return 1
-}
-
-setup_database() {
-    local db_dir=""
-    local profile=""
+    local allow_prompt="${3:-0}"
+    local force_update="${4:-0}"
+    local include_database_path="${5:-0}"
     local result=""
     local status=""
     local installed=""
@@ -345,19 +328,9 @@ setup_database() {
     local reason=""
     local answer=""
 
-    profile=$(resolve_setup_database_profile "$@")
-    db_dir=$(resolve_database_path "$@")
-    write_database_config "${db_dir}" "${profile}"
-
-    if ! database_ready "${db_dir}" "${profile}"; then
-        ensure_database "${db_dir}" "${profile}"
-        return
-    fi
-    ensure_database "${db_dir}" "${profile}"
     if ! database_version "${db_dir}" "${profile}" >/dev/null; then
-        return
+        return 0
     fi
-
     printf 'Checking Zenodo for database updates...\n' >&2
     result=$("${PYTHON}" "${DATABASE_MANAGER}" check-update \
         --root "${db_dir}" \
@@ -368,21 +341,21 @@ setup_database() {
         update_available)
             printf 'Database update available for %s: v%s -> v%s.\n' \
                 "${profile}" "${installed}" "${latest}" >&2
-            if setup_requests_update "$@"; then
+            if [[ "${force_update}" -eq 1 ]]; then
                 answer=y
-            elif [[ -t 0 ]]; then
-                printf 'Install the update now? [y/N]: ' >&2
-                read -r answer
+            elif can_prompt_for_database_update "${allow_prompt}"; then
+                printf 'Update database now? [y/N]: ' >&2
+                if ! read -r answer; then
+                    answer=""
+                fi
             fi
             if [[ "${answer}" =~ ^[Yy]$ ]]; then
-                "${PYTHON}" "${DATABASE_MANAGER}" install \
-                    --root "${db_dir}" \
-                    --profile "${profile}" \
-                    --latest \
-                    --force
+                if ! install_database_update "${db_dir}" "${profile}" "${latest}"; then
+                    return 1
+                fi
             else
-                printf "Run 'pixi run setup --database_profile %s --update' to update.\n" \
-                    "${profile}" >&2
+                print_database_update_command \
+                    "${db_dir}" "${profile}" "${include_database_path}"
             fi
             ;;
         current)
@@ -403,9 +376,80 @@ setup_database() {
     esac
 }
 
+can_prompt_for_database_update() {
+    local allow_prompt="$1"
+    [[ "${allow_prompt}" -eq 1 && -t 0 ]]
+}
+
+install_database_update() {
+    local db_dir="$1"
+    local profile="$2"
+    local version="$3"
+    if ! "${PYTHON}" "${DATABASE_MANAGER}" install \
+        --root "${db_dir}" \
+        --profile "${profile}" \
+        --latest \
+        --require-version "${version}" \
+        --force; then
+        printf 'Database update failed; profile %s remains installed and the pipeline was not started.\n' \
+            "${profile}" >&2
+        return 1
+    fi
+    ensure_database "${db_dir}" "${profile}"
+}
+
+print_database_update_command() {
+    local db_dir="$1"
+    local profile="$2"
+    local include_database_path="$3"
+    local quoted_db_dir=""
+
+    if [[ "${include_database_path}" -eq 1 ]]; then
+        printf -v quoted_db_dir '%q' "${db_dir}"
+        printf 'Run: pixi run setup --database_path %s --database_profile %s --update\n' \
+            "${quoted_db_dir}" "${profile}" >&2
+    else
+        printf 'Run: pixi run setup --database_profile %s --update\n' \
+            "${profile}" >&2
+    fi
+}
+
+setup_requests_update() {
+    local arg
+    for arg in "$@"; do
+        [[ "${arg}" == "--update" ]] && return 0
+    done
+    return 1
+}
+
+setup_database() {
+    local db_dir=""
+    local profile=""
+    local force_update=0
+
+    profile=$(resolve_setup_database_profile "$@")
+    db_dir=$(resolve_database_path "$@")
+    write_database_config "${db_dir}" "${profile}"
+
+    if ! database_ready "${db_dir}" "${profile}"; then
+        ensure_database "${db_dir}" "${profile}"
+        return
+    fi
+    ensure_database "${db_dir}" "${profile}"
+    if ! database_version "${db_dir}" "${profile}" >/dev/null; then
+        return
+    fi
+    if setup_requests_update "$@"; then
+        force_update=1
+    fi
+    check_database_update "${db_dir}" "${profile}" 1 "${force_update}"
+}
+
 run_pipeline() {
     local db_dir=""
     local profile=""
+    local allow_update_prompt=1
+    local include_database_path=0
     local nextflow_args=()
 
     if [[ "$#" -eq 1 && "$1" == "--version" ]]; then
@@ -422,8 +466,15 @@ run_pipeline() {
     if ! cli_has_database_path "$@" && ! cli_has_database_profile "$@"; then
         write_database_config "${db_dir}" "${profile}"
     fi
+    if cli_has_database_path "$@"; then
+        allow_update_prompt=0
+        include_database_path=1
+    fi
     ensure_database "${db_dir}" "${profile}"
-    check_database_update "${db_dir}" "${profile}"
+    if ! check_database_update \
+        "${db_dir}" "${profile}" "${allow_update_prompt}" 0 "${include_database_path}"; then
+        return 1
+    fi
 
     if cli_has_database_path "$@" && cli_has_database_profile "$@"; then
         run_nextflow run "${PROJECT_DIR}/main.nf" "$@"
@@ -463,14 +514,6 @@ run_smoke() {
         --outdir "${PROJECT_DIR}/results/smoke"
         --threads_per_job "${EXAMPLE_THREADS_PER_JOB}"
     )
-    # Pass the resolved selection back to run_pipeline so setup and validation
-    # use the same database even when the original command had no profile flags.
-    if ! cli_has_database_path "$@"; then
-        smoke_args+=(--database_path "${db_dir}")
-    fi
-    if ! cli_has_database_profile "$@"; then
-        smoke_args+=(--database_profile "${profile}")
-    fi
     run_pipeline "${smoke_args[@]}" "$@"
     database_version=$("${PYTHON}" "${DATABASE_MANAGER}" version \
         --root "${db_dir}" --profile "${profile}")

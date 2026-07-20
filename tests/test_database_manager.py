@@ -421,6 +421,50 @@ class DatabaseManagerTests(unittest.TestCase):
         )
         self.assertTrue(any("using bundled release metadata" in message for message in messages))
 
+    @mock.patch.object(manager, "_install_profile_locked")
+    @mock.patch.object(manager, "_catalog_for_install")
+    def test_required_install_version_rejects_changed_release(
+        self, select_catalog, install
+    ) -> None:
+        select_catalog.return_value = {
+            "profiles": {"curated": {"version": "1.0.2"}}
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "database"
+            with self.assertRaisesRegex(
+                manager.InstallError,
+                "expected v1.0.3, selected v1.0.2",
+            ):
+                manager.install_profile(
+                    root,
+                    "curated",
+                    latest=True,
+                    require_version="1.0.3",
+                )
+            self.assertFalse(root.exists())
+        install.assert_not_called()
+
+    @mock.patch.object(manager, "_install_profile_locked")
+    @mock.patch.object(manager, "_catalog_for_install")
+    def test_required_install_version_accepts_exact_release(
+        self, select_catalog, install
+    ) -> None:
+        select_catalog.return_value = {
+            "profiles": {"curated": {"version": "1.0.2"}}
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "database"
+            expected = root / "curated"
+            install.return_value = expected
+            result = manager.install_profile(
+                root,
+                "curated",
+                latest=True,
+                require_version="1.0.2",
+            )
+        self.assertEqual(result, expected)
+        install.assert_called_once()
+
     @mock.patch.object(
         manager,
         "discover_latest_catalog",
