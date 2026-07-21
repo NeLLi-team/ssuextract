@@ -90,11 +90,11 @@ if (
     echo "Unsupported single-file suffix unexpectedly started the pipeline" >&2
     exit 1
 fi
-rg -q -F -- \
+grep -Fq -- \
     "--querydir file must end in .fna, .fa, or .fasta" \
     "${test_dir}/unsupported.stdout.txt" \
     "${test_dir}/unsupported.stderr.txt"
-if rg -q -F "Submitted process" \
+if grep -Fq "Submitted process" \
     "${test_dir}/unsupported.stdout.txt" \
     "${test_dir}/unsupported.stderr.txt"; then
     echo "Unsupported single-file suffix submitted a process" >&2
