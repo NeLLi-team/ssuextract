@@ -11,15 +11,24 @@ import duckdb
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
-from annotate_hits import SUMMARY_FIELDS, annotate_hits, load_taxonomy_records
+from annotate_hits import (
+    SUMMARY_FIELDS,
+    annotate_hits,
+    load_taxonomy_records,
+)
 from finalize_summaries import (
+    apply_tree_assignments,
     load_metadata,
     load_summary_rows,
+    load_top_hit_rows,
     merge_m8_files,
     write_category_summary,
     write_detailed_summary,
+    write_top_hit_summary,
 )
 from hit_processing import HIT_FIELDS, META_FIELDS
+from top_hit_reporting import TOP_HIT_FIELDS, load_reference_records
+from tree_schema import TREE_ASSIGNMENT_FIELDS
 
 
 def write_tsv(path: Path, fields: list[str], rows: list[dict[str, object]]) -> None:
@@ -75,6 +84,31 @@ def write_taxonomy_parquet(
     connection.close()
 
 
+def write_source_records_parquet(
+    path: Path,
+    rows: list[tuple[str, str, str, str]],
+) -> None:
+    connection = duckdb.connect(":memory:")
+    connection.execute(
+        """
+        CREATE TABLE source_records (
+            sequence_id VARCHAR,
+            reference_source VARCHAR,
+            source_version VARCHAR,
+            source_identifier VARCHAR
+        )
+        """
+    )
+    if rows:
+        connection.executemany(
+            "INSERT INTO source_records VALUES (?, ?, ?, ?)", rows
+        )
+    connection.execute(
+        "COPY source_records TO ? (FORMAT PARQUET, COMPRESSION ZSTD)", [str(path)]
+    )
+    connection.close()
+
+
 class AnnotationTests(unittest.TestCase):
     def test_lca_does_not_collapse_missing_internal_ranks(self) -> None:
         from annotate_hits import lowest_common_taxonomy
@@ -126,12 +160,155 @@ class AnnotationTests(unittest.TestCase):
             hits = root / "sample.hits.tsv"
             m8 = root / "sample.m8"
             output = root / "sample.summary.tsv"
+            top_hits = root / "sample.top_hits.tsv"
             write_tsv(hits, HIT_FIELDS, [])
             m8.touch()
-            annotate_hits(hits, m8, output)
+            annotate_hits(hits, m8, output, top_hits_output=top_hits)
 
             self.assertEqual(output.read_text().rstrip("\n").split("\t"), SUMMARY_FIELDS)
+            self.assertEqual(top_hits.read_text().rstrip("\n").split("\t"), TOP_HIT_FIELDS)
             self.assertNotIn("\r", output.read_text())
+
+    def test_top_hits_join_metadata_and_retain_best_source_hit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hits = root / "sample.hits.tsv"
+            m8 = root / "sample.m8"
+            taxonomy = root / "preferred_taxonomy.parquet"
+            sources = root / "source_records.parquet"
+            fasta = root / "sample.fna"
+            summary = root / "sample.summary.tsv"
+            top_hits = root / "sample.top_hits.tsv"
+            row = dict.fromkeys(HIT_FIELDS, "")
+            row.update(
+                name="query1",
+                sample="sample",
+                model="RF01960",
+                length=4,
+                coordinates="1-4",
+                strand="+",
+                sequence_type="simple",
+                contig_name="contig1",
+                is_assembled="False",
+            )
+            write_tsv(hits, HIT_FIELDS, [row])
+            fasta.write_text(">query1\nacGt\n", encoding="ascii")
+            m8.write_text(
+                "query1\tSSU_img\t99\t4\t0\t0\t1\t4\t1\t4\t1e-20\t100\n"
+                "query1\tSSU_img_tie\t98\t4\t1\t0\t1\t4\t1\t4\t1e-19\t100\n"
+                "query1\tSSU_pr2\t98\t4\t1\t0\t1\t4\t1\t4\t1e-10\t90\n"
+                "query1\tSSU_third\t97\t4\t1\t0\t1\t4\t1\t4\t1e-5\t80\n",
+                encoding="ascii",
+            )
+            write_taxonomy_parquet(
+                taxonomy,
+                [
+                    (
+                        "SSU_img", "IMG", "Unclassified", "SILVA+PR2",
+                        "Unclassified", "", "updated_reference_unclassified",
+                        False, "",
+                        '["IMG_3300000001.a:contig_1"]',
+                        "Eukaryota;Amoebozoa;Discosea;Echinamoebida", "PR2",
+                    ),
+                    (
+                        "SSU_img_tie", "IMG", "Unclassified", "SILVA+PR2",
+                        "Unclassified", "", "updated_reference_unclassified",
+                        False, "",
+                        '["IMG_3300000002.a:contig_2"]',
+                        "Eukaryota;Amoebozoa;Discosea;Echinamoebida", "PR2",
+                    ),
+                    (
+                        "SSU_pr2", "PR2",
+                        "Eukaryota;Amoebozoa;Discosea;Echinamoebida;Echinamoeba",
+                        "PR2", "Eukaryota", "nucleus", "native", False, "", "", "", "",
+                    ),
+                    (
+                        "SSU_third", "PR2", "Eukaryota;Amoebozoa", "PR2",
+                        "Eukaryota", "nucleus", "native", False, "", "", "", "",
+                    ),
+                ],
+                include_centroids=True,
+            )
+            write_source_records_parquet(
+                sources,
+                [
+                    ("SSU_img", "IMG", "2025", "IMG_3300000001.a:contig_9"),
+                    ("SSU_img_tie", "IMG", "2025", "IMG_3300000002.a:contig_8"),
+                    ("SSU_pr2", "PR2", "5.1.1", "AB123456.1.1800_U"),
+                    ("SSU_third", "PR2", "5.1.1", "AB999999.1.1800_U"),
+                ],
+            )
+            annotate_hits(
+                hits,
+                m8,
+                summary,
+                taxonomy,
+                query_fasta=fasta,
+                source_records_file=sources,
+                top_hits_output=top_hits,
+                top_hits=1,
+            )
+            with summary.open(newline="") as handle:
+                summary_row = next(csv.DictReader(handle, delimiter="\t"))
+            with top_hits.open(newline="") as handle:
+                top_rows = list(csv.DictReader(handle, delimiter="\t"))
+
+        self.assertEqual(summary_row["query_sequence"], "acGt")
+        self.assertEqual(
+            summary_row["reference_identifiers"],
+            "IMG:IMG_3300000001.a:contig_9",
+        )
+        self.assertEqual(summary_row["reference_versions"], "IMG:2025")
+        self.assertEqual(summary_row["taxonomy"], "Unclassified")
+        self.assertIn("Echinamoebida", summary_row["centroid_taxonomy"])
+        self.assertEqual(len(top_rows), 3)
+        self.assertEqual([row["hit_rank"] for row in top_rows], ["1", "2", "3"])
+        self.assertEqual(
+            [row["blast_sseqid"] for row in top_rows],
+            ["SSU_img", "SSU_img_tie", "SSU_pr2"],
+        )
+        self.assertEqual(top_rows[0]["taxonomy"], "Unclassified")
+        self.assertEqual(
+            top_rows[0]["selection_reason"],
+            "overall_top_n|equal_best_assignment|best_IMG",
+        )
+        self.assertIn("Echinamoebida", top_rows[0]["centroid_taxonomy"])
+        self.assertEqual(top_rows[1]["selection_reason"], "equal_best_assignment")
+        self.assertIn("Echinamoeba", top_rows[2]["taxonomy"])
+        self.assertEqual(top_rows[2]["selection_reason"], "best_PR2")
+        self.assertEqual(
+            top_rows[2]["reference_identifiers"], "PR2:AB123456.1.1800_U"
+        )
+        self.assertEqual({row["query_sequence"] for row in top_rows}, {"acGt"})
+
+    def test_source_metadata_is_required_for_every_reported_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sources = Path(tmp) / "source_records.parquet"
+            write_source_records_parquet(
+                sources, [("SSU_present", "PR2", "5.1.1", "AB1.1.100_U")]
+            )
+            with self.assertRaisesRegex(ValueError, "Missing source metadata"):
+                load_reference_records(sources, {"SSU_present", "SSU_missing"})
+
+    def test_exact_sequence_retains_all_public_source_identifiers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sources = Path(tmp) / "source_records.parquet"
+            write_source_records_parquet(
+                sources,
+                [
+                    ("SSU_shared", "PR2", "5.1.1", "AB1.1.100_U"),
+                    ("SSU_shared", "PR2", "5.1.1", "AB2.1.100_U"),
+                    ("SSU_shared", "SILVA", "138.2", "AB3.1.100"),
+                ],
+            )
+            record = load_reference_records(sources, {"SSU_shared"})["SSU_shared"]
+
+        self.assertEqual(
+            record.identifiers,
+            "PR2:AB1.1.100_U|PR2:AB2.1.100_U|SILVA:AB3.1.100",
+        )
+        self.assertEqual(record.versions, "PR2:5.1.1|SILVA:138.2")
+        self.assertEqual(record.sources, ("PR2", "SILVA"))
 
     def test_equal_bitscore_taxonomy_is_lowest_common_ancestor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -616,6 +793,116 @@ class FinalSummaryTests(unittest.TestCase):
             output.write_text("stale\n")
             merge_m8_files(str(root / "*.m8"), output)
             self.assertEqual(output.read_text(), "a\nb\n")
+
+    def test_top_hit_rows_are_merged_in_query_rank_order(self) -> None:
+        row_a = dict.fromkeys(TOP_HIT_FIELDS, "")
+        row_a.update(
+            name="q2", sample="sample", model="RF01960", hit_rank="2",
+            blast_sseqid="subject-b",
+        )
+        row_b = dict.fromkeys(TOP_HIT_FIELDS, "")
+        row_b.update(
+            name="q1", sample="sample", model="RF01960", hit_rank="1",
+            blast_sseqid="subject-a",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_tsv(root / "z.top_hits.tsv", TOP_HIT_FIELDS, [row_a])
+            write_tsv(root / "a.top_hits.tsv", TOP_HIT_FIELDS, [row_b])
+            rows = load_top_hit_rows(str(root / "*.top_hits.tsv"))
+            output = root / "blast_top_hits.tsv"
+            write_top_hit_summary(rows, output)
+            with output.open(newline="") as handle:
+                merged = list(csv.DictReader(handle, delimiter="\t"))
+
+        self.assertEqual([row["name"] for row in merged], ["q1", "q2"])
+        self.assertEqual(merged[0]["blast_sseqid"], "subject-a")
+
+    def test_tree_mode_replaces_selected_taxonomy_but_retains_blast_taxonomy(self) -> None:
+        row = dict.fromkeys(SUMMARY_FIELDS, "")
+        row.update(
+            name="query1",
+            sample="sample",
+            model="RF01960",
+            taxonomy="Eukaryota",
+            taxonomy_source="PR2",
+            taxonomy_domain="Eukaryota",
+            taxonomy_assignment_method="lowest_common_ancestor",
+            taxonomy_mode="blast",
+            blast_taxonomy="Eukaryota",
+            blast_taxonomy_source="PR2",
+            blast_taxonomy_domain="Eukaryota",
+            blast_compartment="nucleus",
+            blast_taxonomy_assignment_method="lowest_common_ancestor",
+            blast_taxonomy_alternatives='[{"taxonomy":"Eukaryota"}]',
+        )
+        assignment = dict.fromkeys(TREE_ASSIGNMENT_FIELDS, "")
+        assignment.update(
+            name="query1",
+            sample="sample",
+            model="RF01960",
+            tree_model="RF01960",
+            tree_marker="18S",
+            tree_taxonomy=(
+                "Eukaryota;Amoebozoa;Discosea;Echinamoebida;Echinamoeba"
+            ),
+            tree_taxonomy_source="PR2",
+            tree_taxonomy_domain="Eukaryota",
+            tree_compartment="nucleus",
+            tree_assignment_method="tree_nearest_named_lca",
+            tree_basis_neighbors="5",
+        )
+        merged = apply_tree_assignments([row], [assignment], "tree")[0]
+        self.assertEqual(merged["taxonomy_mode"], "tree")
+        self.assertEqual(
+            merged["taxonomy"],
+            "Eukaryota;Amoebozoa;Discosea;Echinamoebida;Echinamoeba",
+        )
+        self.assertEqual(merged["blast_taxonomy"], "Eukaryota")
+        self.assertEqual(merged["blast_compartment"], "nucleus")
+        self.assertEqual(
+            merged["blast_taxonomy_alternatives"],
+            '[{"taxonomy":"Eukaryota"}]',
+        )
+        self.assertEqual(
+            merged["taxonomy_assignment_method"], "tree_nearest_named_lca"
+        )
+
+    def test_sparse_tree_query_retains_blast_assignment_and_skip_reason(self) -> None:
+        row = dict.fromkeys(SUMMARY_FIELDS, "")
+        row.update(
+            name="query1",
+            sample="sample",
+            model="RF01960",
+            taxonomy="Eukaryota;Amoebozoa",
+            taxonomy_source="PR2",
+            taxonomy_domain="Eukaryota",
+            taxonomy_assignment_method="native",
+            taxonomy_mode="blast",
+            blast_taxonomy="Eukaryota;Amoebozoa",
+        )
+        assignment = dict.fromkeys(TREE_ASSIGNMENT_FIELDS, "")
+        assignment.update(
+            name="query1",
+            sample="sample",
+            model="RF01960",
+            tree_model="RF01960",
+            tree_marker="18S",
+            tree_route_decision="majority_global_top_hits",
+            tree_route_18s_votes="2",
+            tree_assignment_method="tree_skipped_insufficient_references",
+            tree_basis_neighbors="0",
+        )
+
+        merged = apply_tree_assignments([row], [assignment], "tree")[0]
+
+        self.assertEqual(merged["taxonomy_mode"], "blast")
+        self.assertEqual(merged["taxonomy"], "Eukaryota;Amoebozoa")
+        self.assertEqual(merged["taxonomy_assignment_method"], "native")
+        self.assertEqual(
+            merged["tree_assignment_method"],
+            "tree_skipped_insufficient_references",
+        )
 
 
 if __name__ == "__main__":

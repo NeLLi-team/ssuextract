@@ -55,20 +55,27 @@ The checked annotations are tied to the database version shown by setup. Update
 SSUextract when installing a later database release so the example contract and
 database remain in sync.
 
-The run creates `results/smoke/`. Check the two summary files:
+The run creates `results/smoke/`. Check the summary and ranked-hit files:
 
 ```bash
 test -s results/smoke/cmsearch_summary.tsv
 test -s results/smoke/cmsearch_summary.tab
+test -s results/smoke/blast_top_hits.tsv
 ```
 
-The first file contains one row per extracted region. The second contains
-per-sample counts by annotation category. View the sample, marker model,
-coordinates, matched sequence, reference source, final taxonomy, and centroid
-evidence:
+`cmsearch_summary.tsv` contains one row per extracted region;
+`cmsearch_summary.tab` contains per-sample counts by annotation category. View
+the sample, marker model, coordinates, reference source, final taxonomy,
+centroid evidence, and public reference identifier:
 
 ```bash
-cut -f2,3,5,9,14,15,23-25 results/smoke/cmsearch_summary.tsv
+cut -f2,3,5,14,15,23-26 results/smoke/cmsearch_summary.tsv
+```
+
+View the ranked reference evidence:
+
+```bash
+cut -f1,4-5,7,9-10,17,19-20,28 results/smoke/blast_top_hits.tsv
 ```
 
 ## Inspect an extracted sequence

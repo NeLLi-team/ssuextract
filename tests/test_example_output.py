@@ -1,6 +1,7 @@
 import ast
 import csv
 import importlib.util
+import sys
 import tempfile
 import unittest
 from collections import Counter
@@ -8,9 +9,19 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "scripts"))
+
+from annotate_hits import SUMMARY_FIELDS
+from tree_schema import SUMMARY_TREE_FIELDS
+
 SCRIPT = REPO / "scripts" / "validate_example_output.py"
 EXPECTATIONS = REPO / "data" / "example" / "expected_annotations.tsv"
 TUTORIAL = REPO / "docs" / "tutorials" / "first-run.md"
+RUN_ASSEMBLIES = REPO / "docs" / "how-to" / "run-assemblies.md"
+CLI_REFERENCE = REPO / "docs" / "reference" / "cli.md"
+OUTPUT_REFERENCE = REPO / "docs" / "reference" / "outputs.md"
+TOP_HIT_REPORTING = REPO / "scripts" / "top_hit_reporting.py"
+CONDA_ENVIRONMENT = REPO / "config" / "environment.yml"
 DATABASE_VERSION = "1.0.2"
 SPEC = importlib.util.spec_from_file_location("validate_example_output", SCRIPT)
 validator = importlib.util.module_from_spec(SPEC)
@@ -254,36 +265,72 @@ class ExampleOutputTests(unittest.TestCase):
                 )
 
     def test_tutorial_cut_fields_match_the_summary_schema(self) -> None:
-        module = ast.parse((REPO / "scripts" / "annotate_hits.py").read_text())
-        assignment = next(
-            node
-            for node in module.body
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name) and target.id == "SUMMARY_FIELDS"
-                for target in node.targets
-            )
-        )
-        summary_fields = ast.literal_eval(assignment.value)
-        one_based_columns = (2, 3, 5, 9, 14, 15, 23, 24, 25)
+        summary_fields = SUMMARY_FIELDS
+        one_based_columns = (2, 3, 5, 14, 15, 23, 24, 25, 26)
         self.assertEqual(
             [summary_fields[index - 1] for index in one_based_columns],
             [
                 "sample",
                 "model",
                 "coordinates",
-                "blast_sseqid",
                 "reference_source",
                 "taxonomy",
                 "centroid_names",
                 "centroid_taxonomy",
                 "centroid_taxonomy_source",
+                "reference_identifiers",
             ],
         )
         self.assertIn(
-            "cut -f2,3,5,9,14,15,23-25 results/smoke/cmsearch_summary.tsv",
+            "cut -f2,3,5,14,15,23-26 results/smoke/cmsearch_summary.tsv",
             TUTORIAL.read_text(),
         )
+        self.assertEqual(
+            summary_fields[25:28],
+            ["reference_identifiers", "reference_versions", "query_sequence"],
+        )
+        self.assertEqual(summary_fields[28:], SUMMARY_TREE_FIELDS)
+
+    def test_ranked_hit_documentation_matches_the_output_schema(self) -> None:
+        module = ast.parse(TOP_HIT_REPORTING.read_text())
+        assignment = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "TOP_HIT_FIELDS"
+                for target in node.targets
+            )
+        )
+        fields = ast.literal_eval(assignment.value)
+        one_based_columns = (1, 4, 5, 7, 9, 10, 17, 19, 20, 28)
+        self.assertEqual(
+            [fields[index - 1] for index in one_based_columns],
+            [
+                "name",
+                "hit_rank",
+                "selection_reason",
+                "reference_identifiers",
+                "reference_source",
+                "taxonomy",
+                "centroid_taxonomy",
+                "blast_pident",
+                "blast_length",
+                "blast_bitscore",
+            ],
+        )
+        command = "cut -f1,4-5,7,9-10,17,19-20,28"
+        self.assertIn(command, TUTORIAL.read_text())
+        self.assertIn(command, RUN_ASSEMBLIES.read_text())
+        self.assertIn("`--top_hits` | `5`", CLI_REFERENCE.read_text())
+        self.assertIn("`blast_top_hits.tsv`", OUTPUT_REFERENCE.read_text())
+        self.assertIn("`--tree_classification` | off", CLI_REFERENCE.read_text())
+        self.assertIn("`tree_nearest_neighbors.tsv`", OUTPUT_REFERENCE.read_text())
+
+    def test_tree_dependencies_are_declared_in_the_conda_environment(self) -> None:
+        environment = CONDA_ENVIRONMENT.read_text()
+        self.assertIn("  - iqtree >=3.0,<4\n", environment)
+        self.assertIn("  - ete4 >=4.4,<5\n", environment)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,21 @@ set -euo pipefail
 
 repo_dir=$(git rev-parse --show-toplevel)
 test_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssuextract-no-hit.XXXXXX")
-trap 'rm -rf "${test_dir}"' EXIT
+cleanup() {
+    status=$?
+    if [[ ${status} -eq 0 ]]; then
+        rm -rf "${test_dir}"
+        return
+    fi
+    echo "No-hit integration failed; temporary evidence: ${test_dir}" >&2
+    for log in stdout.txt stderr.txt nextflow.log; do
+        if [[ -s "${test_dir}/${log}" ]]; then
+            echo "--- ${log} ---" >&2
+            sed -n '1,400p' "${test_dir}/${log}" >&2
+        fi
+    done
+}
+trap cleanup EXIT
 
 mkdir -p "${test_dir}/input"
 printf '>no_hit description retained\nACGTACGTACGT\n' > "${test_dir}/input/no_hit.fna"
@@ -36,7 +50,10 @@ nextflow \
     2> "${test_dir}/stderr.txt"
 
 test "$(wc -l < "${test_dir}/out/cmsearch_summary.tsv")" -eq 1
+test "$(wc -l < "${test_dir}/out/blast_top_hits.tsv")" -eq 1
+test "$(wc -l < "${test_dir}/out/tree_nearest_neighbors.tsv")" -eq 1
 test "$(wc -l < "${test_dir}/out/cmsearch_summary.tab")" -eq 2
 test "$(sed -n '2p' "${test_dir}/out/cmsearch_summary.tab")" = "no_hit"
 test "$(find "${test_dir}/out/stats" -name '*.hits.tsv' -type f | wc -l)" -eq 2
 test "$(find "${test_dir}/out/out" "${test_dir}/out/stats" -name '*.fna' -type f | wc -l)" -eq 0
+test "$(find "${test_dir}/out/m8" -name '*.top_hits.tsv' -type f | wc -l)" -eq 2

@@ -161,6 +161,23 @@ if nextflow run "${repo}/main.nf" \
 fi
 grep -F "Database profile 'img' is not installed" "${test_dir}/legacy-fallback.log"
 
+if nextflow run "${repo}/main.nf" \
+    --querydir "${test_dir}/query" \
+    --modeldir "${repo}/resources/models" \
+    --database_path "${test_dir}/legacy-database" \
+    --database_profile curated \
+    --outdir "${test_dir}/legacy-tree-results" \
+    --threads_per_job 1 \
+    --tree_classification \
+    -work-dir "${test_dir}/legacy-tree-work" \
+    >"${test_dir}/legacy-tree.log" 2>&1; then
+    echo "Tree mode unexpectedly accepted the deprecated database" >&2
+    exit 1
+fi
+grep -F -- \
+    "--tree_classification requires a managed curated or img database profile" \
+    "${test_dir}/legacy-tree.log"
+
 python3 - "${test_dir}/database/curated" <<'PY'
 import hashlib
 import json
@@ -172,6 +189,7 @@ import duckdb
 
 profile = Path(sys.argv[1])
 taxonomy = profile / "metadata" / "preferred_taxonomy.parquet"
+source_records = profile / "metadata" / "source_records.parquet"
 connection = duckdb.connect(":memory:")
 connection.execute(
     """
@@ -196,12 +214,34 @@ connection.executemany(
     ],
 )
 connection.execute("COPY taxonomy TO ? (FORMAT PARQUET)", [str(taxonomy)])
+connection.execute(
+    """
+    CREATE TABLE source_records (
+        source_record_id VARCHAR,
+        sequence_id VARCHAR,
+        reference_source VARCHAR,
+        source_version VARCHAR,
+        source_identifier VARCHAR,
+        original_header VARCHAR,
+        marker VARCHAR,
+        taxon_oid VARCHAR
+    )
+    """
+)
+connection.executemany(
+    "INSERT INTO source_records VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [
+        ("SRC_ref16", "ref16", "SILVA", "138.2", "AB16.1.1537", "AB16.1.1537 Bacteria", "16S", None),
+        ("SRC_ref18", "ref18", "PR2", "5.1.1", "AB18.1.1795_U", "AB18.1.1795_U|18S_rRNA", "18S", None),
+    ],
+)
+connection.execute("COPY source_records TO ? (FORMAT PARQUET)", [str(source_records)])
 connection.close()
 
 artifacts = []
 for path in sorted((profile / "blast").glob("16S.*")) + sorted(
     (profile / "blast").glob("18S.*")
-) + [taxonomy]:
+) + [taxonomy, source_records]:
     relative = path.relative_to(profile).as_posix()
     artifacts.append(
         {
@@ -220,7 +260,10 @@ manifest = {
         "16S": {"prefix": "blast/16S"},
         "18S": {"prefix": "blast/18S"},
     },
-    "taxonomy_database": {"preferred": "metadata/preferred_taxonomy.parquet"},
+    "taxonomy_database": {
+        "preferred": "metadata/preferred_taxonomy.parquet",
+        "source_records": "metadata/source_records.parquet",
+    },
 }
 (profile / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 PY
@@ -274,12 +317,20 @@ source_fasta.unlink()
 taxonomy = profile / "metadata" / "preferred_taxonomy.parquet"
 hostile_taxonomy = taxonomy.with_name("preferred`touch PWNED_TAX`.parquet")
 taxonomy.rename(hostile_taxonomy)
+source_records = profile / "metadata" / "source_records.parquet"
+hostile_source_records = source_records.with_name(
+    "source`touch PWNED_SOURCE`.parquet"
+)
+source_records.rename(hostile_source_records)
 
 manifest_path = profile / "manifest.json"
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 manifest["blast_databases"]["16S"]["prefix"] = f"blast/{hostile_prefix}"
 manifest["taxonomy_database"]["preferred"] = (
     f"metadata/{hostile_taxonomy.name}"
+)
+manifest["taxonomy_database"]["source_records"] = (
+    f"metadata/{hostile_source_records.name}"
 )
 manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 PY
@@ -298,7 +349,8 @@ if ! nextflow run "${repo}/main.nf" \
 fi
 
 if find "${test_dir}/shell-safe-work" -type f \
-    \( -name PWNED_DB -o -name PWNED_TAX \) -print -quit | grep -q .; then
+    \( -name PWNED_DB -o -name PWNED_TAX -o -name PWNED_SOURCE \) \
+    -print -quit | grep -q .; then
     echo "Manifest-derived path executed shell syntax" >&2
     exit 1
 fi
@@ -333,6 +385,33 @@ if nextflow run "${repo}/main.nf" \
 fi
 grep -F "escapes database profile" "${test_dir}/traversal.log"
 
+cp -a "${test_dir}/database" "${test_dir}/missing-source-database"
+python3 - "${test_dir}/missing-source-database/curated/manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+
+path = Path(sys.argv[1])
+manifest = json.loads(path.read_text(encoding="utf-8"))
+del manifest["taxonomy_database"]["source_records"]
+path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+PY
+
+if nextflow run "${repo}/main.nf" \
+    --querydir "${test_dir}/query" \
+    --modeldir "${repo}/resources/models" \
+    --database_path "${test_dir}/missing-source-database" \
+    --database_profile curated \
+    --outdir "${test_dir}/missing-source-results" \
+    --threads_per_job 1 \
+    -work-dir "${test_dir}/missing-source-work" \
+    >"${test_dir}/missing-source.log" 2>&1; then
+    echo "Manifest without source_records unexpectedly passed validation" >&2
+    exit 1
+fi
+grep -F "missing taxonomy_database.source_records" "${test_dir}/missing-source.log"
+
 nextflow run "${repo}/main.nf" \
     --querydir "${test_dir}/query" \
     --modeldir "${repo}/resources/models" \
@@ -343,7 +422,9 @@ nextflow run "${repo}/main.nf" \
     -work-dir "${test_dir}/work" \
     >/dev/null
 
-python3 - "${test_dir}/results/cmsearch_summary.tsv" <<'PY'
+python3 - \
+    "${test_dir}/results/cmsearch_summary.tsv" \
+    "${test_dir}/results/blast_top_hits.tsv" <<'PY'
 import csv
 import sys
 from pathlib import Path
@@ -351,6 +432,8 @@ from pathlib import Path
 
 with Path(sys.argv[1]).open(newline="") as handle:
     rows = list(csv.DictReader(handle, delimiter="\t"))
+with Path(sys.argv[2]).open(newline="") as handle:
+    top_hits = list(csv.DictReader(handle, delimiter="\t"))
 observed = {
     (
         row["sample"],
@@ -369,4 +452,15 @@ if len(rows) != 2 or observed != expected:
     raise SystemExit(
         f"wrong resolved model/database routes: expected {expected}, found {observed}"
     )
+if any(not row["query_sequence"] for row in rows):
+    raise SystemExit("summary is missing extracted query sequences")
+if {row["reference_identifiers"] for row in rows} != {
+    "SILVA:AB16.1.1537",
+    "PR2:AB18.1.1795_U",
+}:
+    raise SystemExit("summary is missing public reference identifiers")
+if len(top_hits) != 2 or any(not row["taxonomy"] for row in top_hits):
+    raise SystemExit("metadata-joined top-hit table is incomplete")
+if any(not row["query_sequence"] for row in top_hits):
+    raise SystemExit("top-hit table is missing extracted query sequences")
 PY

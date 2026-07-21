@@ -1,6 +1,6 @@
 [workspace]
 name = "ssuextract"
-version = "1.1.1"
+version = "1.2.0"
 description = "SSU extraction tools using Nextflow pipeline"
 channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64", "osx-64", "osx-arm64"]
@@ -14,10 +14,12 @@ zstd = ">=1.5,<2"        # database release archives
 # Bioinformatics tools
 infernal = ">=1.1.5,<1.2" # provides cmsearch
 blast = ">=2.16,<3"       # provides blastn
+iqtree = ">=3.0,<4"       # optional tree-neighbor classification
 
 # Python packages
 biopython = ">=1.85,<2"
 duckdb = ">=1.4,<2"      # selective taxonomy lookup from Parquet
+ete4 = ">=4.4,<5"         # tree distances and neighbor traversal
 
 [tasks]
 # Download the default database
@@ -36,8 +38,9 @@ example = { cmd = "bash scripts/pipeline_cli.sh smoke", description = "Run the b
 test-unit = { cmd = "python -m unittest discover -s tests -v", description = "Run Python unit tests" }
 test-integration = { cmd = "bash tests/test_pipeline_no_hits.sh", description = "Run the absolute-path no-hit pipeline test" }
 test-database-profiles = { cmd = "bash tests/test_pipeline_database_profiles.sh", description = "Run marker-specific database routing integration" }
+test-tree-classification = { cmd = "bash tests/test_pipeline_tree_classification.sh", description = "Run optional tree-neighbor classification integration" }
 test-version = { cmd = "python scripts/check_version.py", description = "Check release version consistency" }
-test = { depends-on = ["test-unit", "test-integration", "test-database-profiles", "test-version"], description = "Run all automated tests" }
+test = { depends-on = ["test-unit", "test-integration", "test-database-profiles", "test-tree-classification", "test-version"], description = "Run all automated tests" }
 
 # Clean outputs
 clean = "nextflow clean -f"

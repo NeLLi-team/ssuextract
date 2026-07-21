@@ -8,5 +8,7 @@ dependencies:
   - zstd >=1.5,<2
   - infernal >=1.1.5,<1.2
   - blast >=2.16,<3
+  - iqtree >=3.0,<4
   - biopython >=1.85,<2
   - duckdb >=1.4,<2
+  - ete4 >=4.4,<5

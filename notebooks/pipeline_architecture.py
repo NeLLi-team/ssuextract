@@ -203,22 +203,35 @@ def build() -> plt.Figure:
         Box(2.05, 4.75, 4.15, 1.35, "RF00177", "16S rRNA gene\nBLAST index", TEAL, TEAL_SOFT),
         Box(7.80, 4.75, 4.15, 1.35, "RF01960", "18S rRNA gene\nBLAST index", TEAL, TEAL_SOFT),
     ]
-    taxonomy = Box(
-        3.15,
-        2.92,
-        7.70,
-        1.00,
-        "Taxonomy resolution",
-        "native or similarity-derived lineage  ·  ties and conflicts retained",
-        ORANGE,
-        ORANGE_SOFT,
-    )
+    taxonomy = [
+        Box(
+            1.20,
+            2.92,
+            5.20,
+            1.00,
+            "BLAST taxonomy",
+            "best-score LCA  ·  ties and conflicts retained",
+            ORANGE,
+            ORANGE_SOFT,
+        ),
+        Box(
+            7.10,
+            2.92,
+            5.70,
+            1.00,
+            "Tree neighbors (optional)",
+            "top 100 · cmalign · trim · IQ-TREE 3 · neighbor LCA",
+            ORANGE,
+            ORANGE_SOFT,
+        ),
+    ]
     outputs = [
-        Box(2.00, 0.38, 4.60, 1.65, "Per-hit taxonomy", "cmsearch_summary.tsv", SLATE, SLATE_SOFT, True),
-        Box(7.40, 0.38, 4.60, 1.65, "Category counts", "cmsearch_summary.tab", SLATE, SLATE_SOFT, True),
+        Box(0.80, 0.38, 3.75, 1.65, "Per-hit taxonomy", "cmsearch_summary.tsv", SLATE, SLATE_SOFT, True),
+        Box(5.12, 0.38, 3.75, 1.65, "Reference evidence", "blast_top_hits.tsv\ntree_nearest_neighbors.tsv", SLATE, SLATE_SOFT, True),
+        Box(9.45, 0.38, 3.75, 1.65, "Category counts", "cmsearch_summary.tab", SLATE, SLATE_SOFT, True),
     ]
 
-    for box in [*inputs, *detection, *searches, taxonomy, *outputs]:
+    for box in [*inputs, *detection, *searches, *taxonomy, *outputs]:
         draw_box(ax, box)
 
     sequence_rail = 8.95
@@ -259,11 +272,13 @@ def build() -> plt.Figure:
     for box in searches:
         line(ax, (box.cx, box.y), (box.cx, taxonomy_rail), TEAL)
     line(ax, (searches[0].cx, taxonomy_rail), (searches[1].cx, taxonomy_rail), TEAL)
-    arrow(ax, (taxonomy.cx, taxonomy_rail), (taxonomy.cx, taxonomy.y + taxonomy.height), TEAL)
+    for box in taxonomy:
+        arrow(ax, (box.cx, taxonomy_rail), (box.cx, box.y + box.height), TEAL)
 
     output_rail = 2.52
-    line(ax, (taxonomy.cx, taxonomy.y), (taxonomy.cx, output_rail), TEAL)
-    line(ax, (outputs[0].cx, output_rail), (outputs[1].cx, output_rail), TEAL)
+    for box in taxonomy:
+        line(ax, (box.cx, box.y), (box.cx, output_rail), TEAL)
+    line(ax, (outputs[0].cx, output_rail), (outputs[2].cx, output_rail), TEAL)
     for box in outputs:
         arrow(ax, (box.cx, output_rail), (box.cx, box.y + box.height), TEAL)
 

@@ -13,6 +13,14 @@ import duckdb
 from hit_processing import HIT_FIELDS
 from taxonomy_utils import common_value as _shared_common_value
 from taxonomy_utils import lowest_common_ancestor, taxonomy_path
+from tree_schema import SUMMARY_TREE_FIELDS
+from top_hit_reporting import (
+    ReferenceRecord,
+    load_query_sequences,
+    load_reference_records,
+    reference_record,
+    write_top_hits,
+)
 
 
 SUMMARY_FIELDS = [
@@ -41,6 +49,10 @@ SUMMARY_FIELDS = [
     "centroid_names",
     "centroid_taxonomy",
     "centroid_taxonomy_source",
+    "reference_identifiers",
+    "reference_versions",
+    "query_sequence",
+    *SUMMARY_TREE_FIELDS,
 ]
 
 
@@ -49,6 +61,13 @@ class BlastHit:
     subject: str
     percent_identity: float
     alignment_length: int
+    mismatches: int
+    gap_opens: int
+    query_start: int
+    query_end: int
+    subject_start: int
+    subject_end: int
+    evalue: float
     bit_score: float
 
 
@@ -67,45 +86,50 @@ class TaxonomyRecord:
     centroid_taxonomy_source: str
 
 
-def load_best_blast_hits(m8_file: str | Path) -> dict[str, list[BlastHit]]:
-    best_hits: dict[str, list[BlastHit]] = {}
+def _blast_rank_key(hit: BlastHit) -> tuple[float, float, int, str]:
+    return (
+        -hit.bit_score,
+        -hit.percent_identity,
+        -hit.alignment_length,
+        hit.subject,
+    )
+
+
+def load_blast_hits(m8_file: str | Path) -> dict[str, list[BlastHit]]:
+    hits_by_query: dict[str, list[BlastHit]] = {}
     with Path(m8_file).open() as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             line = raw_line.rstrip("\n")
             if not line:
                 continue
             fields = line.split("\t")
-            if len(fields) < 12:
+            if len(fields) != 12:
                 raise ValueError(
                     f"Malformed BLAST m8 row at {m8_file}:{line_number}: "
-                    f"expected at least 12 fields, found {len(fields)}"
+                    f"expected 12 fields, found {len(fields)}"
                 )
-
             query = fields[0]
-            hit = BlastHit(
-                subject=fields[1],
-                percent_identity=float(fields[2]),
-                alignment_length=int(fields[3]),
-                bit_score=float(fields[11]),
+            hits_by_query.setdefault(query, []).append(
+                BlastHit(
+                    subject=fields[1],
+                    percent_identity=float(fields[2]),
+                    alignment_length=int(fields[3]),
+                    mismatches=int(fields[4]),
+                    gap_opens=int(fields[5]),
+                    query_start=int(fields[6]),
+                    query_end=int(fields[7]),
+                    subject_start=int(fields[8]),
+                    subject_end=int(fields[9]),
+                    evalue=float(fields[10]),
+                    bit_score=float(fields[11]),
+                )
             )
-            current = best_hits.get(query, [])
-            if not current or hit.bit_score > current[0].bit_score:
-                best_hits[query] = [hit]
-            elif hit.bit_score == current[0].bit_score:
-                current.append(hit)
-    for query, hits in best_hits.items():
-        hits.sort(
-            key=lambda hit: (
-                -hit.percent_identity,
-                -hit.alignment_length,
-                hit.subject,
-            )
-        )
+    for query, hits in hits_by_query.items():
         unique_subjects: dict[str, BlastHit] = {}
-        for hit in hits:
+        for hit in sorted(hits, key=_blast_rank_key):
             unique_subjects.setdefault(hit.subject, hit)
-        best_hits[query] = list(unique_subjects.values())
-    return best_hits
+        hits_by_query[query] = list(unique_subjects.values())
+    return hits_by_query
 
 
 def load_taxonomy_records(
@@ -267,27 +291,72 @@ def annotate_hits(
     output_file: str | Path,
     taxonomy_file: str | Path | None = None,
     max_targets: int = 500,
+    *,
+    query_fasta: str | Path | None = None,
+    source_records_file: str | Path | None = None,
+    top_hits_output: str | Path | None = None,
+    top_hits: int = 5,
 ) -> None:
     if max_targets < 1:
         raise ValueError("max_targets must be positive")
-    best_hits = load_best_blast_hits(m8_file)
+    if top_hits < 1:
+        raise ValueError("top_hits must be positive")
+    blast_hits = load_blast_hits(m8_file)
+    best_hits = {
+        query: sorted(
+            (hit for hit in hits if hit.bit_score == hits[0].bit_score),
+            key=lambda hit: (
+                -hit.percent_identity,
+                -hit.alignment_length,
+                hit.subject,
+            ),
+        )
+        for query, hits in blast_hits.items()
+        if hits
+    }
     taxonomy_records: dict[str, TaxonomyRecord] = {}
+    reference_records: dict[str, ReferenceRecord] = {}
+    subjects = {
+        hit.subject
+        for query_hits in blast_hits.values()
+        for hit in query_hits
+    }
     if taxonomy_file is not None:
-        subjects = {
-            hit.subject
-            for query_hits in best_hits.values()
-            for hit in query_hits
-        }
         taxonomy_records = load_taxonomy_records(taxonomy_file, subjects)
-    with Path(hits_file).open(newline="") as hits_handle, Path(output_file).open(
-        "w", newline=""
-    ) as output_handle:
+    if source_records_file is not None:
+        reference_records = load_reference_records(source_records_file, subjects)
+    query_sequences = load_query_sequences(query_fasta) if query_fasta else {}
+
+    with Path(hits_file).open(newline="") as hits_handle:
         reader = csv.DictReader(hits_handle, delimiter="\t")
         if reader.fieldnames != HIT_FIELDS:
             raise ValueError(
                 f"Unexpected hit-table columns in {hits_file}: {reader.fieldnames}"
             )
+        hit_rows = list(reader)
 
+    missing_sequences = sorted(
+        row["name"]
+        for row in hit_rows
+        if query_fasta and row["name"] not in query_sequences
+    )
+    if missing_sequences:
+        raise ValueError(
+            "Extracted FASTA is missing hit sequence(s): " + ", ".join(missing_sequences)
+        )
+
+    if top_hits_output is not None:
+        write_top_hits(
+            top_hits_output,
+            hit_rows,
+            blast_hits,
+            taxonomy_records,
+            reference_records,
+            query_sequences,
+            top_hits,
+        )
+
+    with Path(output_file).open("w", newline="") as output_handle:
         writer = csv.DictWriter(
             output_handle,
             fieldnames=SUMMARY_FIELDS,
@@ -295,7 +364,7 @@ def annotate_hits(
             lineterminator="\n",
         )
         writer.writeheader()
-        for row in reader:
+        for row in hit_rows:
             tied_hits = best_hits.get(row["name"], [])
             blast_hit = tied_hits[0] if tied_hits else None
             tied_taxonomies = [
@@ -305,6 +374,11 @@ def annotate_hits(
             ]
             blast_taxonomy = (
                 taxonomy_records.get(blast_hit.subject) if blast_hit else None
+            )
+            blast_reference = (
+                reference_record(blast_hit.subject, reference_records)
+                if blast_hit
+                else ReferenceRecord("", "", ())
             )
             ties_truncated = len(tied_hits) > max_targets
             concrete_domains = {
@@ -340,6 +414,8 @@ def annotate_hits(
                         [record.taxonomy for record in tied_taxonomies]
                     )
                 )
+                if not taxonomy and tied_taxonomies:
+                    taxonomy = taxonomy_domain or "Unclassified"
                 compartment = "" if ties_truncated else common_value(
                     [record.compartment for record in tied_taxonomies]
                 )
@@ -375,6 +451,18 @@ def annotate_hits(
                         if blast_taxonomy
                         else ""
                     ),
+                    "reference_identifiers": blast_reference.identifiers,
+                    "reference_versions": blast_reference.versions,
+                    "query_sequence": query_sequences.get(row["name"], ""),
+                    "taxonomy_mode": "blast",
+                    "blast_taxonomy": taxonomy,
+                    "blast_taxonomy_source": common_value(
+                        [record.taxonomy_source for record in tied_taxonomies]
+                    ),
+                    "blast_taxonomy_domain": taxonomy_domain,
+                    "blast_compartment": compartment,
+                    "blast_taxonomy_assignment_method": assignment_method,
+                    "blast_taxonomy_alternatives": taxonomy_alternatives,
                     "blast_pident": (
                         str(round(blast_hit.percent_identity, 2)) if blast_hit else ""
                     ),
@@ -409,9 +497,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hits", required=True)
     parser.add_argument("--m8", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--query-fasta")
+    parser.add_argument("--top-hits-output")
+    parser.add_argument(
+        "--top-hits",
+        type=int,
+        default=5,
+        help=(
+            "Number of overall BLAST hits to report per query; equal-best and "
+            "best-reference-source evidence is retained."
+        ),
+    )
     parser.add_argument(
         "--taxonomy-db",
         help="Preferred-taxonomy Parquet for manifest-driven databases.",
+    )
+    parser.add_argument(
+        "--source-records-db",
+        help="Source-record Parquet for public reference identifiers and versions.",
     )
     parser.add_argument(
         "--max-targets",
@@ -424,7 +527,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    annotate_hits(args.hits, args.m8, args.output, args.taxonomy_db, args.max_targets)
+    annotate_hits(
+        args.hits,
+        args.m8,
+        args.output,
+        args.taxonomy_db,
+        args.max_targets,
+        query_fasta=args.query_fasta,
+        source_records_file=args.source_records_db,
+        top_hits_output=args.top_hits_output,
+        top_hits=args.top_hits,
+    )
 
 
 if __name__ == "__main__":
