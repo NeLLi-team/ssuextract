@@ -10,7 +10,13 @@ cleanup() {
         return
     fi
     echo "No-hit integration failed; temporary evidence: ${test_dir}" >&2
-    for log in stdout.txt stderr.txt nextflow.log; do
+    for log in \
+        stdout.txt \
+        stderr.txt \
+        nextflow.log \
+        unsupported.stdout.txt \
+        unsupported.stderr.txt \
+        unsupported.nextflow.log; do
         if [[ -s "${test_dir}/${log}" ]]; then
             echo "--- ${log} ---" >&2
             sed -n '1,400p' "${test_dir}/${log}" >&2
@@ -20,7 +26,8 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "${test_dir}/input"
-printf '>no_hit description retained\nACGTACGTACGT\n' > "${test_dir}/input/no_hit.fna"
+query_fasta="${test_dir}/input/single_sample.fna"
+printf '>no_hit description retained\nACGTACGTACGT\n' > "${query_fasta}"
 mkdir -p "${test_dir}/database"
 printf '>reference;Bacteria\nACGTACGTACGTACGT\n' > "${test_dir}/database/reference.fna"
 makeblastdb \
@@ -35,25 +42,61 @@ export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
-nextflow \
-    -log "${test_dir}/nextflow.log" \
-    run "${repo_dir}/main.nf" \
-    -ansi-log false \
-    -work-dir "${test_dir}/work" \
-    --querydir "${test_dir}/input" \
-    --modeldir "${repo_dir}/resources/models" \
-    --database_path "${test_dir}/database" \
-    --outdir "${test_dir}/out" \
-    --min_extract_length 0 \
-    --threads_per_job 1 \
-    > "${test_dir}/stdout.txt" \
-    2> "${test_dir}/stderr.txt"
+(
+    cd "${test_dir}"
+    nextflow \
+        -log "${test_dir}/nextflow.log" \
+        run "${repo_dir}/main.nf" \
+        -ansi-log false \
+        -work-dir "${test_dir}/work" \
+        --querydir "${query_fasta}" \
+        --modeldir "${repo_dir}/resources/models" \
+        --database_path "${test_dir}/database" \
+        --min_extract_length 0 \
+        --threads_per_job 1 \
+        > "${test_dir}/stdout.txt" \
+        2> "${test_dir}/stderr.txt"
+)
 
-test "$(wc -l < "${test_dir}/out/cmsearch_summary.tsv")" -eq 1
-test "$(wc -l < "${test_dir}/out/blast_top_hits.tsv")" -eq 1
-test "$(wc -l < "${test_dir}/out/tree_nearest_neighbors.tsv")" -eq 1
-test "$(wc -l < "${test_dir}/out/cmsearch_summary.tab")" -eq 2
-test "$(sed -n '2p' "${test_dir}/out/cmsearch_summary.tab")" = "no_hit"
-test "$(find "${test_dir}/out/stats" -name '*.hits.tsv' -type f | wc -l)" -eq 2
-test "$(find "${test_dir}/out/out" "${test_dir}/out/stats" -name '*.fna' -type f | wc -l)" -eq 0
-test "$(find "${test_dir}/out/m8" -name '*.top_hits.tsv' -type f | wc -l)" -eq 2
+outdir="${test_dir}/results/single_sample"
+
+test -d "${outdir}"
+test ! -e "${test_dir}/results/single_sample.fna"
+test "$(wc -l < "${outdir}/cmsearch_summary.tsv")" -eq 1
+test "$(wc -l < "${outdir}/blast_top_hits.tsv")" -eq 1
+test "$(wc -l < "${outdir}/tree_nearest_neighbors.tsv")" -eq 1
+test "$(wc -l < "${outdir}/cmsearch_summary.tab")" -eq 2
+test "$(sed -n '2p' "${outdir}/cmsearch_summary.tab")" = "single_sample"
+test "$(find "${outdir}/stats" -name '*.hits.tsv' -type f | wc -l)" -eq 2
+test "$(find "${outdir}/out" "${outdir}/stats" -name '*.fna' -type f | wc -l)" -eq 0
+test "$(find "${outdir}/m8" -name '*.top_hits.tsv' -type f | wc -l)" -eq 2
+
+unsupported="${test_dir}/input/single_sample.txt"
+cp "${query_fasta}" "${unsupported}"
+if (
+    cd "${test_dir}"
+    nextflow \
+        -log "${test_dir}/unsupported.nextflow.log" \
+        run "${repo_dir}/main.nf" \
+        -ansi-log false \
+        -work-dir "${test_dir}/unsupported-work" \
+        --querydir "${unsupported}" \
+        --modeldir "${repo_dir}/resources/models" \
+        --database_path "${test_dir}/database" \
+        --outdir "${test_dir}/unsupported-results" \
+        > "${test_dir}/unsupported.stdout.txt" \
+        2> "${test_dir}/unsupported.stderr.txt"
+); then
+    echo "Unsupported single-file suffix unexpectedly started the pipeline" >&2
+    exit 1
+fi
+rg -q -F -- \
+    "--querydir file must end in .fna, .fa, or .fasta" \
+    "${test_dir}/unsupported.stdout.txt" \
+    "${test_dir}/unsupported.stderr.txt"
+if rg -q -F "Submitted process" \
+    "${test_dir}/unsupported.stdout.txt" \
+    "${test_dir}/unsupported.stderr.txt"; then
+    echo "Unsupported single-file suffix submitted a process" >&2
+    exit 1
+fi

@@ -1,6 +1,6 @@
 [workspace]
 name = "ssuextract"
-version = "1.2.0"
+version = "1.2.1"
 description = "SSU extraction tools using Nextflow pipeline"
 channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64", "osx-64", "osx-arm64"]

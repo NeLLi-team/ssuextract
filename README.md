@@ -26,6 +26,10 @@ pixi run ssuextract --querydir data/my_dataset --outdir results/my_dataset --tre
 Tree mode is optional. The default run assigns taxonomy from the highest-scoring
 BLAST subjects.
 
+`--querydir` accepts one `.fna`, `.fa`, or `.fasta` file or a directory of
+those files. A single file named `sample.fna` writes to `results/sample` unless
+`--outdir` is set.
+
 `pixi run setup` lists the `curated` and `img` profiles with their database
 versions and download sizes. Select a profile by number or name. That selection
 becomes the default for later pipeline runs. Interactive runs check Zenodo and

@@ -1,9 +1,17 @@
 # Run assembled genomes or metagenomes
 
-Place `.fna`, `.fa`, or `.fasta` assemblies in one directory. The file basename
-becomes the sample identifier.
+Pass one `.fna`, `.fa`, or `.fasta` assembly, or place several assemblies in one
+directory. Each file stem becomes its sample identifier.
 
-## Run the directory
+## Run one assembly
+
+```bash
+pixi run ssuextract --querydir data/sample.fna --threads_per_job 4
+```
+
+Without `--outdir`, this command writes to `results/sample`.
+
+## Run a directory
 
 ```bash
 pixi run ssuextract --querydir data/my_dataset --outdir results/my_dataset --threads_per_job 4

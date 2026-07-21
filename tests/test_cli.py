@@ -116,7 +116,7 @@ class DatabaseConfigTests(unittest.TestCase):
                     "PATH": f"{executable_dir}:{os.environ['PATH']}",
                 },
             )
-        self.assertEqual(result.stdout.strip(), "1.2.0")
+        self.assertEqual(result.stdout.strip(), "1.2.1")
         self.assertEqual(result.stderr, "")
 
     def test_example_uses_both_bundled_assemblies(self) -> None:
@@ -143,7 +143,7 @@ class DatabaseConfigTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(result.stdout.strip(), "1.2.0")
+        self.assertEqual(result.stdout.strip(), "1.2.1")
         self.assertEqual(result.stderr, "")
 
     def test_example_default_wiring_persists_curated_and_uses_two_threads(self) -> None:

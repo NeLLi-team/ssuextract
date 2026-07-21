@@ -42,8 +42,11 @@ if (params.tree_classification && database_config.legacy) {
 
 
 workflow {
-    fna_files = Channel
-        .fromPath("${params.querydir}/*.{fna,fa,fasta}", checkIfExists: true)
+    query_input = file(params.querydir, checkIfExists: true)
+    query_files = query_input.isDirectory() \
+        ? Channel.fromPath("${query_input}/*.{fna,fa,fasta}", checkIfExists: true) \
+        : Channel.of(validateQueryFasta(query_input))
+    fna_files = query_files
         .map { file ->
             sample_id = file.baseName
             validateIdentifier(sample_id, 'sample')
@@ -769,6 +772,21 @@ def validateNonNegativeInteger(value, name) {
 }
 
 
+def validateQueryFasta(path) {
+    if (!path.isFile()) {
+        throw new IllegalArgumentException(
+            "--querydir must be a FASTA file or directory: ${path}"
+        )
+    }
+    if (!(path.name ==~ /.+\.(fna|fa|fasta)/)) {
+        throw new IllegalArgumentException(
+            "--querydir file must end in .fna, .fa, or .fasta: ${path}"
+        )
+    }
+    path
+}
+
+
 def validateBoolean(value, name) {
     if (!(value instanceof Boolean)) {
         throw new IllegalArgumentException(
@@ -799,11 +817,11 @@ def helpMessage() {
       nextflow run main.nf --querydir data/example --modeldir resources/models
 
     Mandatory arguments:
-      --querydir [path]           Directory containing FASTA files (.fna, .fa, .fasta)
+      --querydir [path]           FASTA file or directory of .fna, .fa, or .fasta files
       --modeldir [path]           Directory containing covariance models (.cm)
 
     Optional arguments:
-      --outdir [path]             Output directory (default: results/[querydir_name])
+      --outdir [path]             Output directory (default: results/[input_name])
       --min_extract_length [int]  Minimum extracted sequence length (default: 500)
       --threads_per_job [int]     Threads per Infernal, BLAST, or cmalign task (default: 2)
       --max_blast_targets [int]   BLAST subjects; ties at limit back off to domain (default: 500)

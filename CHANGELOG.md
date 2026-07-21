@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1] - 2026-07-21
+
+### Added
+
+- Accept one `.fna`, `.fa`, or `.fasta` file as `--querydir` input. When
+  `--outdir` is omitted, a single file writes to `results/<file-stem>`.
+
 ## [1.2.0] - 2026-07-20
 
 ### Added
