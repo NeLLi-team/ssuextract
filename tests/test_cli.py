@@ -274,7 +274,7 @@ class DatabaseConfigTests(unittest.TestCase):
                 'resolve_database_path() { printf "/database\\n"; }; '
                 'write_database_config() { :; }; ensure_database() { :; }; '
                 'check_database_update() { :; }; '
-                'run_pipeline --querydir /queries --outdir /output'
+                'run_pipeline --query /queries --outdir /output'
             )
             result = subprocess.run(
                 ["bash", "-c", command, "bash", str(CLI)],
@@ -290,7 +290,7 @@ class DatabaseConfigTests(unittest.TestCase):
         self.assertEqual(
             result.stdout.strip(),
             f"run {REPO / 'main.nf'} --database_path /database "
-            "--database_profile curated --querydir /queries --outdir /output",
+            "--database_profile curated --query /queries --outdir /output",
         )
 
     def test_pipeline_disables_update_prompt_for_explicit_database_path(self) -> None:
@@ -309,7 +309,7 @@ class DatabaseConfigTests(unittest.TestCase):
                 'check_database_update() { printf "%s|%s\\n" "$3" "$5" '
                 '> "$CAPTURED"; }; '
                 'run_pipeline --database_path /custom --database_profile img '
-                '--querydir /queries --outdir /output'
+                '--query /queries --outdir /output'
             )
             subprocess.run(
                 ["bash", "-c", command, "bash", str(CLI), str(captured)],
@@ -342,7 +342,7 @@ class DatabaseConfigTests(unittest.TestCase):
                 'write_database_config() { :; }; ensure_database() { :; }; '
                 'check_database_update() { printf "%s|%s\\n" "$3" "$5" '
                 '> "$CAPTURED"; }; '
-                'run_pipeline --querydir /queries --outdir /output'
+                'run_pipeline --query /queries --outdir /output'
             )
             subprocess.run(
                 ["bash", "-c", command, "bash", str(CLI), str(captured)],
@@ -391,7 +391,7 @@ class DatabaseConfigTests(unittest.TestCase):
                 'resolve_database_profile() { printf "curated\\n"; }; '
                 'resolve_database_path() { printf "/database\\n"; }; '
                 'write_database_config() { :; }; ensure_database() { :; }; '
-                'run_pipeline --querydir /queries --outdir /output'
+                'run_pipeline --query /queries --outdir /output'
             )
             for update_status, expected_notice in cases:
                 with self.subTest(update_status=update_status):

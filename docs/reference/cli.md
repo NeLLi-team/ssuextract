@@ -4,7 +4,7 @@ Run `pixi run ssuextract --help` for the installed version's generated help.
 
 | Parameter | Default | Description |
 | --- | --- | --- |
-| `--querydir` | `data/example` | One `.fna`, `.fa`, or `.fasta` file, or a directory containing those files. |
+| `--query` | `data/example` | One `.fna`, `.fa`, or `.fasta` file, or a directory containing those files. |
 | `--modeldir` | `resources/models` | Directory containing Infernal covariance models. |
 | `--outdir` | `results/<input-name>` | Output directory. The input name is the directory name or FASTA file stem. |
 | `--database_path` | Configured path or `resources/database` | Root containing database profiles. |

@@ -71,7 +71,7 @@ contents pass validation.
 ## Select a profile for one run
 
 ```bash
-pixi run ssuextract --querydir data/my_dataset --outdir results/my_dataset-img --database_profile img
+pixi run ssuextract --query data/my_dataset --outdir results/my_dataset-img --database_profile img
 ```
 
 This option applies to one run and does not change the profile saved by setup.

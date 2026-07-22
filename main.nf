@@ -15,6 +15,10 @@ if (params.version) {
     exit 0
 }
 
+if (params.containsKey('querydir')) {
+    throw new IllegalArgumentException('--querydir has been replaced by --query')
+}
+
 validateNonNegativeInteger(params.min_extract_length, 'min_extract_length')
 validatePositiveInteger(params.threads_per_job, 'threads_per_job')
 validatePositiveInteger(params.max_blast_targets, 'max_blast_targets')
@@ -42,7 +46,7 @@ if (params.tree_classification && database_config.legacy) {
 
 
 workflow {
-    query_input = file(params.querydir, checkIfExists: true)
+    query_input = file(params.query, checkIfExists: true)
     query_files = query_input.isDirectory() \
         ? Channel.fromPath("${query_input}/*.{fna,fa,fasta}", checkIfExists: true) \
         : Channel.of(validateQueryFasta(query_input))
@@ -775,12 +779,12 @@ def validateNonNegativeInteger(value, name) {
 def validateQueryFasta(path) {
     if (!path.isFile()) {
         throw new IllegalArgumentException(
-            "--querydir must be a FASTA file or directory: ${path}"
+            "--query must be a FASTA file or directory: ${path}"
         )
     }
     if (!(path.name ==~ /.+\.(fna|fa|fasta)/)) {
         throw new IllegalArgumentException(
-            "--querydir file must end in .fna, .fa, or .fasta: ${path}"
+            "--query file must end in .fna, .fa, or .fasta: ${path}"
         )
     }
     path
@@ -814,10 +818,10 @@ def helpMessage() {
     log.info """
     Usage:
 
-      nextflow run main.nf --querydir data/example --modeldir resources/models
+      nextflow run main.nf --query data/example --modeldir resources/models
 
     Mandatory arguments:
-      --querydir [path]           FASTA file or directory of .fna, .fa, or .fasta files
+      --query [path]              FASTA file or directory of .fna, .fa, or .fasta files
       --modeldir [path]           Directory containing covariance models (.cm)
 
     Optional arguments:

@@ -148,7 +148,7 @@ makeblastdb \
     >/dev/null
 
 if nextflow run "${repo}/main.nf" \
-    --querydir "${test_dir}/query" \
+    --query "${test_dir}/query" \
     --modeldir "${repo}/resources/models" \
     --database_path "${test_dir}/legacy-database" \
     --database_profile img \
@@ -162,7 +162,7 @@ fi
 grep -F "Database profile 'img' is not installed" "${test_dir}/legacy-fallback.log"
 
 if nextflow run "${repo}/main.nf" \
-    --querydir "${test_dir}/query" \
+    --query "${test_dir}/query" \
     --modeldir "${repo}/resources/models" \
     --database_path "${test_dir}/legacy-database" \
     --database_profile curated \
@@ -336,7 +336,7 @@ manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
 PY
 
 if ! nextflow run "${repo}/main.nf" \
-    --querydir "${test_dir}/query" \
+    --query "${test_dir}/query" \
     --modeldir "${repo}/resources/models" \
     --database_path "${test_dir}/shell-safe-database" \
     --database_profile curated \
@@ -372,7 +372,7 @@ path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 PY
 
 if nextflow run "${repo}/main.nf" \
-    --querydir "${test_dir}/query" \
+    --query "${test_dir}/query" \
     --modeldir "${repo}/resources/models" \
     --database_path "${test_dir}/traversal-database" \
     --database_profile curated \
@@ -399,7 +399,7 @@ path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 PY
 
 if nextflow run "${repo}/main.nf" \
-    --querydir "${test_dir}/query" \
+    --query "${test_dir}/query" \
     --modeldir "${repo}/resources/models" \
     --database_path "${test_dir}/missing-source-database" \
     --database_profile curated \
@@ -413,7 +413,7 @@ fi
 grep -F "missing taxonomy_database.source_records" "${test_dir}/missing-source.log"
 
 nextflow run "${repo}/main.nf" \
-    --querydir "${test_dir}/query" \
+    --query "${test_dir}/query" \
     --modeldir "${repo}/resources/models" \
     --database_path "${test_dir}/database" \
     --database_profile curated \

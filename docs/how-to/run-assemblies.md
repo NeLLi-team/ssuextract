@@ -6,7 +6,7 @@ directory. Each file stem becomes its sample identifier.
 ## Run one assembly
 
 ```bash
-pixi run ssuextract --querydir data/sample.fna --threads_per_job 4
+pixi run ssuextract --query data/sample.fna --threads_per_job 4
 ```
 
 Without `--outdir`, this command writes to `results/sample`.
@@ -14,7 +14,7 @@ Without `--outdir`, this command writes to `results/sample`.
 ## Run a directory
 
 ```bash
-pixi run ssuextract --querydir data/my_dataset --outdir results/my_dataset --threads_per_job 4
+pixi run ssuextract --query data/my_dataset --outdir results/my_dataset --threads_per_job 4
 ```
 
 SSUextract validates query, model, database, and output paths before scheduling
@@ -25,7 +25,7 @@ the workflow. Basenames may contain letters, numbers, `.`, `_`, and `-`.
 Set the number of ranked BLAST subjects written for each extracted query:
 
 ```bash
-pixi run ssuextract --querydir data/my_dataset --outdir results/my_dataset --top_hits 10
+pixi run ssuextract --query data/my_dataset --outdir results/my_dataset --top_hits 10
 ```
 
 Inspect the rank, selection reason, public reference identifier, taxonomy,
@@ -45,7 +45,7 @@ The supplemental source rows do not change the assignment in
 Enable tree classification for each extracted 16S rRNA gene or 18S rRNA gene:
 
 ```bash
-pixi run ssuextract --querydir data/my_dataset --outdir results/my_dataset-tree --tree_classification --threads_per_job 4
+pixi run ssuextract --query data/my_dataset --outdir results/my_dataset-tree --tree_classification --threads_per_job 4
 ```
 
 Tree mode searches both marker indexes. The 100 best unique subjects determine
@@ -74,7 +74,7 @@ queries continue.
 Set Nextflow task ceilings independently from the per-search thread count:
 
 ```bash
-pixi run ssuextract --querydir data/my_dataset --outdir results/my_dataset --threads_per_job 4 --max_cpus 8 --max_memory 64.GB
+pixi run ssuextract --query data/my_dataset --outdir results/my_dataset --threads_per_job 4 --max_cpus 8 --max_memory 64.GB
 ```
 
 `--threads_per_job` controls each `cmsearch`, BLAST, and `cmalign` task.
@@ -88,7 +88,7 @@ concurrent tasks.
 Run the same command with Nextflow's resume flag:
 
 ```bash
-pixi run ssuextract -resume --querydir data/my_dataset --outdir results/my_dataset
+pixi run ssuextract -resume --query data/my_dataset --outdir results/my_dataset
 ```
 
 Keep the original `work/` directory and command parameters. Nextflow reuses

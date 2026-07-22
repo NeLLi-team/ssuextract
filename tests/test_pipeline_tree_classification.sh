@@ -259,7 +259,7 @@ PY
 
 run_tree_pipeline() {
     nextflow run "${repo}/main.nf" \
-        --querydir "${test_dir}/query" \
+        --query "${test_dir}/query" \
         --modeldir "${repo}/resources/models" \
         --database_path "${test_dir}/database" \
         --database_profile curated \
@@ -359,7 +359,7 @@ PY
 mkdir "${test_dir}/no-hit-query"
 printf '>no_tree_hit\nACGTACGTACGT\n' > "${test_dir}/no-hit-query/no_tree_hit.fna"
 nextflow run "${repo}/main.nf" \
-    --querydir "${test_dir}/no-hit-query" \
+    --query "${test_dir}/no-hit-query" \
     --modeldir "${repo}/resources/models" \
     --database_path "${test_dir}/database" \
     --database_profile curated \

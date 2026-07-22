@@ -510,7 +510,7 @@ run_smoke() {
     trap "rm -rf '${smoke_dir}'" EXIT
     cp "${SMOKE_FASTAS[@]}" "${smoke_dir}/"
     smoke_args=(
-        --querydir "${smoke_dir}"
+        --query "${smoke_dir}"
         --outdir "${PROJECT_DIR}/results/smoke"
         --threads_per_job "${EXAMPLE_THREADS_PER_JOB}"
     )

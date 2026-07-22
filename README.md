@@ -20,13 +20,13 @@ Add `--tree_classification` to classify each extracted gene from a local tree
 of the query and 100 reference sequences:
 
 ```bash
-pixi run ssuextract --querydir data/my_dataset --outdir results/my_dataset --tree_classification
+pixi run ssuextract --query data/my_dataset --outdir results/my_dataset --tree_classification
 ```
 
 Tree mode is optional. The default run assigns taxonomy from the highest-scoring
 BLAST subjects.
 
-`--querydir` accepts one `.fna`, `.fa`, or `.fasta` file or a directory of
+`--query` accepts one `.fna`, `.fa`, or `.fasta` file or a directory of
 those files. A single file named `sample.fna` writes to `results/sample` unless
 `--outdir` is set.
 

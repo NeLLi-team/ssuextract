@@ -4,8 +4,13 @@
 
 ### Added
 
-- Accept one `.fna`, `.fa`, or `.fasta` file as `--querydir` input. When
-  `--outdir` is omitted, a single file writes to `results/<file-stem>`.
+- Accept one `.fna`, `.fa`, or `.fasta` file as input. When `--outdir` is
+  omitted, a single file writes to `results/<file-stem>`.
+
+### Changed
+
+- Rename the FASTA file or directory input option from `--querydir` to
+  `--query`. The removed name exits with a migration message.
 
 ## [1.2.0] - 2026-07-20
 

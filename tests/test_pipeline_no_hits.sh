@@ -16,7 +16,10 @@ cleanup() {
         nextflow.log \
         unsupported.stdout.txt \
         unsupported.stderr.txt \
-        unsupported.nextflow.log; do
+        unsupported.nextflow.log \
+        renamed.stdout.txt \
+        renamed.stderr.txt \
+        renamed.nextflow.log; do
         if [[ -s "${test_dir}/${log}" ]]; then
             echo "--- ${log} ---" >&2
             sed -n '1,400p' "${test_dir}/${log}" >&2
@@ -49,7 +52,7 @@ export NUMEXPR_NUM_THREADS=1
         run "${repo_dir}/main.nf" \
         -ansi-log false \
         -work-dir "${test_dir}/work" \
-        --querydir "${query_fasta}" \
+        --query "${query_fasta}" \
         --modeldir "${repo_dir}/resources/models" \
         --database_path "${test_dir}/database" \
         --min_extract_length 0 \
@@ -80,7 +83,7 @@ if (
         run "${repo_dir}/main.nf" \
         -ansi-log false \
         -work-dir "${test_dir}/unsupported-work" \
-        --querydir "${unsupported}" \
+        --query "${unsupported}" \
         --modeldir "${repo_dir}/resources/models" \
         --database_path "${test_dir}/database" \
         --outdir "${test_dir}/unsupported-results" \
@@ -91,12 +94,40 @@ if (
     exit 1
 fi
 grep -Fq -- \
-    "--querydir file must end in .fna, .fa, or .fasta" \
+    "--query file must end in .fna, .fa, or .fasta" \
     "${test_dir}/unsupported.stdout.txt" \
     "${test_dir}/unsupported.stderr.txt"
 if grep -Fq "Submitted process" \
     "${test_dir}/unsupported.stdout.txt" \
     "${test_dir}/unsupported.stderr.txt"; then
     echo "Unsupported single-file suffix submitted a process" >&2
+    exit 1
+fi
+
+if (
+    cd "${test_dir}"
+    nextflow \
+        -log "${test_dir}/renamed.nextflow.log" \
+        run "${repo_dir}/main.nf" \
+        -ansi-log false \
+        -work-dir "${test_dir}/renamed-work" \
+        --querydir "${query_fasta}" \
+        --modeldir "${repo_dir}/resources/models" \
+        --database_path "${test_dir}/database" \
+        --outdir "${test_dir}/renamed-results" \
+        > "${test_dir}/renamed.stdout.txt" \
+        2> "${test_dir}/renamed.stderr.txt"
+); then
+    echo "Renamed --querydir option unexpectedly started the pipeline" >&2
+    exit 1
+fi
+grep -Fq -- \
+    "--querydir has been replaced by --query" \
+    "${test_dir}/renamed.stdout.txt" \
+    "${test_dir}/renamed.stderr.txt"
+if grep -Fq "Submitted process" \
+    "${test_dir}/renamed.stdout.txt" \
+    "${test_dir}/renamed.stderr.txt"; then
+    echo "Renamed --querydir option submitted a process" >&2
     exit 1
 fi
