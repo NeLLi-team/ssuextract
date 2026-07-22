@@ -818,10 +818,12 @@ def helpMessage() {
     log.info """
     Usage:
 
+      pixi run ssuextract -q data/example --modeldir resources/models
       nextflow run main.nf --query data/example --modeldir resources/models
 
     Mandatory arguments:
       --query [path]              FASTA file or directory of .fna, .fa, or .fasta files
+      -q [path]                   Same input through the Pixi wrapper
       --modeldir [path]           Directory containing covariance models (.cm)
 
     Optional arguments:

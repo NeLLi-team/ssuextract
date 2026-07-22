@@ -7,6 +7,11 @@
   max-width: 76rem;
 }
 
+/* GitHub's release fact can lag the application documented from main. */
+.md-source__fact--version {
+  display: none;
+}
+
 .md-typeset h1 {
   font-size: 1.7rem;
   font-weight: 500;

@@ -293,6 +293,111 @@ class DatabaseConfigTests(unittest.TestCase):
             "--database_profile curated --query /queries --outdir /output",
         )
 
+    def test_query_short_alias_preserves_paths_and_reaches_nextflow_as_query(self) -> None:
+        cases = (
+            (["-q", "/queries with spaces"], "/queries with spaces"),
+            (["-q=/queries-equals"], "/queries-equals"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            executable_dir = Path(tmp)
+            tput = executable_dir / "tput"
+            nextflow = executable_dir / "nextflow"
+            tput.write_text("#!/usr/bin/env bash\nexit 0\n")
+            nextflow.write_text("#!/usr/bin/env bash\nprintf '<%s>\\n' \"$@\"\n")
+            tput.chmod(0o755)
+            nextflow.chmod(0o755)
+            command = (
+                'source "$1"; shift; '
+                'resolve_database_profile() { printf "curated\\n"; }; '
+                'resolve_database_path() { printf "/database\\n"; }; '
+                'write_database_config() { :; }; ensure_database() { :; }; '
+                'check_database_update() { :; }; run_pipeline "$@"'
+            )
+            for arguments, query_path in cases:
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run(
+                        ["bash", "-c", command, "bash", str(CLI), *arguments],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        env={
+                            **os.environ,
+                            "PATH": f"{executable_dir}:{os.environ['PATH']}",
+                            "TERM": "xterm-kitty",
+                        },
+                    )
+                    forwarded = result.stdout.splitlines()
+                    self.assertIn("<--query>", forwarded)
+                    self.assertIn(f"<{query_path}>", forwarded)
+                    self.assertNotIn("<-q>", forwarded)
+                    self.assertFalse(
+                        any(line.startswith("<-q=") for line in forwarded)
+                    )
+
+    def test_query_short_alias_requires_a_value_before_database_setup(self) -> None:
+        for arguments in (
+            ("-q",),
+            ("-q", ""),
+            ("-q=",),
+            ("-q", "--outdir", "/output"),
+        ):
+            with self.subTest(arguments=arguments):
+                command = (
+                    'source "$1"; shift; '
+                    'resolve_database_profile() { '
+                    'printf "database setup reached\\n" >&2; return 99; }; '
+                    'run_pipeline "$@"'
+                )
+                result = subprocess.run(
+                    ["bash", "-c", command, "bash", str(CLI), *arguments],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(
+                    result.stderr,
+                    "-q requires a FASTA file or directory path.\n",
+                )
+
+    def test_no_argument_run_preserves_default_nextflow_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            executable_dir = Path(tmp)
+            tput = executable_dir / "tput"
+            nextflow = executable_dir / "nextflow"
+            tput.write_text("#!/usr/bin/env bash\nexit 0\n")
+            nextflow.write_text("#!/usr/bin/env bash\nprintf '<%s>\\n' \"$@\"\n")
+            tput.chmod(0o755)
+            nextflow.chmod(0o755)
+            command = (
+                'source "$1"; '
+                'resolve_database_profile() { printf "curated\\n"; }; '
+                'resolve_database_path() { printf "/database\\n"; }; '
+                'write_database_config() { :; }; ensure_database() { :; }; '
+                'check_database_update() { :; }; run_pipeline'
+            )
+            result = subprocess.run(
+                ["bash", "-c", command, "bash", str(CLI)],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{executable_dir}:{os.environ['PATH']}",
+                    "TERM": "xterm-kitty",
+                },
+            )
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "<run>",
+                f"<{REPO / 'main.nf'}>",
+                "<--database_path>",
+                "</database>",
+                "<--database_profile>",
+                "<curated>",
+            ],
+        )
+
     def test_pipeline_disables_update_prompt_for_explicit_database_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             executable_dir = Path(tmp)

@@ -1,6 +1,6 @@
 [workspace]
 name = "ssuextract-docs"
-version = "1.2.0"
+version = "1.2.1"
 channels = ["conda-forge"]
 platforms = ["linux-64"]
 

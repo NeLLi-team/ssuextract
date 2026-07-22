@@ -18,6 +18,8 @@ def read_versions() -> dict[str, str]:
     pixi_text = (REPO / "pixi.toml").read_text()
     nextflow_text = (REPO / "nextflow.config").read_text()
     changelog_text = (REPO / "CHANGELOG.md").read_text()
+    mkdocs_text = (REPO / "mkdocs.yml").read_text()
+    docs_pixi_text = (REPO / "docs-env" / "pixi.toml").read_text()
     return {
         "pixi.toml": require_match(
             r'^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"',
@@ -34,6 +36,16 @@ def read_versions() -> dict[str, str]:
             changelog_text,
             "CHANGELOG.md",
         ),
+        "mkdocs.yml": require_match(
+            r'^site_name:\s*SSUextract\s+([0-9]+\.[0-9]+\.[0-9]+)\s*$',
+            mkdocs_text,
+            "mkdocs.yml",
+        ),
+        "docs-env/pixi.toml": require_match(
+            r'^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"',
+            docs_pixi_text,
+            "docs-env/pixi.toml",
+        ),
     }
 
 
@@ -48,4 +60,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

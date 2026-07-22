@@ -451,6 +451,39 @@ run_pipeline() {
     local allow_update_prompt=1
     local include_database_path=0
     local nextflow_args=()
+    local normalized_args=()
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            -q)
+                if [[ "$#" -lt 2 ]]; then
+                    printf '%s\n' '-q requires a FASTA file or directory path.' >&2
+                    return 2
+                fi
+                if [[ -z "$2" || "$2" == -* ]]; then
+                    printf '%s\n' '-q requires a FASTA file or directory path.' >&2
+                    return 2
+                fi
+                normalized_args+=(--query "$2")
+                shift 2
+                ;;
+            -q=*)
+                if [[ -z "${1#*=}" ]]; then
+                    printf '%s\n' '-q requires a FASTA file or directory path.' >&2
+                    return 2
+                fi
+                normalized_args+=(--query "${1#*=}")
+                shift
+                ;;
+            *)
+                normalized_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+    if [[ "${#normalized_args[@]}" -gt 0 ]]; then
+        set -- "${normalized_args[@]}"
+    fi
 
     if [[ "$#" -eq 1 && "$1" == "--version" ]]; then
         "${PYTHON}" "${PROJECT_DIR}/scripts/check_version.py"

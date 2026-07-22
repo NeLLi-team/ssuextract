@@ -6,7 +6,7 @@ directory. Each file stem becomes its sample identifier.
 ## Run one assembly
 
 ```bash
-pixi run ssuextract --query data/sample.fna --threads_per_job 4
+pixi run ssuextract -q data/sample.fna --threads_per_job 4
 ```
 
 Without `--outdir`, this command writes to `results/sample`.

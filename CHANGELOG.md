@@ -1,11 +1,12 @@
 # Changelog
 
-## [1.2.1] - 2026-07-21
+## [1.2.1] - 2026-07-22
 
 ### Added
 
 - Accept one `.fna`, `.fa`, or `.fasta` file as input. When `--outdir` is
   omitted, a single file writes to `results/<file-stem>`.
+- Accept `-q` as the short form of `--query` through the Pixi command wrapper.
 
 ### Changed
 

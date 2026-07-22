@@ -1,4 +1,4 @@
-site_name: SSUextract
+site_name: SSUextract 1.2.1
 site_description: Extract and classify small-subunit ribosomal RNA from assembled contigs.
 site_url: https://nelli-team.github.io/ssuextract/
 repo_url: https://github.com/NeLLi-team/ssuextract
