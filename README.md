@@ -45,4 +45,4 @@ Documentation: [tutorial](https://nelli-team.github.io/ssuextract/tutorials/firs
 [database profiles](https://nelli-team.github.io/ssuextract/reference/database-profiles/).
 
 Run `pixi run ssuextract --help` for the command-line summary. SSUextract is
-distributed under the [MIT license](LICENSE).
+licensed for [non-commercial use only](LICENSE).
