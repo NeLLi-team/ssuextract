@@ -44,5 +44,6 @@ Documentation: [tutorial](https://nelli-team.github.io/ssuextract/tutorials/firs
 [output files](https://nelli-team.github.io/ssuextract/reference/outputs/), and
 [database profiles](https://nelli-team.github.io/ssuextract/reference/database-profiles/).
 
-Run `pixi run ssuextract --help` for the command-line summary. SSUextract is
-licensed for [non-commercial use only](LICENSE).
+Run `pixi run ssuextract --help` to see the command-line summary.
+
+SSUextract is licensed for [non-commercial use only](LICENSE).
