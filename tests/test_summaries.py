@@ -784,6 +784,24 @@ class FinalSummaryTests(unittest.TestCase):
 
         self.assertEqual([row["sample"] for row in rows], ["a", "b"])
 
+    def test_summary_reader_accepts_long_sequence_fields(self) -> None:
+        sequence = "A" * (128 * 1024 + 1)
+        row = dict.fromkeys(SUMMARY_FIELDS, "")
+        row.update(
+            sample="sample",
+            model="RF01960",
+            contig_name="contig1",
+            coordinates="1-4",
+            strand="+",
+            query_sequence=sequence,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = Path(tmp) / "sample.summary.tsv"
+            write_tsv(summary, SUMMARY_FIELDS, [row])
+            rows = load_summary_rows(str(summary))
+
+        self.assertEqual(rows[0]["query_sequence"], sequence)
+
     def test_m8_merge_uses_filename_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -6,6 +6,7 @@ import argparse
 import csv
 import glob
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -13,6 +14,9 @@ from annotate_hits import SUMMARY_FIELDS
 from hit_processing import META_FIELDS
 from top_hit_reporting import TOP_HIT_FIELDS
 from tree_schema import TREE_ASSIGNMENT_FIELDS, TREE_NEIGHBOR_FIELDS
+
+
+csv.field_size_limit(sys.maxsize)
 
 
 CATEGORY_MAPPING = {
