@@ -35,9 +35,9 @@ centroid taxonomy, identity, alignment length, and bit score:
 cut -f1,4-5,7,9-10,17,19-20,28 results/my_dataset/blast_top_hits.tsv
 ```
 
-The output contains the first 10 subjects, all equal-best assignment subjects,
+The output contains the first 10 subjects, all assignment candidates,
 and the highest-ranked IMG, PR2, and SILVA subjects among the fetched candidates.
-The supplemental source rows do not change the assignment in
+These source rows do not change the assignment in
 `cmsearch_summary.tsv`.
 
 ## Classify from tree neighbors
@@ -65,8 +65,8 @@ Per-query alignments, trees, model logs, reference FASTA files, and alignment
 QC are under `results/my_dataset-tree/phylogeny/`. The BLAST result remains in
 the `blast_taxonomy` fields and `blast_top_hits.tsv`.
 
-If the selected marker yields fewer than three references, SSUextract keeps the
-BLAST taxonomy for that query and records the skipped tree attempt. Other
+If the selected marker yields fewer than three references, SSUextract uses the
+BLAST decision from that marker route and records the skipped tree attempt. Other
 queries continue.
 
 ## Bound local resource use

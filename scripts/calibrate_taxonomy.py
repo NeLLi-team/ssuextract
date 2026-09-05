@@ -13,6 +13,7 @@ import os
 import subprocess
 import tempfile
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -43,6 +44,15 @@ GENUS_MIN_PRECISION = 0.98
 CALIBRATION_FETCH_TARGETS = classifier.BLAST_FETCH_TARGETS + 1
 SEARCH_PROVENANCE_NAME = "search_provenance.json"
 SEARCH_PROVENANCE_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class CalibrationPrediction:
+    taxonomy: tuple[str, ...]
+    candidate_sources: tuple[str, ...]
+    candidate_count: int
+    truncated: bool
+    species_guard_applied: bool
 
 
 def _run(command: list[str]) -> None:
@@ -289,7 +299,6 @@ def _validate_reusable_blast(
     marker: str,
     marker_directory: Path,
     marker_rows: Sequence[Mapping[str, str]],
-    threads: int,
 ) -> Path:
     ids = marker_directory / "query_ids.txt"
     truth = marker_directory / "truth.tsv"
@@ -339,8 +348,21 @@ def _validate_reusable_blast(
         raise RuntimeError(
             f"cannot reuse BLAST for {marker}: retained search output hash mismatch"
         )
+    commands = provenance.get("commands")
+    blastn_command = commands.get("blastn") if isinstance(commands, dict) else None
+    try:
+        thread_index = blastn_command.index("-num_threads")
+        recorded_threads = int(blastn_command[thread_index + 1])
+    except (AttributeError, IndexError, TypeError, ValueError) as error:
+        raise RuntimeError(
+            f"cannot reuse BLAST for {marker}: search command lacks a valid thread count"
+        ) from error
+    if recorded_threads < 1:
+        raise RuntimeError(
+            f"cannot reuse BLAST for {marker}: search command has a non-positive thread count"
+        )
     expected_commands = _search_commands(
-        profile, marker, ids, fasta, blast_output, threads
+        profile, marker, ids, fasta, blast_output, recorded_threads
     )
     if provenance["commands"] != expected_commands:
         raise RuntimeError(
@@ -401,24 +423,34 @@ def _write_queries(
     threads: int,
     *,
     reuse_existing_blast: bool = False,
+    reuse_blast_directory: str | Path | None = None,
 ) -> dict[str, Path]:
+    if reuse_existing_blast and reuse_blast_directory is not None:
+        raise ValueError(
+            "reuse_existing_blast and reuse_blast_directory are mutually exclusive"
+        )
+    retained_root = (
+        Path(reuse_blast_directory)
+        if reuse_blast_directory is not None
+        else output if reuse_existing_blast else None
+    )
     by_marker: dict[str, list[Mapping[str, str]]] = defaultdict(list)
     for row in rows:
         by_marker[row["marker"]].append(row)
     blast_outputs: dict[str, Path] = {}
     for marker, marker_rows in sorted(by_marker.items()):
         marker_directory = output / marker
+        if retained_root is not None:
+            blast_outputs[marker] = _validate_reusable_blast(
+                profile, marker, retained_root / marker, marker_rows
+            )
+            continue
         marker_directory.mkdir(parents=True, exist_ok=True)
         ids = marker_directory / "query_ids.txt"
         truth = marker_directory / "truth.tsv"
         fasta = marker_directory / "queries.fna"
         blast_output = marker_directory / "leave_one_out.m8"
         provenance = marker_directory / SEARCH_PROVENANCE_NAME
-        if reuse_existing_blast:
-            blast_outputs[marker] = _validate_reusable_blast(
-                profile, marker, marker_directory, marker_rows, threads
-            )
-            continue
         provenance.unlink(missing_ok=True)
         ids.write_text(_query_ids_text(marker_rows), encoding="ascii")
         truth.write_text(_truth_tsv_text(marker_rows), encoding="utf-8")
@@ -463,18 +495,12 @@ def _prediction(
     query: str,
     hits: Sequence[classifier.BlastHit],
     taxonomy: Mapping[str, classifier.TaxonomyRecord],
-) -> tuple[str, ...]:
+) -> CalibrationPrediction:
     non_self = [hit for hit in hits if hit.subject != query]
-    eligible = [
-        hit
-        for hit in non_self
-        if hit.query_coverage >= classifier.MIN_QUERY_COVERAGE
-    ]
+    eligible, threshold, candidates = classifier.select_candidate_hits(non_self)
     if not eligible:
-        return ()
-    best = eligible[0].bit_score
-    threshold = best * classifier.CANDIDATE_BITSCORE_FRACTION
-    candidates = [hit for hit in eligible if hit.bit_score >= threshold]
+        return CalibrationPrediction((), (), 0, False, False)
+    assert threshold is not None
     missing_subjects = sorted(
         {hit.subject for hit in candidates if hit.subject not in taxonomy}
     )
@@ -486,19 +512,25 @@ def _prediction(
             f"for query {query}: {preview}{suffix}"
         )
     records = [taxonomy[hit.subject] for hit in candidates]
+    sources = tuple(sorted({record.taxonomy_source for record in records}))
     if any(record.cross_domain_conflict for record in records):
-        return ()
-    # BLAST applies max_target_seqs before the query-coverage filter. Match the
-    # runtime classifier by evaluating the overflow sentinel at the raw
-    # non-self boundary, even when that sentinel itself has low coverage.
-    truncated = (
-        len(non_self) > classifier.BLAST_MAX_TARGETS
-        and non_self[classifier.BLAST_MAX_TARGETS].bit_score >= threshold
+        return CalibrationPrediction((), sources, len(candidates), False, False)
+    prediction, truncated, _exact, species_guard_applied = (
+        classifier.resolve_candidate_taxonomy(
+            non_self,
+            candidates,
+            records,
+            threshold,
+            max_targets=classifier.BLAST_MAX_TARGETS,
+        )
     )
-    if truncated:
-        domains = {record.domain for record in records}
-        return (next(iter(domains)),) if len(domains) == 1 else ()
-    return classifier.lowest_common_ancestor(record.taxonomy for record in records)
+    return CalibrationPrediction(
+        prediction,
+        sources,
+        len(candidates),
+        truncated,
+        species_guard_applied,
+    )
 
 
 def evaluate_calibration(
@@ -524,38 +556,83 @@ def evaluate_calibration(
         profile / "tables" / "preferred_taxonomy.parquet", all_subjects
     )
 
-    totals: Counter[tuple[str, str, str, int]] = Counter()
     calls: Counter[tuple[str, str, str, int]] = Counter()
+    truth_known_calls: Counter[tuple[str, str, str, int]] = Counter()
+    truth_unknown_calls: Counter[tuple[str, str, str, int]] = Counter()
     correct: Counter[tuple[str, str, str, int]] = Counter()
-    stratum_counts: Counter[tuple[str, str, str]] = Counter()
+    called_truth_mixtures: dict[
+        tuple[str, str, str, int], Counter[str]
+    ] = defaultdict(Counter)
+    true_stratum_counts: Counter[tuple[str, str, str]] = Counter()
+    marker_counts: Counter[str] = Counter()
+    marker_truth_mixtures: dict[str, Counter[str]] = defaultdict(Counter)
+    predicted_strata: set[tuple[str, str, str]] = set()
     for row in rows:
         marker = row["marker"]
-        source = row["taxonomy_source"]
-        domain = row["domain"]
-        stratum = (marker, source, domain)
-        stratum_counts[stratum] += 1
+        truth_source = row["taxonomy_source"]
+        truth_domain = row["domain"]
+        true_stratum = (marker, truth_source, truth_domain)
+        true_class_key = "|".join(true_stratum)
+        true_stratum_counts[true_stratum] += 1
+        marker_counts[marker] += 1
+        marker_truth_mixtures[marker][true_class_key] += 1
         truth = tuple(row["taxonomy"].split(";"))
         prediction = _prediction(
             row["sequence_id"],
             hits_by_marker.get(marker, {}).get(row["sequence_id"], ()),
             taxonomy,
         )
-        rank_names = RANKS[source]
-        for index, _rank in enumerate(rank_names[:-1] if source == "PR2" else rank_names):
-            if index >= len(truth) or not truth[index]:
-                continue
-            key = (*stratum, index)
-            totals[key] += 1
-            if index < len(prediction) and prediction[index]:
+        if not prediction.taxonomy:
+            continue
+        predicted_domain = prediction.taxonomy[0]
+        route_keys = classifier.calibration_stratum_keys(
+            marker, prediction.candidate_sources, predicted_domain
+        )
+        for route_key in route_keys:
+            route = tuple(route_key.split("|", 2))
+            route_source = route[1]
+            if route_source not in RANKS:
+                raise RuntimeError(
+                    f"unsupported predicted taxonomy source in calibration: {route_source!r}"
+                )
+            predicted_strata.add(route)
+            rank_names = RANKS[route_source]
+            calibrated_ranks = rank_names[:-1] if route_source == "PR2" else rank_names
+            for index, _rank in enumerate(calibrated_ranks):
+                if index >= len(prediction.taxonomy) or not prediction.taxonomy[index]:
+                    continue
+                key = (*route, index)
                 calls[key] += 1
-                if prediction[: index + 1] == truth[: index + 1]:
+                called_truth_mixtures[key][true_class_key] += 1
+                cross_domain = bool(truth) and truth[0] != predicted_domain
+                comparable = (
+                    cross_domain
+                    or index == 0
+                    or (
+                        truth_source == route_source
+                        and index < len(truth)
+                        and all(truth[: index + 1])
+                    )
+                )
+                if comparable:
+                    truth_known_calls[key] += 1
+                else:
+                    truth_unknown_calls[key] += 1
+                if comparable and prediction.taxonomy[: index + 1] == truth[: index + 1]:
                     correct[key] += 1
 
     metrics: list[dict[str, object]] = []
     rank_caps: dict[str, int] = {}
     stratum_results: dict[str, dict[str, object]] = {}
-    for stratum, sampled in sorted(stratum_counts.items()):
+    all_strata = set(true_stratum_counts) | predicted_strata
+    for stratum in sorted(all_strata):
         marker, source, domain = stratum
+        if source not in RANKS:
+            raise RuntimeError(
+                f"unsupported taxonomy source in calibration stratum: {source!r}"
+            )
+        sampled = true_stratum_counts[stratum]
+        evaluated = marker_counts[marker]
         accepted_cap = -1
         stratum_metrics: list[dict[str, object]] = []
         for index, rank in enumerate(RANKS[source][:-1] if source == "PR2" else RANKS[source]):
@@ -574,14 +651,19 @@ def evaluate_calibration(
                 "rank": rank,
                 "rank_index": index,
                 "sampled": sampled,
-                "truth_available": totals[key],
+                "evaluated_queries": evaluated,
                 "called": called,
+                "truth_known_calls": truth_known_calls[key],
+                "truth_unknown_calls": truth_unknown_calls[key],
                 "correct": successes,
-                "call_rate": called / totals[key] if totals[key] else 0.0,
+                "call_rate": called / evaluated if evaluated else 0.0,
                 "precision": successes / called if called else 0.0,
                 "wilson_95_lower": lower,
                 "required_precision": threshold,
                 "accepted": accepted,
+                "called_true_class_mixture": dict(
+                    sorted(called_truth_mixtures[key].items())
+                ),
             }
             metrics.append(metric)
             stratum_metrics.append(metric)
@@ -610,20 +692,26 @@ def evaluate_calibration(
             "taxonomy_source": source,
             "domain": domain,
             "sampled": sampled,
+            "evaluated_queries": evaluated,
+            "sampled_true_class_mixture": dict(
+                sorted(marker_truth_mixtures[marker].items())
+            ),
             "status": status,
             "rank_cap": rank_cap,
             "reason": reason,
             "metrics": stratum_metrics,
         }
-    if not rank_caps:
-        raise RuntimeError("calibration failed: no strata passed at domain rank")
     requested = (
         samples_per_stratum_requested
         if samples_per_stratum_requested is not None
-        else max(stratum_counts.values())
+        else max(true_stratum_counts.values())
     )
     return {
-        "schema_version": 2,
+        "schema_version": classifier.CALIBRATION_SCHEMA_VERSION,
+        "status": "complete" if rank_caps else "failed",
+        "calibration_use_case": classifier.CALIBRATION_USE_CASE,
+        "stratum_basis": classifier.CALIBRATION_STRATUM_BASIS,
+        "classification_policy": classifier.classification_policy(),
         "method": "deterministic_leave_one_reference_out",
         "samples_per_stratum_requested": requested,
         "minimum_calls": MIN_CALIBRATION_CALLS,
@@ -659,6 +747,7 @@ def run_calibration(
     threads: int,
     *,
     reuse_existing_blast: bool = False,
+    reuse_blast_directory: str | Path | None = None,
 ) -> dict[str, object]:
     if threads < 1:
         raise ValueError("threads must be positive")
@@ -675,6 +764,7 @@ def run_calibration(
         rows,
         threads,
         reuse_existing_blast=reuse_existing_blast,
+        reuse_blast_directory=reuse_blast_directory,
     )
     result = evaluate_calibration(
         profile,
@@ -687,6 +777,26 @@ def run_calibration(
         "version": manifest["version"],
         "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
     }
+    repository = Path(__file__).resolve().parents[1]
+    result["implementation_sha256"] = {
+        relative: _sha256_file(repository / relative)
+        for relative in (
+            "scripts/calibrate_taxonomy.py",
+            "scripts/classify_img_clusters.py",
+            "scripts/img_classification_data.py",
+        )
+    }
+    result["search_bindings"] = {}
+    for marker, blast_output in sorted(blast_outputs.items()):
+        provenance_path = blast_output.parent / SEARCH_PROVENANCE_NAME
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        result["search_bindings"][marker] = {
+            "search_provenance_sha256": _sha256_file(provenance_path),
+            "schema_version": provenance["schema_version"],
+            "status": provenance["status"],
+            "profile_manifest_sha256": provenance["profile_manifest_sha256"],
+            "files": provenance["files"],
+        }
     _write_json_durably(output / "calibration.json", result)
     return result
 
@@ -705,6 +815,14 @@ def _parser() -> argparse.ArgumentParser:
             "IDs/truth, regenerated query FASTA, exact query coverage, and self hits"
         ),
     )
+    parser.add_argument(
+        "--reuse-blast-directory",
+        type=Path,
+        help=(
+            "reuse validated retained searches from this directory while writing "
+            "new calibration output"
+        ),
+    )
     return parser
 
 
@@ -716,6 +834,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.samples_per_stratum,
         args.threads,
         reuse_existing_blast=args.reuse_existing_blast,
+        reuse_blast_directory=args.reuse_blast_directory,
     )
     print(json.dumps({"rank_caps": result["rank_caps"]}, sort_keys=True))
     return 0

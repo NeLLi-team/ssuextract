@@ -21,12 +21,20 @@ from typing import Iterable, Iterator, Mapping, Sequence, TextIO
 
 from atomic_io import replace_and_fsync
 from img_classification_data import (
-    BLAST_FIELDS,
+    BLAST_FETCH_TARGETS,
+    BLAST_MAX_TARGETS,
+    CALIBRATION_SCHEMA_VERSION,
+    CALIBRATION_STRATUM_BASIS,
+    CALIBRATION_USE_CASE,
+    CANDIDATE_BITSCORE_FRACTION,
+    MIN_QUERY_COVERAGE,
     BlastHit,
     CalibrationData,
+    CalibrationRankRule,
     CalibrationStratum,
     Cluster,
     TaxonomyRecord,
+    classification_policy,
     load_calibration,
     load_taxonomy,
     load_taxonomy_parquet,
@@ -54,32 +62,11 @@ ASSIGNMENT_FIELDS = (
     "centroid_taxonomy_source",
     "evidence_id",
 )
-MIN_QUERY_COVERAGE = Decimal("80")
-CANDIDATE_BITSCORE_FRACTION = Decimal("0.98")
-BLAST_MAX_TARGETS = 500
-BLAST_FETCH_TARGETS = BLAST_MAX_TARGETS + 1
-
-
 def _decimal_text(value: Decimal) -> str:
     text = format(value, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text or "0"
-
-
-def classification_policy(
-    *,
-    max_targets: int = BLAST_MAX_TARGETS,
-    blast_fetch_targets: int = BLAST_FETCH_TARGETS,
-) -> dict[str, object]:
-    return {
-        "blast_fields": list(BLAST_FIELDS),
-        "min_query_coverage_percent": _decimal_text(MIN_QUERY_COVERAGE),
-        "candidate_bitscore_fraction": _decimal_text(CANDIDATE_BITSCORE_FRACTION),
-        "max_targets": max_targets,
-        "blast_fetch_targets": blast_fetch_targets,
-        "species_requires_all_candidates_exact_and_agreeing": True,
-    }
 
 
 def _file_sha256(path: str | Path) -> str:
@@ -149,6 +136,59 @@ def _is_pr2_species_path(
     )
 
 
+def calibration_stratum_keys(
+    marker: str, candidate_sources: Iterable[str], predicted_domain: str
+) -> tuple[str, ...]:
+    sources = {
+        source.strip()
+        for value in candidate_sources
+        for source in value.split("+")
+        if source.strip()
+    }
+    return tuple(
+        f"{marker}|{source}|{predicted_domain}"
+        for source in sorted(sources)
+    )
+
+
+def select_candidate_hits(
+    hits: Sequence[BlastHit],
+) -> tuple[tuple[BlastHit, ...], Decimal | None, tuple[BlastHit, ...]]:
+    eligible = tuple(hit for hit in hits if hit.query_coverage >= MIN_QUERY_COVERAGE)
+    if not eligible:
+        return eligible, None, ()
+    threshold = eligible[0].bit_score * CANDIDATE_BITSCORE_FRACTION
+    candidates = tuple(hit for hit in eligible if hit.bit_score >= threshold)
+    return eligible, threshold, candidates
+
+
+def resolve_candidate_taxonomy(
+    hits: Sequence[BlastHit],
+    candidates: Sequence[BlastHit],
+    records: Sequence[TaxonomyRecord],
+    threshold: Decimal,
+    *,
+    max_targets: int,
+) -> tuple[tuple[str, ...], bool, bool, bool]:
+    truncated = len(hits) > max_targets and hits[max_targets].bit_score >= threshold
+    if truncated:
+        domains = sorted({record.domain for record in records if record.domain})
+        taxonomy = (domains[0],) if len(domains) == 1 else ()
+    else:
+        taxonomy = lowest_common_ancestor(record.taxonomy for record in records)
+    candidates_exact_and_agreeing = all(
+        hit.percent_identity == Decimal("100")
+        and hit.query_coverage == Decimal("100")
+        and hit.alignment_length == hit.query_length == hit.subject_length
+        for hit in candidates
+    ) and len({record.taxonomy for record in records}) == 1
+    species_guard_applied = False
+    if _is_pr2_species_path(taxonomy, records) and not candidates_exact_and_agreeing:
+        taxonomy = taxonomy[:-1]
+        species_guard_applied = True
+    return taxonomy, truncated, candidates_exact_and_agreeing, species_guard_applied
+
+
 def _common_value(values: Iterable[str]) -> str:
     return _shared_common_value(values)
 
@@ -176,9 +216,10 @@ def _classify_cluster(
     max_targets: int,
     marker: str | None = None,
     calibration_strata: Mapping[str, CalibrationStratum] | None = None,
+    calibration_rank_rules: Mapping[str, Sequence[CalibrationRankRule]] | None = None,
     propagation_rank_cap: int | None = None,
 ) -> dict[str, object]:
-    eligible = [hit for hit in hits if hit.query_coverage >= MIN_QUERY_COVERAGE]
+    eligible, threshold, candidates = select_candidate_hits(hits)
     base: dict[str, object] = {
         "cluster_id": cluster.cluster_id,
         "centroid": cluster.centroid,
@@ -200,8 +241,7 @@ def _classify_cluster(
         }
 
     best_bit_score = eligible[0].bit_score
-    threshold = best_bit_score * CANDIDATE_BITSCORE_FRACTION
-    candidates = [hit for hit in eligible if hit.bit_score >= threshold]
+    assert threshold is not None
     missing_taxonomy = sorted(
         hit.subject for hit in candidates if hit.subject not in taxonomy_records
     )
@@ -261,15 +301,11 @@ def _classify_cluster(
             "reason": "ambiguous_reference_taxonomy",
             "ambiguous_taxonomy_subjects": ambiguous_subjects,
         }
-    # BLAST applies max_target_seqs before our query-coverage filter.  Therefore
-    # the overflow sentinel must be read from the raw returned-hit boundary: a
-    # low-coverage sentinel can still hide later, equally scoring eligible hits.
-    truncated = len(hits) > max_targets and hits[max_targets].bit_score >= threshold
-    if truncated:
-        domains = sorted({record.domain for record in records if record.domain})
-        taxonomy = (domains[0],) if len(domains) == 1 else ()
-    else:
-        taxonomy = lowest_common_ancestor(record.taxonomy for record in records)
+    taxonomy, truncated, candidates_exact_and_agreeing, species_guard_applied = (
+        resolve_candidate_taxonomy(
+            hits, candidates, records, threshold, max_targets=max_targets
+        )
+    )
 
     if not taxonomy:
         return {
@@ -284,16 +320,22 @@ def _classify_cluster(
     if calibration_strata is not None:
         if not marker:
             raise ValueError("marker is required when calibration strata are supplied")
-        required_strata = [
-            f"{marker}|{source}|{taxonomy[0]}"
-            for source in sorted({record.taxonomy_source for record in records})
-        ]
+        required_strata = list(
+            calibration_stratum_keys(
+                marker,
+                (record.taxonomy_source for record in records),
+                taxonomy[0],
+            )
+        )
         missing_strata = [key for key in required_strata if key not in calibration_strata]
         if missing_strata:
-            raise ValueError(
-                "taxonomy calibration lacks stratum "
-                + ", ".join(repr(key) for key in missing_strata)
-            )
+            return {
+                **base,
+                "classification_status": "unclassified",
+                "reason": "calibration_stratum_missing",
+                "truncated": truncated,
+                "missing_calibration_strata": missing_strata,
+            }
         failed_strata = [
             {
                 "key": key,
@@ -310,23 +352,55 @@ def _classify_cluster(
                 "truncated": truncated,
                 "failed_calibration_strata": failed_strata,
             }
-        cap_values = [calibration_strata[key].rank_cap for key in required_strata]
-        if any(value is None for value in cap_values):
-            raise ValueError("calibrated taxonomy stratum lacks rank_cap")
-        calibration_rank_cap = min(int(value) for value in cap_values)
+        route_caps = []
+        minimum_identity = min(hit.percent_identity for hit in candidates)
+        identity_thresholds: list[Decimal] = []
+        for key in required_strata:
+            rank_cap = calibration_strata[key].rank_cap
+            if rank_cap is None:
+                raise ValueError("calibrated taxonomy stratum lacks rank_cap")
+            route_cap = int(rank_cap)
+            rules = (calibration_rank_rules or {}).get(key, ())
+            if rules:
+                route_cap = -1
+                for rule in rules:
+                    if minimum_identity < rule.min_candidate_identity:
+                        break
+                    route_cap = rule.rank_index
+                if route_cap < 0:
+                    return {
+                        **base,
+                        "classification_status": "unclassified",
+                        "reason": "calibration_identity_below_domain",
+                        "truncated": truncated,
+                        "required_calibration_strata": required_strata,
+                        "minimum_candidate_identity": _decimal_text(minimum_identity),
+                    }
+            route_caps.append(route_cap)
+        calibration_rank_cap = min(route_caps)
+        for key in required_strata:
+            rules = (calibration_rank_rules or {}).get(key, ())
+            if rules:
+                identity_thresholds.append(
+                    rules[min(calibration_rank_cap, len(rules) - 1)].min_candidate_identity
+                )
+        calibration_identity_threshold = (
+            max(identity_thresholds) if identity_thresholds else None
+        )
+    else:
+        minimum_identity = None
+        calibration_identity_threshold = None
 
-    candidates_exact_and_agreeing = all(
-        hit.percent_identity == Decimal("100")
-        and hit.query_coverage == Decimal("100")
-        and hit.alignment_length == hit.query_length == hit.subject_length
-        for hit in candidates
-    ) and len({record.taxonomy for record in records}) == 1
-    species_guard_applied = False
-    if _is_pr2_species_path(taxonomy, records) and not candidates_exact_and_agreeing:
-        taxonomy = taxonomy[:-1]
-        species_guard_applied = True
-
-    taxonomy_sources = "+".join(sorted({record.taxonomy_source for record in records}))
+    taxonomy_sources = "+".join(
+        sorted(
+            {
+                source.strip()
+                for record in records
+                for source in record.taxonomy_source.split("+")
+                if source.strip()
+            }
+        )
+    )
     exact_pr2_species = _is_pr2_species_path(taxonomy, records) and candidates_exact_and_agreeing
     if calibration_rank_cap is not None and not exact_pr2_species:
         taxonomy = taxonomy[: calibration_rank_cap + 1]
@@ -351,6 +425,14 @@ def _classify_cluster(
         "species_guard_applied": species_guard_applied,
         "species_called": _is_pr2_species_path(taxonomy, records),
         "calibration_rank_cap": calibration_rank_cap,
+        "calibration_min_candidate_identity": (
+            _decimal_text(minimum_identity) if minimum_identity is not None else None
+        ),
+        "calibration_identity_threshold": (
+            _decimal_text(calibration_identity_threshold)
+            if calibration_identity_threshold is not None
+            else None
+        ),
         "propagation_rank_cap": propagation_rank_cap,
     }
     evidence_payload = dict(result)
@@ -369,6 +451,7 @@ def classify_clusters(
     max_targets: int = BLAST_MAX_TARGETS,
     marker: str | None = None,
     calibration_strata: Mapping[str, CalibrationStratum] | None = None,
+    calibration_rank_rules: Mapping[str, Sequence[CalibrationRankRule]] | None = None,
     propagation_rank_cap: int | None = None,
 ) -> tuple[list[dict[str, str]], list[dict[str, object]], dict[str, object]]:
     if max_targets < 1:
@@ -406,6 +489,7 @@ def classify_clusters(
             max_targets=max_targets,
             marker=marker,
             calibration_strata=calibration_strata,
+            calibration_rank_rules=calibration_rank_rules,
             propagation_rank_cap=propagation_rank_cap,
         )
         outcomes.append(outcome)
@@ -618,6 +702,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_targets=BLAST_MAX_TARGETS,
         marker=args.marker,
         calibration_strata=calibration.strata if calibration else None,
+        calibration_rank_rules=calibration.rank_rules if calibration else None,
         propagation_rank_cap=args.propagation_rank_cap,
     )
     if portable_search is not None:
@@ -626,7 +711,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "schema_version": 1,
         "calibration": {
             "sha256": calibration_sha256,
-            "schema_version": 2,
+            "schema_version": CALIBRATION_SCHEMA_VERSION,
         }
         if calibration
         else None,

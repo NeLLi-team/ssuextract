@@ -33,6 +33,8 @@ def blast_hit(subject: str, score: float) -> BlastHit:
         subject_end=100,
         evalue=1e-20,
         bit_score=score,
+        query_length=100,
+        subject_length=100,
     )
 
 
@@ -43,6 +45,9 @@ def reference_row(
     *,
     taxonomy: str = "",
     centroid_taxonomy: str = "",
+    domain: str = "Eukaryota",
+    assignment_method: str | None = None,
+    taxonomy_alternatives: str = "",
 ) -> dict[str, object]:
     return {
         "leaf_id": leaf,
@@ -53,9 +58,11 @@ def reference_row(
         "reference_source": "PR2",
         "taxonomy": taxonomy,
         "taxonomy_source": "PR2" if taxonomy else "",
-        "taxonomy_domain": "Eukaryota",
+        "taxonomy_domain": domain,
         "compartment": "nucleus",
-        "taxonomy_assignment_method": "native" if taxonomy else "unclassified",
+        "taxonomy_assignment_method": (
+            assignment_method or ("native" if taxonomy else "unclassified")
+        ),
         "centroid_names": "centroid" if centroid_taxonomy else "",
         "centroid_taxonomy": centroid_taxonomy,
         "centroid_taxonomy_source": "PR2" if centroid_taxonomy else "",
@@ -63,6 +70,31 @@ def reference_row(
         "blast_length": "100",
         "blast_evalue": "1e-20",
         "blast_bitscore": str(200 - rank),
+        "taxonomy_alternatives": taxonomy_alternatives,
+    }
+
+
+def task_payload(route_taxonomy: str) -> dict[str, object]:
+    domain = route_taxonomy.split(";", maxsplit=1)[0]
+    return {
+        "schema_version": 2,
+        "name": "query1",
+        "sample": "sample",
+        "detected_model": "RF01960",
+        "tree_model": "RF01960",
+        "tree_marker": "18S",
+        "tree_route_decision": "majority_global_top_hits",
+        "tree_route_16s_votes": 0,
+        "tree_route_18s_votes": 100,
+        "tree_route_16s_best_bitscore": None,
+        "tree_route_18s_best_bitscore": 5710.0,
+        "tree_route_blast_taxonomy": route_taxonomy,
+        "tree_route_blast_taxonomy_source": "PR2",
+        "tree_route_blast_taxonomy_domain": domain,
+        "tree_route_blast_compartment": "nucleus",
+        "tree_route_blast_assignment_method": "runtime_calibrated_lca",
+        "tree_route_blast_candidate_taxonomy": route_taxonomy,
+        "tree_route_blast_taxonomy_alternatives": "[]",
     }
 
 
@@ -172,7 +204,7 @@ class TreeRoutingTests(unittest.TestCase):
             with (
                 patch(
                     "tree_reference_selection.load_query_sequences",
-                    return_value={"query1": "ACGT"},
+                    return_value={"query1": "A" * 100},
                 ),
                 patch(
                     "tree_reference_selection.load_blast_hits",
@@ -240,14 +272,18 @@ class TreePhylogenyTests(unittest.TestCase):
         self.assertEqual(qc["removed_high_gap_columns"], 0)
         self.assertEqual(sequences, ["ATGT", "ATGT", "ATGT", "ATGT"])
 
-    def test_tree_taxonomy_uses_nearest_named_lineages_and_centroids(self) -> None:
+    def test_tree_taxonomy_does_not_exceed_route_or_use_centroid_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             references = root / "references.tsv"
             lineage = "Eukaryota;Amoebozoa;Discosea;Echinamoebida;Echinamoeba"
             rows = [
                 reference_row(
-                    "REF0001", "img_exact", 1, centroid_taxonomy=lineage
+                    "REF0001",
+                    "img_exact",
+                    1,
+                    centroid_taxonomy=lineage,
+                    domain="Unclassified",
                 ),
                 reference_row("REF0002", "pr2_named", 2, taxonomy=lineage),
                 reference_row(
@@ -265,21 +301,7 @@ class TreePhylogenyTests(unittest.TestCase):
                 writer.writerows(rows)
             task = root / "task.json"
             task.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "name": "query1",
-                        "sample": "sample",
-                        "detected_model": "RF01960",
-                        "tree_model": "RF01960",
-                        "tree_marker": "18S",
-                        "tree_route_decision": "majority_global_top_hits",
-                        "tree_route_16s_votes": 0,
-                        "tree_route_18s_votes": 100,
-                        "tree_route_16s_best_bitscore": None,
-                        "tree_route_18s_best_bitscore": 5710.0,
-                    }
-                )
+                json.dumps(task_payload("Eukaryota;Amoebozoa"))
             )
             tree = root / "tree.nwk"
             tree.write_text(
@@ -304,14 +326,15 @@ class TreePhylogenyTests(unittest.TestCase):
                 neighbor_rows = list(neighbor_reader)
                 self.assertEqual(neighbor_reader.fieldnames, TREE_NEIGHBOR_FIELDS)
 
-        self.assertEqual(assignment["tree_taxonomy"], lineage)
+        self.assertEqual(assignment["tree_taxonomy"], "Eukaryota;Amoebozoa")
         self.assertEqual(assignment["tree_taxonomy_source"], "PR2")
         self.assertEqual(assignment["tree_basis_neighbors"], "2")
         self.assertEqual(assignment["tree_route_16s_best_bitscore"], "")
         self.assertEqual(assignment["tree_route_18s_best_bitscore"], "5710")
         self.assertEqual(assignment["tree_query_edge_support"], "95")
         self.assertEqual(neighbor_rows[0]["blast_sseqid"], "img_exact")
-        self.assertEqual(neighbor_rows[0]["tree_lineage_basis"], "centroid_taxonomy")
+        self.assertEqual(neighbor_rows[0]["tree_lineage_basis"], "unclassified")
+        self.assertEqual(neighbor_rows[0]["centroid_taxonomy"], lineage)
         self.assertEqual(neighbor_rows[0]["used_for_assignment"], "true")
 
     def test_tree_taxonomy_includes_equal_distance_boundary_neighbors(self) -> None:
@@ -347,17 +370,9 @@ class TreePhylogenyTests(unittest.TestCase):
             task = root / "task.json"
             task.write_text(
                 json.dumps(
-                    {
-                        "schema_version": 1,
-                        "name": "query1",
-                        "sample": "sample",
-                        "detected_model": "RF01960",
-                        "tree_model": "RF01960",
-                        "tree_marker": "18S",
-                        "tree_route_decision": "majority_global_top_hits",
-                        "tree_route_16s_votes": 0,
-                        "tree_route_18s_votes": 100,
-                    }
+                    task_payload(
+                        "Eukaryota;Amoebozoa;Discosea;Echinamoebida"
+                    )
                 )
             )
             tree = root / "tree.nwk"
@@ -375,6 +390,101 @@ class TreePhylogenyTests(unittest.TestCase):
 
         self.assertEqual(assignment["tree_taxonomy"], "Eukaryota;Amoebozoa")
         self.assertEqual(assignment["tree_basis_neighbors"], "3")
+
+    def test_unknown_tree_neighbors_retain_supported_route_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            references = root / "references.tsv"
+            rows = [
+                reference_row(
+                    f"REF{rank:04d}",
+                    f"unknown_{rank}",
+                    rank,
+                    domain="Unclassified",
+                )
+                for rank in range(1, 4)
+            ]
+            with references.open("w", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle, fieldnames=REFERENCE_FIELDS, delimiter="\t"
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+            task = root / "task.json"
+            route = "Eukaryota;Amoebozoa"
+            task.write_text(json.dumps(task_payload(route)))
+            tree = root / "tree.nwk"
+            tree.write_text("(QUERY:0.01,REF0001:0.01,REF0002:0.02,REF0003:0.03);\n")
+            assignment = classify_tree(
+                tree_file=tree,
+                references_file=references,
+                task_file=task,
+                assignment_output=root / "assignment.tsv",
+                neighbors_output=root / "neighbors.tsv",
+                assignment_neighbors=2,
+            )
+
+        self.assertEqual(assignment["tree_taxonomy"], route)
+        self.assertEqual(assignment["tree_assignment_method"], "tree_route_blast")
+
+    def test_nearest_cross_domain_ambiguity_blocks_more_distant_species(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            references = root / "references.tsv"
+            lineage = (
+                "Eukaryota;TSAR;Alveolata;Ciliophora;Oligohymenophorea;"
+                "Peniculida;Parameciidae;Paramecium;Paramecium tetraurelia"
+            )
+            alternatives = json.dumps(
+                [
+                    {"domain": "Bacteria", "taxonomy": "Bacteria;P"},
+                    {"domain": "Eukaryota", "taxonomy": "Eukaryota;TSAR"},
+                ]
+            )
+            rows = [
+                reference_row(
+                    "REF0001",
+                    "ambiguous",
+                    1,
+                    domain="ambiguous",
+                    assignment_method="cross_domain_ambiguous_exact_sequence",
+                    taxonomy_alternatives=alternatives,
+                ),
+                reference_row("REF0002", "named_1", 2, taxonomy=lineage),
+                reference_row("REF0003", "named_2", 3, taxonomy=lineage),
+            ]
+            with references.open("w", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle, fieldnames=REFERENCE_FIELDS, delimiter="\t"
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+            task = root / "task.json"
+            task.write_text(json.dumps(task_payload(lineage)))
+            tree = root / "tree.nwk"
+            tree.write_text(
+                "((QUERY:0.001,REF0001:0.001):0.001,"
+                "(REF0002:0.1,REF0003:0.1):0.1);\n"
+            )
+            neighbors = root / "neighbors.tsv"
+            assignment = classify_tree(
+                tree_file=tree,
+                references_file=references,
+                task_file=task,
+                assignment_output=root / "assignment.tsv",
+                neighbors_output=neighbors,
+                assignment_neighbors=2,
+            )
+            with neighbors.open(newline="") as handle:
+                neighbor_rows = list(csv.DictReader(handle, delimiter="\t"))
+
+        self.assertEqual(assignment["tree_taxonomy"], "")
+        self.assertEqual(assignment["tree_taxonomy_domain"], "ambiguous")
+        self.assertEqual(
+            assignment["tree_assignment_method"], "tree_cross_domain_ambiguous"
+        )
+        self.assertEqual(neighbor_rows[0]["tree_lineage_basis"], "ambiguous")
+        self.assertEqual(neighbor_rows[0]["used_for_assignment"], "true")
 
 
 if __name__ == "__main__":

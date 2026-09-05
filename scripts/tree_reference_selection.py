@@ -12,7 +12,15 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 
-from annotate_hits import BlastHit, TaxonomyRecord, load_blast_hits, load_taxonomy_records
+from annotate_hits import load_taxonomy_records
+from runtime_taxonomy import (
+    BlastHit,
+    RuntimeTaxonomyDecision,
+    TaxonomyRecord,
+    load_blast_hits,
+    load_runtime_calibration,
+    resolve_runtime_taxonomy,
+)
 from top_hit_reporting import (
     ReferenceRecord,
     load_query_sequences,
@@ -112,6 +120,7 @@ def _taxonomy_values(record: TaxonomyRecord | None) -> dict[str, str]:
             "taxonomy_domain": "",
             "compartment": "",
             "taxonomy_assignment_method": "",
+            "taxonomy_alternatives": "",
             "centroid_names": "",
             "centroid_taxonomy": "",
             "centroid_taxonomy_source": "",
@@ -123,6 +132,7 @@ def _taxonomy_values(record: TaxonomyRecord | None) -> dict[str, str]:
         "taxonomy_domain": record.domain,
         "compartment": record.compartment,
         "taxonomy_assignment_method": record.assignment_method,
+        "taxonomy_alternatives": record.taxonomy_alternatives,
         "centroid_names": record.centroid_names,
         "centroid_taxonomy": record.centroid_taxonomy,
         "centroid_taxonomy_source": record.centroid_taxonomy_source,
@@ -164,6 +174,7 @@ def _skipped_assignment(
     decision: str,
     votes: dict[str, int],
     best_scores: dict[str, float],
+    route_assignment: RuntimeTaxonomyDecision,
 ) -> dict[str, str]:
     row = dict.fromkeys(TREE_ASSIGNMENT_FIELDS, "")
     row.update(
@@ -180,6 +191,15 @@ def _skipped_assignment(
             "tree_route_18s_best_bitscore": _format_score(best_scores["18S"]),
             "tree_assignment_method": "tree_skipped_insufficient_references",
             "tree_basis_neighbors": "0",
+            "tree_route_blast_taxonomy": route_assignment.taxonomy,
+            "tree_route_blast_taxonomy_source": route_assignment.taxonomy_source,
+            "tree_route_blast_taxonomy_domain": route_assignment.domain,
+            "tree_route_blast_compartment": route_assignment.compartment,
+            "tree_route_blast_assignment_method": route_assignment.assignment_method,
+            "tree_route_blast_candidate_taxonomy": (
+                route_assignment.candidate_taxonomy
+            ),
+            "tree_taxonomy_alternatives": route_assignment.taxonomy_alternatives,
         }
     )
     return row
@@ -199,11 +219,16 @@ def prepare_tree_tasks(
     skipped_assignments_file: str | Path,
     reference_count: int = 100,
     route_hits: int = 100,
+    max_targets: int = 500,
+    runtime_calibration: str | Path | None = None,
+    reference_digest: str = "",
 ) -> list[Path]:
     if reference_count < 3:
         raise ValueError("reference_count must be at least 3")
     if route_hits < 1:
         raise ValueError("route_hits must be positive")
+    if max_targets < 1:
+        raise ValueError("max_targets must be positive")
     query_sequences = load_query_sequences(query_fasta)
     hits_by_marker = {
         marker: load_blast_hits(blast_files[marker]) for marker in MARKERS
@@ -227,6 +252,7 @@ def prepare_tree_tasks(
     }
     taxonomy_records = load_taxonomy_records(taxonomy_file, subjects)
     reference_records = load_reference_records(source_records_file, subjects)
+    calibration = load_runtime_calibration(runtime_calibration, reference_digest)
     output = Path(output_directory)
     output.mkdir(parents=True, exist_ok=True)
     task_directories: list[Path] = []
@@ -236,10 +262,25 @@ def prepare_tree_tasks(
         query_hits = {
             marker: hits_by_marker[marker].get(query, []) for marker in MARKERS
         }
+        route_assignments = {
+            marker: resolve_runtime_taxonomy(
+                query_hits[marker],
+                taxonomy_records,
+                query_length=len(sequence),
+                marker=marker,
+                calibration=calibration,
+                max_targets=max_targets,
+            )
+            for marker in MARKERS
+        }
+        eligible_hits = {
+            marker: list(route_assignments[marker].eligible_hits) for marker in MARKERS
+        }
         selected_marker, decision, votes, best_scores = choose_marker(
-            query_hits, detected_marker, route_hits
+            eligible_hits, detected_marker, route_hits
         )
-        selected_hits = query_hits[selected_marker][:reference_count]
+        route_assignment = route_assignments[selected_marker]
+        selected_hits = eligible_hits[selected_marker][:reference_count]
         if len(selected_hits) < 3:
             skipped_assignments.append(
                 _skipped_assignment(
@@ -251,6 +292,7 @@ def prepare_tree_tasks(
                     decision=decision,
                     votes=votes,
                     best_scores=best_scores,
+                    route_assignment=route_assignment,
                 )
             )
             continue
@@ -284,7 +326,7 @@ def prepare_tree_tasks(
             "".join(f"{row['blast_sseqid']}\n" for row in rows)
         )
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "query_key": key,
             "name": query,
             "sample": sample,
@@ -303,6 +345,17 @@ def prepare_tree_tasks(
                 None if best_scores["18S"] == float("-inf") else best_scores["18S"]
             ),
             "tree_reference_count": len(rows),
+            "tree_route_blast_taxonomy": route_assignment.taxonomy,
+            "tree_route_blast_taxonomy_source": route_assignment.taxonomy_source,
+            "tree_route_blast_taxonomy_domain": route_assignment.domain,
+            "tree_route_blast_compartment": route_assignment.compartment,
+            "tree_route_blast_assignment_method": route_assignment.assignment_method,
+            "tree_route_blast_candidate_taxonomy": (
+                route_assignment.candidate_taxonomy
+            ),
+            "tree_route_blast_taxonomy_alternatives": (
+                route_assignment.taxonomy_alternatives
+            ),
         }
         (task_directory / "task.json").write_text(
             json.dumps(payload, indent=2, sort_keys=True) + "\n"
@@ -380,6 +433,9 @@ def parse_args() -> argparse.Namespace:
     prepare.add_argument("--marker-model", action="append", required=True)
     prepare.add_argument("--reference-count", type=int, default=100)
     prepare.add_argument("--route-hits", type=int, default=100)
+    prepare.add_argument("--max-targets", type=int, default=500)
+    prepare.add_argument("--runtime-calibration")
+    prepare.add_argument("--reference-digest", required=True)
     prepare.add_argument("--output-directory", required=True)
     prepare.add_argument("--skipped-assignments-output", required=True)
 
@@ -406,6 +462,9 @@ def main() -> None:
             skipped_assignments_file=args.skipped_assignments_output,
             reference_count=args.reference_count,
             route_hits=args.route_hits,
+            max_targets=args.max_targets,
+            runtime_calibration=args.runtime_calibration,
+            reference_digest=args.reference_digest,
         )
     else:
         build_alignment_input(

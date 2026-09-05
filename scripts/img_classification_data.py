@@ -26,6 +26,36 @@ BLAST_FIELDS = (
     "qcovs",
     "bitscore",
 )
+MIN_QUERY_COVERAGE = Decimal("80")
+CANDIDATE_BITSCORE_FRACTION = Decimal("0.98")
+BLAST_MAX_TARGETS = 500
+BLAST_FETCH_TARGETS = BLAST_MAX_TARGETS + 1
+CALIBRATION_SCHEMA_VERSION = 3
+CALIBRATION_USE_CASE = "img_centroid"
+CALIBRATION_STRATUM_BASIS = "predicted_candidate_source_and_lca_domain"
+
+
+def _decimal_text(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def classification_policy(
+    *,
+    max_targets: int = BLAST_MAX_TARGETS,
+    blast_fetch_targets: int = BLAST_FETCH_TARGETS,
+) -> dict[str, object]:
+    return {
+        "blast_fields": list(BLAST_FIELDS),
+        "min_query_coverage_percent": _decimal_text(MIN_QUERY_COVERAGE),
+        "candidate_bitscore_fraction": _decimal_text(CANDIDATE_BITSCORE_FRACTION),
+        "max_targets": max_targets,
+        "blast_fetch_targets": blast_fetch_targets,
+        "overflow_rule": "raw_boundary_hit_in_candidate_window_backs_off_to_domain",
+        "species_requires_all_candidates_exact_and_agreeing": True,
+    }
 
 
 @dataclass(frozen=True)
@@ -65,9 +95,20 @@ class CalibrationStratum:
 
 
 @dataclass(frozen=True)
+class CalibrationRankRule:
+    rank_index: int
+    min_candidate_identity: Decimal
+
+
+@dataclass(frozen=True)
 class CalibrationData:
+    schema_version: int
+    calibration_use_case: str
+    stratum_basis: str
+    classification_policy: dict[str, object]
     rank_caps: dict[str, int]
     strata: dict[str, CalibrationStratum]
+    rank_rules: dict[str, tuple[CalibrationRankRule, ...]]
 
 
 def _decimal(value: str, field: str, line_number: int) -> Decimal:
@@ -314,14 +355,30 @@ def load_calibration(path: str | Path) -> CalibrationData:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"Could not read taxonomy calibration {path}: {error}") from error
-    if not isinstance(data, dict) or data.get("schema_version") != 2:
-        raise ValueError("taxonomy calibration schema_version must be 2")
+    if not isinstance(data, dict) or data.get("schema_version") != CALIBRATION_SCHEMA_VERSION:
+        raise ValueError(
+            f"taxonomy calibration schema_version must be {CALIBRATION_SCHEMA_VERSION}"
+        )
+    if data.get("calibration_use_case") != CALIBRATION_USE_CASE:
+        raise ValueError(
+            f"taxonomy calibration use case must be {CALIBRATION_USE_CASE!r}"
+        )
+    if data.get("stratum_basis") != CALIBRATION_STRATUM_BASIS:
+        raise ValueError(
+            f"taxonomy calibration stratum basis must be {CALIBRATION_STRATUM_BASIS!r}"
+        )
+    policy = data.get("classification_policy")
+    if policy != classification_policy():
+        raise ValueError("taxonomy calibration classification policy does not match the classifier")
     raw_caps = data.get("rank_caps")
     raw_strata = data.get("strata")
+    raw_rules = data.get("rank_rules", {})
     if not isinstance(raw_caps, dict):
         raise ValueError("taxonomy calibration must contain a rank_caps object")
     if not isinstance(raw_strata, dict) or not raw_strata:
         raise ValueError("taxonomy calibration must contain a non-empty strata object")
+    if not isinstance(raw_rules, dict):
+        raise ValueError("taxonomy calibration rank_rules must be an object")
     caps: dict[str, int] = {}
     for key, value in raw_caps.items():
         if not isinstance(key, str) or not key or type(value) is not int or value < 0:
@@ -362,7 +419,47 @@ def load_calibration(path: str | Path) -> CalibrationData:
         raise ValueError(
             "taxonomy calibration rank_caps must exactly match calibrated strata"
         )
-    return CalibrationData(caps, strata)
+    if not set(raw_rules).issubset(calibrated_keys):
+        raise ValueError(
+            "taxonomy calibration rank_rules must refer only to calibrated strata"
+        )
+    rank_rules: dict[str, tuple[CalibrationRankRule, ...]] = {}
+    for key, raw_rule_list in raw_rules.items():
+        if not isinstance(raw_rule_list, list):
+            raise ValueError(f"taxonomy calibration rank rules must be a list: {key}")
+        parsed_rules: list[CalibrationRankRule] = []
+        for expected_index, raw_rule in enumerate(raw_rule_list):
+            if not isinstance(raw_rule, dict):
+                raise ValueError(f"taxonomy calibration rank rule must be an object: {key}")
+            rank_index = raw_rule.get("rank_index")
+            threshold = raw_rule.get("min_candidate_identity")
+            if rank_index != expected_index or type(rank_index) is not int:
+                raise ValueError(f"taxonomy calibration rank rules are not contiguous: {key}")
+            if type(threshold) not in {int, float}:
+                raise ValueError(f"taxonomy calibration identity threshold is invalid: {key}")
+            identity = Decimal(str(threshold))
+            if not identity.is_finite() or not Decimal("0") <= identity <= Decimal("100"):
+                raise ValueError(f"taxonomy calibration identity threshold is invalid: {key}")
+            if parsed_rules and identity < parsed_rules[-1].min_candidate_identity:
+                raise ValueError(f"taxonomy calibration identity thresholds decrease: {key}")
+            parsed_rules.append(CalibrationRankRule(rank_index, identity))
+        if len(parsed_rules) != caps[key] + 1:
+            raise ValueError(f"taxonomy calibration rank rules do not reach rank cap: {key}")
+        rank_rules[key] = tuple(parsed_rules)
+    expected_status = "complete" if caps else "failed"
+    if data.get("status") != expected_status:
+        raise ValueError(
+            f"taxonomy calibration status must be {expected_status!r} for its rank caps"
+        )
+    return CalibrationData(
+        CALIBRATION_SCHEMA_VERSION,
+        CALIBRATION_USE_CASE,
+        CALIBRATION_STRATUM_BASIS,
+        policy,
+        caps,
+        strata,
+        rank_rules,
+    )
 
 
 def parse_clusters(lines: Iterable[str]) -> tuple[Cluster, ...]:

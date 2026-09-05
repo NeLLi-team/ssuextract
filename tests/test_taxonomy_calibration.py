@@ -48,13 +48,13 @@ class CalibrationMathTests(unittest.TestCase):
         overflow = exactly_at_policy + [hit(f"ref-{classifier.BLAST_MAX_TARGETS}")]
 
         self.assertEqual(
-            calibration._prediction("query", exactly_at_policy, taxonomy),
+            calibration._prediction("query", exactly_at_policy, taxonomy).taxonomy,
             ("Bacteria", "Firmicutes"),
         )
-        self.assertEqual(
-            calibration._prediction("query", overflow, taxonomy),
-            ("Bacteria",),
-        )
+        overflow_prediction = calibration._prediction("query", overflow, taxonomy)
+        self.assertEqual(overflow_prediction.taxonomy, ("Bacteria",))
+        self.assertEqual(overflow_prediction.candidate_sources, ("SILVA",))
+        self.assertTrue(overflow_prediction.truncated)
         self.assertEqual(calibration.CALIBRATION_FETCH_TARGETS, 502)
 
     def test_low_coverage_raw_overflow_sentinel_still_backs_off(self) -> None:
@@ -83,7 +83,7 @@ class CalibrationMathTests(unittest.TestCase):
         ] + [hit("low-coverage-sentinel", Decimal("79.99"))]
 
         self.assertEqual(
-            calibration._prediction("query", raw_hits, taxonomy),
+            calibration._prediction("query", raw_hits, taxonomy).taxonomy,
             ("Bacteria",),
         )
 
@@ -102,6 +102,40 @@ class CalibrationMathTests(unittest.TestCase):
             RuntimeError, "taxonomy is missing.*missing-reference"
         ):
             calibration._prediction("query", [hit], {})
+
+    def test_prediction_uses_the_classifier_species_guard(self) -> None:
+        hit = classifier.BlastHit(
+            query="query",
+            subject="reference",
+            percent_identity=Decimal("99"),
+            alignment_length=100,
+            query_length=100,
+            subject_length=100,
+            query_coverage=Decimal("100"),
+            bit_score=Decimal("100"),
+        )
+        species = (
+            "Eukaryota",
+            "TSAR",
+            "Alveolata",
+            "Dinoflagellata",
+            "Dinophyceae",
+            "Gymnodiniales",
+            "Gymnodiniaceae",
+            "Gymnodinium",
+            "Gymnodinium_test",
+        )
+        prediction = calibration._prediction(
+            "query",
+            [hit],
+            {
+                "reference": classifier.TaxonomyRecord(
+                    species, "PR2", "Eukaryota", "nucleus"
+                )
+            },
+        )
+        self.assertEqual(prediction.taxonomy, species[:-1])
+        self.assertTrue(prediction.species_guard_applied)
 
 
 class CalibrationSelectionTests(unittest.TestCase):
@@ -206,7 +240,7 @@ class CalibrationSchemaTests(unittest.TestCase):
             bit_score=Decimal("100"),
         )
 
-    def test_failed_stratum_is_recorded_while_passing_stratum_sets_cap(self) -> None:
+    def test_cross_class_false_calls_are_charged_to_the_predicted_route(self) -> None:
         passing_rows = [
             {
                 "sequence_id": f"pass-{index}",
@@ -260,23 +294,120 @@ class CalibrationSchemaTests(unittest.TestCase):
                     samples_per_stratum_requested=777,
                 )
 
-        passing_key = "16S|SILVA|Bacteria"
-        failing_key = "16S|PR2|Eukaryota"
-        self.assertEqual(result["schema_version"], 2)
-        self.assertEqual(result["samples_per_stratum_requested"], 777)
-        self.assertEqual(result["rank_caps"], {passing_key: 1})
-        self.assertEqual(result["strata"][passing_key]["status"], "calibrated")
-        self.assertEqual(result["strata"][passing_key]["rank_cap"], 1)
-        self.assertEqual(result["strata"][passing_key]["reason"], "")
-        self.assertEqual(result["strata"][failing_key]["status"], "failed")
-        self.assertIsNone(result["strata"][failing_key]["rank_cap"])
+        bacterial_route = "16S|SILVA|Bacteria"
+        zero_call_route = "16S|PR2|Eukaryota"
+        self.assertEqual(result["schema_version"], 3)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["calibration_use_case"], "img_centroid")
         self.assertEqual(
-            result["strata"][failing_key]["reason"],
-            "domain_precision_below_threshold",
+            result["stratum_basis"],
+            "predicted_candidate_source_and_lca_domain",
         )
-        self.assertEqual(result["strata"][failing_key]["metrics"][0]["called"], 100)
+        self.assertEqual(result["classification_policy"], classifier.classification_policy())
+        self.assertEqual(result["samples_per_stratum_requested"], 777)
+        self.assertEqual(result["rank_caps"], {})
+        self.assertEqual(result["strata"][bacterial_route]["status"], "failed")
+        domain = result["strata"][bacterial_route]["metrics"][0]
+        self.assertEqual(domain["called"], 200)
+        self.assertEqual(domain["correct"], 100)
+        self.assertEqual(domain["truth_known_calls"], 200)
+        self.assertEqual(domain["truth_unknown_calls"], 0)
+        self.assertEqual(domain["precision"], 0.5)
+        self.assertLess(domain["wilson_95_lower"], 0.95)
+        self.assertEqual(
+            domain["called_true_class_mixture"],
+            {
+                "16S|PR2|Eukaryota": 100,
+                "16S|SILVA|Bacteria": 100,
+            },
+        )
+        self.assertEqual(result["strata"][zero_call_route]["status"], "failed")
+        self.assertEqual(
+            result["strata"][zero_call_route]["reason"],
+            "insufficient_domain_calls_and_precision_below_threshold",
+        )
+        self.assertEqual(
+            result["strata"][zero_call_route]["metrics"][0]["called"], 0
+        )
 
-    def test_no_rows_and_no_passing_strata_are_fatal(self) -> None:
+    def test_correct_predicted_route_sets_cap(self) -> None:
+        rows = [
+            {
+                "sequence_id": f"query-{index}",
+                "taxonomy": "Bacteria;Firmicutes",
+                "taxonomy_source": "SILVA",
+                "domain": "Bacteria",
+                "marker": "16S",
+            }
+            for index in range(100)
+        ]
+        hits = {
+            row["sequence_id"]: (self._hit(row["sequence_id"], "reference"),)
+            for row in rows
+        }
+        taxonomy = {
+            "reference": classifier.TaxonomyRecord(
+                ("Bacteria", "Firmicutes"), "SILVA", "Bacteria", ""
+            )
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            blast_output = Path(temporary) / "leave_one_out.m8"
+            blast_output.touch()
+            with (
+                mock.patch.object(classifier, "parse_blast_hits", return_value=hits),
+                mock.patch.object(classifier, "load_taxonomy", return_value=taxonomy),
+            ):
+                result = calibration.evaluate_calibration(
+                    temporary, rows, {"16S": blast_output}
+                )
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["rank_caps"], {"16S|SILVA|Bacteria": 1})
+
+    def test_same_domain_other_rank_scheme_is_an_unknown_false_call(self) -> None:
+        row = {
+            "sequence_id": "query",
+            "taxonomy": "Eukaryota;TSAR",
+            "taxonomy_source": "PR2",
+            "domain": "Eukaryota",
+            "marker": "18S",
+        }
+        hits = {
+            "query": (
+                self._hit("query", "pr2-reference"),
+                self._hit("query", "silva-reference"),
+            )
+        }
+        taxonomy = {
+            "pr2-reference": classifier.TaxonomyRecord(
+                ("Eukaryota", "TSAR"), "PR2", "Eukaryota", ""
+            ),
+            "silva-reference": classifier.TaxonomyRecord(
+                ("Eukaryota", "TSAR"), "SILVA", "Eukaryota", ""
+            )
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            blast_output = Path(temporary) / "leave_one_out.m8"
+            blast_output.touch()
+            with (
+                mock.patch.object(classifier, "parse_blast_hits", return_value=hits),
+                mock.patch.object(classifier, "load_taxonomy", return_value=taxonomy),
+            ):
+                result = calibration.evaluate_calibration(
+                    temporary, [row], {"18S": blast_output}
+                )
+        route_metrics = result["strata"]["18S|SILVA|Eukaryota"]["metrics"]
+        pr2_metrics = result["strata"]["18S|PR2|Eukaryota"]["metrics"]
+        self.assertEqual(pr2_metrics[0]["called"], 1)
+        self.assertEqual(pr2_metrics[1]["called"], 1)
+        self.assertEqual(pr2_metrics[1]["correct"], 1)
+        self.assertEqual(route_metrics[0]["truth_known_calls"], 1)
+        self.assertEqual(route_metrics[0]["correct"], 1)
+        self.assertEqual(route_metrics[1]["truth_known_calls"], 0)
+        self.assertEqual(route_metrics[1]["truth_unknown_calls"], 1)
+        self.assertEqual(route_metrics[1]["called"], 1)
+        self.assertEqual(route_metrics[1]["precision"], 0.0)
+
+    def test_no_rows_is_fatal_but_all_failed_returns_an_artifact(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "selected no rows"):
             calibration.evaluate_calibration("unused", [], {})
 
@@ -293,11 +424,15 @@ class CalibrationSchemaTests(unittest.TestCase):
             with (
                 mock.patch.object(classifier, "parse_blast_hits", return_value={}),
                 mock.patch.object(classifier, "load_taxonomy", return_value={}),
-                self.assertRaisesRegex(RuntimeError, "no strata passed"),
             ):
-                calibration.evaluate_calibration(
+                result = calibration.evaluate_calibration(
                     temporary, [row], {"18S": blast_output}
                 )
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["rank_caps"], {})
+        self.assertEqual(
+            result["strata"]["18S|PR2|Eukaryota"]["status"], "failed"
+        )
 
 
 class CalibrationReuseTests(unittest.TestCase):
@@ -413,6 +548,20 @@ class CalibrationReuseTests(unittest.TestCase):
             self.assertEqual(outputs, {"16S": retained})
             runner.assert_called_once()
 
+            separate_output = root / "new-calibration"
+            with mock.patch.object(calibration, "_run", side_effect=regenerate) as runner:
+                outputs = calibration._write_queries(
+                    profile,
+                    separate_output,
+                    [row],
+                    threads=2,
+                    reuse_blast_directory=output,
+                )
+
+            self.assertEqual(outputs, {"16S": retained})
+            self.assertFalse((separate_output / "16S").exists())
+            runner.assert_called_once()
+
     def test_fresh_search_rejects_incomplete_results_before_provenance(self) -> None:
         rows = [
             self._row(),
@@ -500,6 +649,25 @@ class CalibrationReuseTests(unittest.TestCase):
                     threads=8,
                     reuse_existing_blast=True,
                 )
+
+            self._prepare_retained(profile, output, row)
+            provenance_path = output / "16S" / calibration.SEARCH_PROVENANCE_NAME
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            blastn = provenance["commands"]["blastn"]
+            blastn[blastn.index("-evalue") + 1] = "1e-4"
+            provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+            with (
+                mock.patch.object(calibration, "_run") as runner,
+                self.assertRaisesRegex(RuntimeError, "command contract mismatch"),
+            ):
+                calibration._write_queries(
+                    profile,
+                    output,
+                    [row],
+                    threads=2,
+                    reuse_existing_blast=True,
+                )
+            runner.assert_not_called()
 
             self._prepare_retained(profile, output, row)
             blast_output = output / "16S" / "leave_one_out.m8"

@@ -6,6 +6,14 @@ test_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssuextract-tree.XXXXXX")
 cleanup() {
     status=$?
     if [[ ${status} -eq 0 ]]; then
+        if [[ -n "${SSUEXTRACT_TEST_EVIDENCE_DIRECTORY:-}" ]]; then
+            mkdir -p "${SSUEXTRACT_TEST_EVIDENCE_DIRECTORY}"
+            cp "${test_dir}"/*.trace.tsv "${test_dir}"/*.provenance.json \
+                "${test_dir}/seed-result.m8" \
+                "${test_dir}/results/run_provenance.json" \
+                "${test_dir}/results/cmsearch_summary.tsv" \
+                "${SSUEXTRACT_TEST_EVIDENCE_DIRECTORY}/"
+        fi
         rm -rf "${test_dir}"
         return
     fi
@@ -13,6 +21,8 @@ cleanup() {
     for log in \
         first.stdout first.stderr \
         resume.stdout resume.stderr \
+        database-resume.stdout database-resume.stderr \
+        code-resume.stdout code-resume.stderr \
         no-hit.stdout no-hit.stderr; do
         if [[ -s "${test_dir}/${log}" ]]; then
             echo "--- ${log} ---" >&2
@@ -26,6 +36,12 @@ mkdir -p \
     "${test_dir}/query" \
     "${test_dir}/database/curated/blast" \
     "${test_dir}/database/curated/metadata"
+
+# Keep a fixed project path so the resume check can change code content safely.
+mkdir "${test_dir}/pipeline"
+cp "${repo}/main.nf" "${repo}/nextflow.config" "${test_dir}/pipeline/"
+cp -R "${repo}/scripts" "${repo}/config" "${test_dir}/pipeline/"
+printf "trace.fields = 'task_id,hash,name,status,exit,cpus,workdir'\n" > "${test_dir}/trace.config"
 
 python3 - \
     "${repo}/data/example/LKH565_P11_Ci.fna" \
@@ -231,8 +247,34 @@ connection.executemany(
 connection.execute("COPY source_records TO ? (FORMAT PARQUET)", [str(sources_path)])
 connection.close()
 
+# This fixture tests calibration wiring. It is not a measured biological model.
+reference_paths = sorted((profile / "blast").iterdir()) + [taxonomy]
+reference_hashes = {
+    path.relative_to(profile).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in reference_paths
+}
+reference_digest = hashlib.sha256(
+    "".join(f"{path}\t{reference_hashes[path]}\n" for path in sorted(reference_hashes)).encode()
+).hexdigest()
+caps = {"16S|SILVA|Bacteria": 4, "18S|PR2|Eukaryota": 4}
+calibration = profile / "metadata" / "runtime_calibration.json"
+calibration.write_text(json.dumps({
+    "schema_version": 3,
+    "method": "synthetic_integration_fixture",
+    "calibration_use_case": "runtime_query",
+    "stratum_basis": "predicted_candidate_source_set_and_lca_domain",
+    "status": "calibrated",
+    "classification_policy": "runtime_lca_v1",
+    "max_targets": 500,
+    "reference_search_contract_sha256": reference_digest,
+    "rank_caps": caps,
+    "strata": {
+        key: {"status": "calibrated", "reason": "", "rank_cap": cap}
+        for key, cap in caps.items()
+    },
+}) + "\n")
 artifacts = []
-for path in sorted((profile / "blast").iterdir()) + [taxonomy, sources_path]:
+for path in sorted((profile / "blast").iterdir()) + [taxonomy, sources_path, calibration]:
     artifacts.append(
         {
             "path": path.relative_to(profile).as_posix(),
@@ -253,28 +295,32 @@ manifest = {
         "preferred": "metadata/preferred_taxonomy.parquet",
         "source_records": "metadata/source_records.parquet",
     },
+    "runtime_calibration": "metadata/runtime_calibration.json",
 }
 (profile / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 PY
 
 run_tree_pipeline() {
-    nextflow run "${repo}/main.nf" \
+    nextflow run "${test_dir}/pipeline/main.nf" \
         --query "${test_dir}/query" \
         --modeldir "${repo}/resources/models" \
         --database_path "${test_dir}/database" \
         --database_profile curated \
         --outdir "${test_dir}/results" \
-        --threads_per_job 1 \
+        --threads_per_job 4 \
+        --max_cpus 1 \
         --tree_classification \
         --tree_reference_count 3 \
         --tree_assignment_neighbors 2 \
+        -c "${test_dir}/trace.config" \
         -ansi-log false \
         -work-dir "${test_dir}/work" \
         "$@"
 }
 
-run_tree_pipeline >"${test_dir}/first.stdout" 2>"${test_dir}/first.stderr"
-run_tree_pipeline -resume >"${test_dir}/resume.stdout" 2>"${test_dir}/resume.stderr"
+run_tree_pipeline -with-trace "${test_dir}/first.trace.tsv" >"${test_dir}/first.stdout" 2>"${test_dir}/first.stderr"
+cp "${test_dir}/results/run_provenance.json" "${test_dir}/first.provenance.json"
+run_tree_pipeline -resume -with-trace "${test_dir}/resume.trace.tsv" >"${test_dir}/resume.stdout" 2>"${test_dir}/resume.stderr"
 
 python3 - \
     "${test_dir}/results/cmsearch_summary.tsv" \
@@ -354,6 +400,129 @@ for directory in tree_directories:
         qc["removed_insert_columns"] + qc["removed_high_gap_columns"]
     ):
         raise SystemExit(f"inconsistent alignment masking QC in {directory}")
+PY
+
+python3 - "${test_dir}" <<'PY'
+import csv
+import hashlib
+import json
+import random
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+import duckdb
+
+root = Path(sys.argv[1])
+with (root / "resume.trace.tsv").open() as handle:
+    trace = list(csv.DictReader(handle, delimiter="\t"))
+if not trace or any(row["status"] != "CACHED" for row in trace):
+    raise SystemExit("unchanged resume did not cache every task")
+with (root / "first.trace.tsv").open() as handle:
+    first = list(csv.DictReader(handle, delimiter="\t"))
+if any(int(row["cpus"]) > 1 for row in first):
+    raise SystemExit("a task exceeded --max_cpus 1")
+
+# Exercise the BLAST command emitted by the workflow on a seed-sensitive pair.
+rng = random.Random(904)
+reference = "".join(rng.choices("ACGT", k=1500))
+query = list(reference)
+for index in range(19, len(query), 20):
+    query[index] = {"A": "C", "C": "G", "G": "T", "T": "A"}[query[index]]
+reference_path = root / "seed-reference.fna"
+query_path = root / "seed-query.fna"
+reference_path.write_text(">reference\n" + reference + "\n")
+query_path.write_text(">query\n" + "".join(query) + "\n")
+subprocess.run([
+    "makeblastdb", "-in", str(reference_path), "-dbtype", "nucl",
+    "-out", str(root / "seed-db"),
+], check=True, capture_output=True)
+task = next(row for row in first if "BLAST_ANNOTATE" in row["name"])
+command_text = (Path(task["workdir"]) / ".command.sh").read_text().replace("\\\n", " ")
+command = shlex.split(next(line for line in command_text.splitlines() if line.strip().startswith("blastn ")))
+for flag, value in {
+    "-db": root / "seed-db", "-query": query_path,
+    "-out": root / "seed-result.m8", "-num_threads": 1,
+}.items():
+    command[command.index(flag) + 1] = str(value)
+subprocess.run(command, check=True, capture_output=True)
+with (root / "seed-result.m8").open() as handle:
+    seed_hits = list(csv.reader(handle, delimiter="\t"))
+if len(seed_hits) != 1 or len(seed_hits[0]) != 14 or int(seed_hits[0][3]) < 1450:
+    raise SystemExit("runtime BLAST did not recover the full-length seed-sensitive pair")
+profile = root / "database" / "curated"
+manifest_path = profile / "manifest.json"
+manifest = json.loads(manifest_path.read_text())
+taxonomy = profile / manifest["taxonomy_database"]["preferred"]
+connection = duckdb.connect(":memory:")
+connection.execute("CREATE TABLE taxonomy AS SELECT * FROM read_parquet(?)", [str(taxonomy)])
+connection.execute(
+    "UPDATE taxonomy SET taxonomy = ? WHERE domain = ?",
+    ["Eukaryota;ChangedAfterDatabaseUpdate", "Eukaryota"],
+)
+replacement = taxonomy.with_suffix(".replacement.parquet")
+connection.execute("COPY taxonomy TO ? (FORMAT PARQUET)", [str(replacement)])
+connection.close()
+replacement.replace(taxonomy)
+calibration = profile / manifest["runtime_calibration"]
+payload = json.loads(calibration.read_text())
+paths = sorted((profile / "blast").iterdir()) + [taxonomy]
+hashes = {
+    path.relative_to(profile).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in paths
+}
+payload["reference_search_contract_sha256"] = hashlib.sha256(
+    "".join(f"{path}\t{hashes[path]}\n" for path in sorted(hashes)).encode()
+).hexdigest()
+calibration.write_text(json.dumps(payload) + "\n")
+for artifact in manifest["artifacts"]:
+    path = profile / artifact["path"]
+    artifact["bytes"] = path.stat().st_size
+    artifact["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+manifest["version"] = "1.0.1"
+manifest_path.write_text(json.dumps(manifest) + "\n")
+PY
+
+run_tree_pipeline -resume -with-trace "${test_dir}/database-resume.trace.tsv" \
+    >"${test_dir}/database-resume.stdout" 2>"${test_dir}/database-resume.stderr"
+cp "${test_dir}/results/run_provenance.json" "${test_dir}/database.provenance.json"
+printf '\n# Integration check: changed runtime code content.\n' >> "${test_dir}/pipeline/scripts/runtime_taxonomy.py"
+run_tree_pipeline -resume -with-trace "${test_dir}/code-resume.trace.tsv" \
+    >"${test_dir}/code-resume.stdout" 2>"${test_dir}/code-resume.stderr"
+
+python3 - "${test_dir}" <<'PY'
+import csv
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for stage in ("database", "code"):
+    with (root / f"{stage}-resume.trace.tsv").open() as handle:
+        trace = list(csv.DictReader(handle, delimiter="\t"))
+    affected = [row for row in trace if any(
+        name in row["name"] for name in
+        ("BLAST_ANNOTATE", "PREPARE_TREE_TASKS", "TREE_CLASSIFY", "FINALIZE_SUMMARIES")
+    )]
+    if not affected or any(row["status"] != "COMPLETED" for row in affected):
+        raise SystemExit(f"{stage} content change reused a stale dependent task")
+    if any(int(row["cpus"]) > 1 for row in trace):
+        raise SystemExit(f"{stage} resume exceeded --max_cpus 1")
+with (root / "results/cmsearch_summary.tsv").open() as handle:
+    rows = list(csv.DictReader(handle, delimiter="\t"))
+eukaryotic = [row for row in rows if row["model"] == "RF01960"]
+if not eukaryotic or any(row["taxonomy"] != "Eukaryota;ChangedAfterDatabaseUpdate" for row in eukaryotic):
+    raise SystemExit("resumed output did not use the changed taxonomy")
+original = json.loads((root / "first.provenance.json").read_text())
+database = json.loads((root / "database.provenance.json").read_text())
+code = json.loads((root / "results/run_provenance.json").read_text())
+if original["database_content_sha256"] == database["database_content_sha256"]:
+    raise SystemExit("database content ID did not change")
+if database["runtime_code_sha256"] == code["runtime_code_sha256"]:
+    raise SystemExit("runtime code ID did not change")
+if database["database_content_sha256"] != code["database_content_sha256"]:
+    raise SystemExit("a code-only edit changed the database content ID")
 PY
 
 mkdir "${test_dir}/no-hit-query"

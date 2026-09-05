@@ -1,3 +1,4 @@
+import csv
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ from hit_processing import (
     resolve_extraction_regions,
     select_model_hits,
     write_accepted_hits,
+    write_extraction_outputs,
 )
 
 
@@ -384,6 +386,9 @@ class RegionResolutionTests(unittest.TestCase):
                     strand="+",
                     sequence_type="assembled",
                     is_assembled=True,
+                    hit_length=9,
+                    model_coverage=0.9,
+                    component_coordinates=((10, 14), (15, 18)),
                 )
             ],
         )
@@ -412,6 +417,94 @@ class RegionResolutionTests(unittest.TestCase):
         self.assertEqual((regions[0].start, regions[0].end), (22, 30))
         self.assertEqual(regions[0].strand, "-")
         self.assertTrue(regions[0].is_assembled)
+        self.assertEqual(regions[0].component_coordinates, ((26, 30), (22, 25)))
+
+    def test_distant_fragments_remain_separate(self) -> None:
+        regions = resolve_extraction_regions(
+            [
+                hit(
+                    model_from=1,
+                    model_to=200,
+                    sequence_from=1,
+                    sequence_to=200,
+                ),
+                hit(
+                    model_from=201,
+                    model_to=401,
+                    sequence_from=100000,
+                    sequence_to=100200,
+                ),
+            ],
+            model_length=1533,
+        )
+        self.assertEqual(
+            [(region.start, region.end) for region in regions],
+            [(1, 200), (100000, 100200)],
+        )
+
+    def test_full_locus_blocks_fragment_merge(self) -> None:
+        regions = resolve_extraction_regions(
+            [
+                hit(
+                    model_from=1,
+                    model_to=2,
+                    sequence_from=1,
+                    sequence_to=2,
+                ),
+                hit(
+                    model_from=1,
+                    model_to=10,
+                    sequence_from=3,
+                    sequence_to=8,
+                ),
+                hit(
+                    model_from=9,
+                    model_to=10,
+                    sequence_from=9,
+                    sequence_to=10,
+                ),
+            ],
+            model_length=10,
+        )
+        self.assertEqual(
+            [(region.start, region.end, region.sequence_type) for region in regions],
+            [(1, 2, "simple"), (3, 8, "simple"), (9, 10, "simple")],
+        )
+
+    def test_multiple_local_loci_are_assembled_independently(self) -> None:
+        regions = resolve_extraction_regions(
+            [
+                hit(
+                    model_from=1,
+                    model_to=3,
+                    sequence_from=1,
+                    sequence_to=3,
+                ),
+                hit(
+                    model_from=4,
+                    model_to=6,
+                    sequence_from=4,
+                    sequence_to=6,
+                ),
+                hit(
+                    model_from=1,
+                    model_to=3,
+                    sequence_from=20,
+                    sequence_to=22,
+                ),
+                hit(
+                    model_from=4,
+                    model_to=6,
+                    sequence_from=23,
+                    sequence_to=25,
+                ),
+            ],
+            model_length=10,
+        )
+        self.assertEqual(
+            [(region.start, region.end, region.fragment_count) for region in regions],
+            [(1, 6, 2), (20, 25, 2)],
+        )
 
     def test_out_of_order_fragments_remain_independent(self) -> None:
         regions = resolve_extraction_regions(
@@ -427,6 +520,27 @@ class RegionResolutionTests(unittest.TestCase):
                     model_to=9,
                     sequence_from=10,
                     sequence_to=13,
+                ),
+            ],
+            model_length=10,
+        )
+        self.assertEqual(len(regions), 2)
+        self.assertTrue(all(region.sequence_type == "simple" for region in regions))
+
+    def test_overlapping_fragments_remain_independent(self) -> None:
+        regions = resolve_extraction_regions(
+            [
+                hit(
+                    model_from=1,
+                    model_to=6,
+                    sequence_from=1,
+                    sequence_to=6,
+                ),
+                hit(
+                    model_from=5,
+                    model_to=9,
+                    sequence_from=5,
+                    sequence_to=9,
                 ),
             ],
             model_length=10,
@@ -503,6 +617,81 @@ class SequenceExtractionTests(unittest.TestCase):
         regions = parse_seqmap(str(seqmap))
         records = extract_regions(self.fasta, regions, minimum_length=0)
         self.assertEqual(records[0].sequence, "AACC")
+
+    def test_minimum_length_uses_supported_sequence_spans(self) -> None:
+        distant_fasta = Path(self.tempdir.name) / "distant.fna"
+        distant_fasta.write_text(f">contig1\n{'A' * 100200}\n")
+        regions = resolve_extraction_regions(
+            [
+                hit(
+                    model_from=1,
+                    model_to=200,
+                    sequence_from=1,
+                    sequence_to=200,
+                ),
+                hit(
+                    model_from=201,
+                    model_to=401,
+                    sequence_from=100000,
+                    sequence_to=100200,
+                ),
+            ],
+            model_length=1533,
+        )
+        self.assertEqual(
+            extract_regions(distant_fasta, regions, minimum_length=500), []
+        )
+
+    def test_output_reports_support_and_namespaces_query_id(self) -> None:
+        output_input = Path(self.tempdir.name) / "output-input.fna"
+        output_input.write_text(">contig1\nAACCGGTTAAC\n")
+        regions = resolve_extraction_regions(
+            [
+                hit(
+                    model_from=1,
+                    model_to=5,
+                    sequence_from=1,
+                    sequence_to=6,
+                ),
+                hit(
+                    model_from=8,
+                    model_to=10,
+                    sequence_from=9,
+                    sequence_to=11,
+                ),
+            ],
+            model_length=10,
+        )
+        records = extract_regions(output_input, regions, minimum_length=0)
+        fasta_outputs = []
+        hit_names = []
+        for index, (sample, model) in enumerate(
+            (("sample-a", "RF00177"), ("sample-b", "RF01960"))
+        ):
+            fasta_output = Path(self.tempdir.name) / f"{index}.fna"
+            hits_output = Path(self.tempdir.name) / f"{index}.tsv"
+            metadata_output = Path(self.tempdir.name) / f"{index}.meta.tsv"
+            write_extraction_outputs(
+                records,
+                sample,
+                model,
+                fasta_output,
+                hits_output,
+                metadata_output,
+            )
+            fasta_outputs.append(fasta_output.read_text().splitlines()[0][1:])
+            with hits_output.open(newline="") as handle:
+                row = next(csv.DictReader(handle, delimiter="\t"))
+            hit_names.append(row["name"])
+            self.assertEqual(row["hit_length"], "9")
+            self.assertEqual(row["model_coverage"], "0.8")
+            self.assertEqual(row["fragment_count"], "2")
+            self.assertEqual(row["component_coordinates"], "1-6,9-11")
+            self.assertEqual(row["coordinates"], "1-11")
+            self.assertEqual(row["contig_name"], "contig1")
+
+        self.assertEqual(fasta_outputs, hit_names)
+        self.assertEqual(len(set(hit_names)), 2)
 
 
 if __name__ == "__main__":

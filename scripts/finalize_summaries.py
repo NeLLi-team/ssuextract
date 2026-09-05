@@ -186,7 +186,25 @@ def apply_tree_assignments(
             }
         )
         if assignment["tree_assignment_method"].startswith("tree_skipped_"):
-            updated["taxonomy_mode"] = "blast"
+            updated.update(
+                {
+                    "taxonomy_mode": "blast",
+                    "taxonomy": assignment["tree_route_blast_taxonomy"],
+                    "taxonomy_source": assignment[
+                        "tree_route_blast_taxonomy_source"
+                    ],
+                    "taxonomy_domain": assignment[
+                        "tree_route_blast_taxonomy_domain"
+                    ],
+                    "compartment": assignment["tree_route_blast_compartment"],
+                    "taxonomy_assignment_method": assignment[
+                        "tree_route_blast_assignment_method"
+                    ],
+                    "taxonomy_alternatives": assignment[
+                        "tree_taxonomy_alternatives"
+                    ],
+                }
+            )
         else:
             updated.update(
                 {
@@ -198,7 +216,9 @@ def apply_tree_assignments(
                     "taxonomy_assignment_method": assignment[
                         "tree_assignment_method"
                     ],
-                    "taxonomy_alternatives": "",
+                    "taxonomy_alternatives": assignment[
+                        "tree_taxonomy_alternatives"
+                    ],
                 }
             )
         merged.append(updated)
@@ -243,8 +263,6 @@ def write_category_summary(
     categories_by_contig: dict[tuple[str, str], set[str]] = {}
 
     for row in rows:
-        if not row["blast_sseqid"]:
-            continue
         key = (row["sample"], row["contig_name"])
         taxonomy = row.get("taxonomy", "")
         taxonomy_domain = row.get("taxonomy_domain", "")

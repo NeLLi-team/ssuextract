@@ -19,6 +19,9 @@ ANNOTATION_FIELDS = (
     "taxonomy_source",
     "taxonomy_domain",
     "taxonomy_assignment_method",
+    "reference_taxonomy",
+    "reference_taxonomy_source",
+    "reference_taxonomy_assignment_method",
 )
 CENTROID_FIELDS = (
     "centroid_names",
@@ -76,6 +79,18 @@ def validate_centroid_contract(
 ) -> None:
     if semantic_version(database_version) < CENTROID_CONTRACT_VERSION:
         return
+
+    # These checks describe the database references, not the query calls.
+    rows = [
+        {
+            **row,
+            "taxonomy": row["reference_taxonomy"],
+            "taxonomy_source": row["reference_taxonomy_source"],
+            "taxonomy_domain": row["reference_taxonomy"].split(";", 1)[0],
+            "taxonomy_assignment_method": row["reference_taxonomy_assignment_method"],
+        }
+        for row in rows
+    ]
 
     derived = [
         row

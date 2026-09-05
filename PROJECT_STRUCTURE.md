@@ -2,7 +2,7 @@
 
 ```text
 ssuextract/
-├── main.nf                       # Four-stage Nextflow workflow
+├── main.nf                       # Nextflow workflow with seven processes
 ├── nextflow.config               # Parameters, profiles, reports, and manifest
 ├── pixi.toml                     # Environment constraints and commands
 ├── pixi.lock                     # Resolved cross-platform environment
@@ -30,18 +30,26 @@ ssuextract/
 │   ├── classify_img_clusters.py  # Conservative IMG cluster classification
 │   ├── classify_img_marker.sh    # Production centroid-classification contract
 │   ├── hit_processing.py         # Typed hit parsing and sequence extraction
+│   ├── resolve_model_hits.py     # Cross-model overlap resolution
 │   ├── extract_hits.py           # Extraction command-line interface
 │   ├── annotate_hits.py          # BLAST annotation and taxonomy resolution
+│   ├── runtime_taxonomy.py       # Shared query evidence and calibrated assignment
+│   ├── top_hit_reporting.py      # Ranked reference evidence
+│   ├── tree_reference_selection.py # Marker routing and tree inputs
+│   ├── tree_phylogeny.py         # Alignment trimming and tree evidence
+│   ├── tree_schema.py            # Shared tree output fields
 │   ├── finalize_summaries.py     # Deterministic final reports
 │   ├── get_cmsequences.py        # Compatibility wrapper for legacy callers
 │   └── check_version.py          # Release-version consistency gate
 └── tests/                         # Unit and self-contained integration tests
 ```
 
-`main.nf` carries sample and model identifiers as explicit channel metadata. Raw
-search output is parsed once into hit and extraction records. Those records feed
-the FASTA, detailed summary, category summary, and annotation outputs, avoiding
-independent reconstruction of biological state in separate scripts.
+`main.nf` carries sample and model identifiers in channel metadata. Hit and
+extraction records supply the FASTA, detailed summary, category summary, and
+annotation outputs. The seven
+processes are `CMSEARCH`, `RESOLVE_MODEL_HITS`, `EXTRACT_HITS`, `BLAST_ANNOTATE`,
+`PREPARE_TREE_TASKS`, `TREE_CLASSIFY`, and `FINALIZE_SUMMARIES`. The two tree
+processes run only with tree classification enabled.
 
 Database construction is separate from runtime installation. The source catalog
 pins every input; the build modules normalize sequences and taxonomy, write

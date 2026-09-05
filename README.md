@@ -1,7 +1,7 @@
 # SSUextract
 
 SSUextract is a Nextflow pipeline that detects 16S rRNA genes and 18S rRNA
-genes in assembled contigs, extracts complete hit intervals, and assigns
+genes in assembled contigs, extracts supported hit intervals, and assigns
 taxonomy with marker-specific reference databases.
 
 [![SSUextract pipeline from Infernal detection and marker-specific BLAST through default BLAST taxonomy or optional tree-neighbor classification](docs/assets/figures/pipeline-architecture.svg)](docs/assets/figures/pipeline-architecture.svg)
@@ -23,8 +23,11 @@ of the query and 100 reference sequences:
 pixi run ssuextract -q data/my_dataset --outdir results/my_dataset --tree_classification
 ```
 
-Tree mode is optional. The default run assigns taxonomy from the highest-scoring
-BLAST subjects.
+The default run checks query coverage and near-best BLAST
+subjects. Nonexact query assignments require profile-specific runtime
+calibration. Reference taxonomy remains visible when the query has no supported
+assignment. Tree evidence can reduce the assigned rank; it cannot exceed the
+supported BLAST rank. See [taxonomy selection](docs/explanation/taxonomy.md).
 
 `-q` is the short form of `--query` in the Pixi wrapper. Both accept one `.fna`,
 `.fa`, or `.fasta` file or a directory of those files. A single file named

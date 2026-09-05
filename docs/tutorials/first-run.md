@@ -53,7 +53,13 @@ selected database profile and stops if a marker, reference sequence, taxonomy,
 or assignment method differs from the expected result.
 The checked annotations are tied to the database version shown by setup. Update
 SSUextract when installing a later database release so the example contract and
-database remain in sync.
+database agree.
+
+With database v1.0.2, all 10 query taxonomy calls are `Unclassified`. This
+release has no runtime calibration. The summary keeps the matched reference
+labels in `reference_taxonomy`; these labels do not establish the query's
+taxonomy. See [taxonomy assignment](../explanation/taxonomy.md) for the
+evidence rules.
 
 The run creates `results/smoke/`. Check the summary and ranked-hit files:
 
@@ -84,8 +90,9 @@ cut -f1,4-5,7,9-10,17,19-20,28 results/smoke/blast_top_hits.tsv
 find results/smoke/extracted -name '*.fna' -size +0 -print
 ```
 
-Each FASTA record spans the complete 1-based inclusive interval reported by
-Infernal. Reverse-strand hits are reverse-complemented after interval extraction.
+Each FASTA record uses 1-based inclusive contig coordinates. Joined fragments
+also report their component intervals in the hit table. Reverse-strand records
+contain the reverse complement of the extracted interval.
 
 To use other FASTA files, continue with
 [run assembled genomes or metagenomes](../how-to/run-assemblies.md). See the

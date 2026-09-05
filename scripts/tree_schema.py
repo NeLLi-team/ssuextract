@@ -20,6 +20,7 @@ REFERENCE_FIELDS = [
     "blast_length",
     "blast_evalue",
     "blast_bitscore",
+    "taxonomy_alternatives",
 ]
 
 TREE_ASSIGNMENT_FIELDS = [
@@ -44,6 +45,13 @@ TREE_ASSIGNMENT_FIELDS = [
     "tree_nearest_distance",
     "tree_query_edge_support",
     "tree_inference_model",
+    "tree_route_blast_taxonomy",
+    "tree_route_blast_taxonomy_source",
+    "tree_route_blast_taxonomy_domain",
+    "tree_route_blast_compartment",
+    "tree_route_blast_assignment_method",
+    "tree_route_blast_candidate_taxonomy",
+    "tree_taxonomy_alternatives",
 ]
 
 TREE_NEIGHBOR_FIELDS = [

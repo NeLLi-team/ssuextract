@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping, Sequence
 
@@ -149,7 +150,12 @@ def calibration_provenance(path: str | Path) -> dict[str, object]:
     return {
         "sha256": source_sha256,
         "schema_version": calibration["schema_version"],
+        "status": calibration["status"],
+        "calibration_use_case": calibration["calibration_use_case"],
+        "stratum_basis": calibration["stratum_basis"],
+        "classification_policy": calibration["classification_policy"],
         "rank_caps": calibration["rank_caps"],
+        "rank_rules": calibration.get("rank_rules", {}),
         "strata": calibration["strata"],
         "curated_profile": curated_profile,
     }
@@ -273,7 +279,7 @@ def _candidate_strata(marker: str, outcome: Mapping[str, object]) -> list[str]:
     if len(domains) != 1:
         raise builder.BuildError("calibration-gated IMG outcome lacks one candidate domain")
     domain = next(iter(domains))
-    return [f"{marker}|{source}|{domain}" for source in sorted(sources)]
+    return list(classifier.calibration_stratum_keys(marker, sources, domain))
 
 
 def validate_outcome_calibration(
@@ -287,30 +293,110 @@ def validate_outcome_calibration(
         raise builder.BuildError("IMG outcome lacks a cluster ID or centroid name")
     status = outcome.get("classification_status")
     reason = outcome.get("reason")
-    if status != "classified" and reason != "calibration_stratum_failed":
+    gated_reasons = {
+        "calibration_stratum_failed",
+        "calibration_stratum_missing",
+        "calibration_identity_below_domain",
+    }
+    if status != "classified" and reason not in gated_reasons:
         return
     required_keys = _candidate_strata(marker, outcome)
     strata = calibration["strata"]
     missing = [key for key in required_keys if key not in strata]
     if missing:
-        raise builder.BuildError(
-            "IMG outcome requires missing calibration strata: " + ", ".join(missing)
-        )
+        if (
+            status == "unclassified"
+            and reason == "calibration_stratum_missing"
+            and outcome.get("missing_calibration_strata") == missing
+        ):
+            return
+        raise builder.BuildError("IMG outcome has inconsistent missing calibration strata")
     failed = [
         {"key": key, "reason": strata[key]["reason"]}
         for key in required_keys
         if strata[key]["status"] == "failed"
     ]
+    if failed:
+        if (
+            status == "unclassified"
+            and reason == "calibration_stratum_failed"
+            and _canonical_json(outcome.get("failed_calibration_strata"))
+            == _canonical_json(failed)
+        ):
+            return
+        if status == "classified":
+            raise builder.BuildError("classified IMG outcome requires a failed stratum")
+        raise builder.BuildError("failed IMG calibration outcome has inconsistent evidence")
+
+    rank_rules = calibration.get("rank_rules", {})
+    relevant_rules = {key: rank_rules.get(key, []) for key in required_keys}
+    minimum_identity: Decimal | None = None
+    if any(relevant_rules.values()):
+        try:
+            minimum_identity = min(
+                Decimal(str(candidate["percent_identity"]))
+                for candidate in outcome["candidates"]
+            )
+        except (InvalidOperation, KeyError, TypeError, ValueError) as error:
+            raise builder.BuildError(
+                "IMG outcome has invalid candidate identity evidence"
+            ) from error
+    route_caps = []
+    for key in required_keys:
+        route_cap = int(strata[key]["rank_cap"])
+        rules = relevant_rules[key]
+        if rules:
+            assert minimum_identity is not None
+            route_cap = -1
+            for rule in rules:
+                if minimum_identity < Decimal(str(rule["min_candidate_identity"])):
+                    break
+                route_cap = int(rule["rank_index"])
+        route_caps.append(route_cap)
+    if min(route_caps) < 0:
+        try:
+            reported_minimum = Decimal(str(outcome.get("minimum_candidate_identity")))
+        except InvalidOperation:
+            reported_minimum = None
+        if (
+            status == "unclassified"
+            and reason == "calibration_identity_below_domain"
+            and outcome.get("required_calibration_strata") == required_keys
+            and reported_minimum == minimum_identity
+        ):
+            return
+        raise builder.BuildError("IMG outcome violates calibration identity rules")
     if status == "classified":
         if reason != "":
             raise builder.BuildError("classified IMG outcome has a non-empty reason")
-        if failed:
-            raise builder.BuildError("classified IMG outcome requires a failed stratum")
-        expected_cap = min(strata[key]["rank_cap"] for key in required_keys)
+        expected_cap = min(route_caps)
         if type(outcome.get("calibration_rank_cap")) is not int or outcome.get(
             "calibration_rank_cap"
         ) != expected_cap:
             raise builder.BuildError("classified IMG outcome has wrong calibration rank cap")
+        if any(relevant_rules.values()):
+            expected_threshold = max(
+                Decimal(
+                    str(relevant_rules[key][min(expected_cap, len(relevant_rules[key]) - 1)][
+                        "min_candidate_identity"
+                    ])
+                )
+                for key in required_keys
+                if relevant_rules[key]
+            )
+            try:
+                reported_minimum = Decimal(
+                    str(outcome.get("calibration_min_candidate_identity"))
+                )
+                reported_threshold = Decimal(
+                    str(outcome.get("calibration_identity_threshold"))
+                )
+            except InvalidOperation:
+                reported_minimum = reported_threshold = None
+            if reported_minimum != minimum_identity or reported_threshold != expected_threshold:
+                raise builder.BuildError(
+                    "classified IMG outcome has wrong calibration identity evidence"
+                )
         if (
             type(outcome.get("propagation_rank_cap")) is not int
             or outcome.get("propagation_rank_cap") != 0
@@ -332,9 +418,7 @@ def validate_outcome_calibration(
                 "classified IMG outcome has inconsistent centroid taxonomy"
             )
         return
-    evidence = outcome.get("failed_calibration_strata")
-    if _canonical_json(evidence) != _canonical_json(failed) or not failed:
-        raise builder.BuildError("failed IMG calibration outcome has inconsistent evidence")
+    raise builder.BuildError("IMG calibration outcome has an inconsistent reason")
 
 
 def _source_paths(

@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.2.2] - 2026-09-04
+
+### Fixed
+
+- Limit fragment joins to nearby, ordered model spans. Apply the minimum-length
+  filter to supported bases, and report model coverage and fragment coordinates.
+- Bind resumed tasks to database contents and runtime code. Record these hashes
+  with the search policy and target limit in run provenance.
+- Require query coverage and candidate agreement for taxonomy calls. Report
+  reference labels and supported query assignments in separate fields.
+- Retain ambiguous and unknown nearest tree references, limit tree calls to
+  supported route taxonomy, and count successful alternate marker routes.
+- Use explicit BLASTN search settings and honor the CPU limit in tree tasks.
+- Count centroid calibration errors by predicted source and domain. Reject
+  calibration artifacts for a different policy, profile, or use case.
+- Include sample and model identifiers in extracted sequence identifiers.
+
+### Changed
+
+- Require profile-bound runtime calibration for nonexact taxonomy calls. Without
+  it, only unanimous, full-length exact matches to native references can assign
+  taxonomy. Released database profiles v1.0.2 have no runtime calibration;
+  other queries report `Unclassified` and retain reference evidence.
+- Add schema-3 calibration support with optional identity thresholds per rank.
+  Tests of fitted rules and replacement database builds remain in progress.
+- Document that model coverage does not measure genome completeness or
+  contamination. The pipeline has no dedicated chimera detector.
+
 ## [1.2.1] - 2026-07-22
 
 ### Added

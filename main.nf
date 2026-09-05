@@ -1,6 +1,8 @@
 #!/usr/bin/env nextflow
 
 import groovy.json.JsonSlurper
+import groovy.json.JsonOutput
+import java.security.MessageDigest
 
 nextflow.enable.dsl = 2
 
@@ -34,6 +36,7 @@ if ((params.tree_assignment_neighbors as int) > (params.tree_reference_count as 
 }
 validateIdentifier(params.database_profile.toString(), 'database profile')
 database_config = loadDatabaseConfig(params.database_path, params.database_profile)
+runtime_code_digest = runtimeCodeDigest()
 model_markers = loadModelMarkers(params.model_marker_map)
 tree_model_ids = params.tree_classification \
     ? loadTreeModelIds(model_markers) \
@@ -224,6 +227,7 @@ process RESOLVE_MODEL_HITS {
         .collect { "--cmsearch ${shellQuote(it)}" }
         .join(' ')
     """
+    # Runtime code SHA-256: ${runtime_code_digest}
     python3 "${projectDir}/scripts/resolve_model_hits.py" \
         ${cmsearch_arguments} \
         --output "${sample_id}.accepted-hits.tsv"
@@ -264,6 +268,7 @@ process EXTRACT_HITS {
 
     script:
     """
+    # Runtime code SHA-256: ${runtime_code_digest}
     python3 "${projectDir}/scripts/extract_hits.py" \
         --model-file "${cm_model}" \
         --fasta "${fna_file}" \
@@ -318,9 +323,16 @@ process BLAST_ANNOTATE {
         (params.max_blast_targets as int) + 1,
         params.top_hits as int
     )
+    calibration_argument = database_config.runtime_calibration \
+        ? "--runtime-calibration ${shellQuote(database_config.runtime_calibration)}" \
+        : ''
     """
+    # Database SHA-256: ${database_config.content_digest}
+    # Runtime code SHA-256: ${runtime_code_digest}
     blastn \
-        -outfmt 6 \
+        -task blastn \
+        -evalue 1e-5 \
+        -outfmt '6 std qlen slen' \
         -db ${db_prefix_argument} \
         -query "${extracted_fna}" \
         -max_target_seqs "${blast_fetch_targets}" \
@@ -333,6 +345,9 @@ process BLAST_ANNOTATE {
         --m8 "${sample_id}_${model_id}.m8" \
         ${taxonomy_argument} \
         ${source_records_argument} \
+        ${calibration_argument} \
+        --marker ${shellQuote(marker.toString())} \
+        --reference-digest "${database_config.reference_digest}" \
         --query-fasta "${extracted_fna}" \
         --top-hits "${params.top_hits}" \
         --top-hits-output "${sample_id}_${model_id}.top_hits.tsv" \
@@ -378,16 +393,23 @@ process PREPARE_TREE_TASKS {
         }
         .join(' ')
     fetch_targets = Math.max(
-        params.tree_reference_count as int,
+        Math.max(params.tree_reference_count as int, params.max_blast_targets as int),
         100
     ) + 1
     database_16s = shellQuote(databasePrefixForMarker(database_config, '16S'))
     database_18s = shellQuote(databasePrefixForMarker(database_config, '18S'))
     taxonomy_argument = shellQuote(taxonomy_file)
     source_records_argument = shellQuote(source_records_file)
+    calibration_argument = database_config.runtime_calibration \
+        ? "--runtime-calibration ${shellQuote(database_config.runtime_calibration)}" \
+        : ''
     """
+    # Database SHA-256: ${database_config.content_digest}
+    # Runtime code SHA-256: ${runtime_code_digest}
     blastn \
-        -outfmt 6 \
+        -task blastn \
+        -evalue 1e-5 \
+        -outfmt '6 std qlen slen' \
         -db ${database_16s} \
         -query "${extracted_fna}" \
         -max_target_seqs "${fetch_targets}" \
@@ -396,7 +418,9 @@ process PREPARE_TREE_TASKS {
         -out 16S.tree_route.m8
 
     blastn \
-        -outfmt 6 \
+        -task blastn \
+        -evalue 1e-5 \
+        -outfmt '6 std qlen slen' \
         -db ${database_18s} \
         -query "${extracted_fna}" \
         -max_target_seqs "${fetch_targets}" \
@@ -410,11 +434,14 @@ process PREPARE_TREE_TASKS {
         --blast 18S=18S.tree_route.m8 \
         --taxonomy-db ${taxonomy_argument} \
         --source-records-db ${source_records_argument} \
+        ${calibration_argument} \
+        --reference-digest "${database_config.reference_digest}" \
         --sample "${sample_id}" \
         --detected-model "${model_id}" \
-        --detected-marker "${marker}" \
+        --detected-marker ${shellQuote(marker.toString())} \
         ${marker_model_arguments} \
         --reference-count "${params.tree_reference_count}" \
+        --max-targets "${params.max_blast_targets}" \
         --route-hits 100 \
         --output-directory tree_inputs \
         --skipped-assignments-output "${sample_id}_${model_id}.skipped.tree_assignment.tsv"
@@ -446,6 +473,8 @@ process TREE_CLASSIFY {
     script:
     db_prefix_argument = shellQuote(db_prefix)
     """
+    # Database SHA-256: ${database_config.content_digest}
+    # Runtime code SHA-256: ${runtime_code_digest}
     mkdir "${query_key}"
     cp -R "${tree_task}/." "${query_key}/"
 
@@ -509,6 +538,7 @@ process FINALIZE_SUMMARIES {
     publishDir "${params.outdir}", mode: 'copy', pattern: 'blast_top_hits.tsv'
     publishDir "${params.outdir}", mode: 'copy', pattern: 'tree_nearest_neighbors.tsv'
     publishDir "${params.outdir}/m8", mode: 'copy', pattern: 'merged.m8'
+    publishDir "${params.outdir}", mode: 'copy', pattern: 'run_provenance.json'
 
     input:
     path(summary_files)
@@ -524,9 +554,26 @@ process FINALIZE_SUMMARIES {
     path('blast_top_hits.tsv')
     path('tree_nearest_neighbors.tsv')
     path('merged.m8')
+    path('run_provenance.json')
 
     script:
+    provenance = JsonOutput.prettyPrint(JsonOutput.toJson([
+        schema_version: 1,
+        application_version: workflow.manifest.version,
+        database_profile: params.database_profile,
+        database_version: database_config.version,
+        database_content_sha256: database_config.content_digest,
+        reference_search_contract_sha256: database_config.reference_digest,
+        database_manifest_sha256: database_config.manifest_digest,
+        runtime_code_sha256: runtime_code_digest,
+        assignment_policy: 'runtime_lca_v1',
+        max_blast_targets: params.max_blast_targets as int,
+        taxonomy_mode: params.tree_classification ? 'tree' : 'blast',
+        runtime_calibration_sha256: database_config.calibration_digest
+    ]))
     """
+    # Runtime code SHA-256: ${runtime_code_digest}
+    printf '%s\\n' ${shellQuote(provenance)} > run_provenance.json
     python3 "${projectDir}/scripts/finalize_summaries.py" \
         --summary-output cmsearch_summary.tsv \
         --category-output cmsearch_summary.tab \
@@ -566,6 +613,13 @@ def loadModelMarkers(pathValue) {
         throw new IllegalArgumentException(
             "Invalid model-marker map: expected schema_version 1 and a models object"
         )
+    }
+    config.models.each { model, marker ->
+        if (!(marker instanceof String) || !(marker in ['16S', '18S'])) {
+            throw new IllegalArgumentException(
+                "Invalid model-marker map: model '${model}' must map to 16S or 18S"
+            )
+        }
     }
     return config.models
 }
@@ -622,11 +676,21 @@ def loadDatabaseConfig(databasePath, profile) {
             }
         }
         log.warn 'Using deprecated legacy SILVA 138.1/PR2 4.12 database layout.'
+        def hashes = blastFiles(legacyPrefix).collectEntries { path ->
+            [path.name, sha256File(path)]
+        }
+        def digest = contentDigest(hashes)
         return [
             legacy: true,
             prefixes: ['16S': legacyPrefix, '18S': legacyPrefix],
             taxonomy_file: null,
-            source_records_file: null
+            source_records_file: null,
+            runtime_calibration: null,
+            calibration_digest: null,
+            manifest_digest: null,
+            content_digest: digest,
+            reference_digest: digest,
+            version: 'legacy'
         ]
     }
 
@@ -642,6 +706,11 @@ def loadDatabaseConfig(databasePath, profile) {
         )
     }
     def prefixes = manifest.blast_databases.collectEntries { marker, database ->
+        if (!(marker in ['16S', '18S'])) {
+            throw new IllegalArgumentException(
+                'Unsupported database marker: expected 16S or 18S'
+            )
+        }
         def prefix = resolveContainedPath(
             profileDir,
             database.prefix.toString(),
@@ -683,12 +752,90 @@ def loadDatabaseConfig(databasePath, profile) {
             "Missing source-record Parquet: ${sourceRecordsFile}"
         )
     }
+    def calibrationFile = manifest.runtime_calibration \
+        ? resolveContainedPath(profileDir, manifest.runtime_calibration.toString(), 'runtime calibration') \
+        : null
+    def referenceFiles = prefixes.values().collectMany { blastFiles(it) }
+    referenceFiles.add(taxonomyFile)
+    def runtimeFiles = referenceFiles + [sourceRecordsFile]
+    if (calibrationFile) {
+        runtimeFiles.add(calibrationFile)
+    }
+    def artifacts = (manifest.artifacts ?: []).collectEntries { artifact ->
+        [(artifact.path.toString()): artifact]
+    }
+    def hashes = runtimeFiles.unique().collectEntries { path ->
+        def relative = profileDir.canonicalFile.toPath().relativize(path.canonicalFile.toPath()).toString()
+        def artifact = artifacts[relative]
+        if (!artifact || !path.isFile() || path.length() != artifact.bytes) {
+            throw new IllegalArgumentException("Missing or changed database artifact: ${path}")
+        }
+        def digest = sha256File(path)
+        if (digest != artifact.sha256) {
+            throw new IllegalArgumentException("Database artifact checksum mismatch: ${path}")
+        }
+        [(relative): digest]
+    }
+    def referenceHashes = referenceFiles.collectEntries { path ->
+        def relative = profileDir.canonicalFile.toPath().relativize(path.canonicalFile.toPath()).toString()
+        [(relative): hashes[relative]]
+    }
+    def manifestDigest = sha256File(manifestFile)
+    def calibrationRelative = calibrationFile \
+        ? profileDir.canonicalFile.toPath().relativize(calibrationFile.toPath()).toString() \
+        : null
     return [
         legacy: false,
         prefixes: prefixes,
         taxonomy_file: taxonomyFile.toString(),
-        source_records_file: sourceRecordsFile.toString()
+        source_records_file: sourceRecordsFile.toString(),
+        runtime_calibration: calibrationFile?.toString(),
+        calibration_digest: calibrationRelative ? hashes[calibrationRelative] : null,
+        manifest_digest: manifestDigest,
+        content_digest: contentDigest(hashes + ['manifest.json': manifestDigest]),
+        reference_digest: contentDigest(referenceHashes),
+        version: manifest.version
     ]
+}
+
+
+def sha256File(path) {
+    def digest = MessageDigest.getInstance('SHA-256')
+    path.withInputStream { input ->
+        byte[] buffer = new byte[1024 * 1024]
+        int count
+        while ((count = input.read(buffer)) != -1) {
+            digest.update(buffer, 0, count)
+        }
+    }
+    digest.digest().encodeHex().toString()
+}
+
+
+def contentDigest(hashes) {
+    def text = hashes.keySet().sort().collect { "${it}\t${hashes[it]}\n" }.join('')
+    MessageDigest.getInstance('SHA-256').digest(text.getBytes('UTF-8')).encodeHex().toString()
+}
+
+
+def blastFiles(prefixValue) {
+    def prefix = new File(prefixValue.toString()).canonicalFile
+    (prefix.parentFile.listFiles() ?: []).findAll {
+        it.isFile() && it.name.startsWith(prefix.name + '.')
+    }.sort { it.name }
+}
+
+
+def runtimeCodeDigest() {
+    def names = [
+        'resolve_model_hits.py', 'hit_processing.py', 'extract_hits.py',
+        'annotate_hits.py', 'top_hit_reporting.py', 'runtime_taxonomy.py',
+        'taxonomy_utils.py', 'tree_reference_selection.py', 'tree_phylogeny.py',
+        'tree_schema.py', 'finalize_summaries.py'
+    ]
+    contentDigest(names.collectEntries { name ->
+        [(name): sha256File(new File("${projectDir}/scripts/${name}"))]
+    })
 }
 
 
@@ -828,14 +975,14 @@ def helpMessage() {
 
     Optional arguments:
       --outdir [path]             Output directory (default: results/[input_name])
-      --min_extract_length [int]  Minimum extracted sequence length (default: 500)
+      --min_extract_length [int]  Minimum union of hit spans in nucleotides (default: 500)
       --threads_per_job [int]     Threads per Infernal, BLAST, or cmalign task (default: 2)
-      --max_blast_targets [int]   BLAST subjects; ties at limit back off to domain (default: 500)
+      --max_blast_targets [int]   Assignment candidate limit; overflow abstains (default: 500)
       --top_hits [int]            Overall BLAST hits; assignment evidence is retained (default: 5)
       --tree_classification       Classify with a query-neighbor SSU tree
       --tree_reference_count [n]  BLAST references per tree (default: 100)
       --tree_assignment_neighbors [n]
-                                 Named tree neighbors used for taxonomy LCA (default: 5)
+                                 Nearest reference count for tree evidence (default: 5)
       --tree_trim_gap_fraction [n]
                                  Remove columns above this gap fraction (default: 0.9)
       --database_path [path]      BLAST database directory (default: resources/database)

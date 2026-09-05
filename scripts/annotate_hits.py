@@ -5,14 +5,21 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 
 import duckdb
 
 from hit_processing import HIT_FIELDS
-from taxonomy_utils import common_value as _shared_common_value
-from taxonomy_utils import lowest_common_ancestor, taxonomy_path
+from runtime_taxonomy import (
+    BlastHit,
+    RuntimeTaxonomyDecision,
+    TaxonomyRecord,
+    load_blast_hits,
+    load_runtime_calibration,
+    query_coverage,
+    resolve_runtime_taxonomy,
+)
 from tree_schema import SUMMARY_TREE_FIELDS
 from top_hit_reporting import (
     ReferenceRecord,
@@ -53,83 +60,19 @@ SUMMARY_FIELDS = [
     "reference_versions",
     "query_sequence",
     *SUMMARY_TREE_FIELDS,
+    "hit_length",
+    "model_coverage",
+    "fragment_count",
+    "component_coordinates",
+    "blast_candidate_taxonomy",
+    "reference_taxonomy",
+    "reference_taxonomy_source",
+    "reference_taxonomy_assignment_method",
+    "blast_query_coverage",
+    "assignment_candidate_count",
+    "assignment_unknown_count",
+    "assignment_candidates_truncated",
 ]
-
-
-@dataclass(frozen=True)
-class BlastHit:
-    subject: str
-    percent_identity: float
-    alignment_length: int
-    mismatches: int
-    gap_opens: int
-    query_start: int
-    query_end: int
-    subject_start: int
-    subject_end: int
-    evalue: float
-    bit_score: float
-
-
-@dataclass(frozen=True)
-class TaxonomyRecord:
-    reference_source: str
-    taxonomy: str
-    taxonomy_source: str
-    domain: str
-    compartment: str
-    assignment_method: str
-    cross_domain_conflict: bool
-    taxonomy_alternatives: str
-    centroid_names: str
-    centroid_taxonomy: str
-    centroid_taxonomy_source: str
-
-
-def _blast_rank_key(hit: BlastHit) -> tuple[float, float, int, str]:
-    return (
-        -hit.bit_score,
-        -hit.percent_identity,
-        -hit.alignment_length,
-        hit.subject,
-    )
-
-
-def load_blast_hits(m8_file: str | Path) -> dict[str, list[BlastHit]]:
-    hits_by_query: dict[str, list[BlastHit]] = {}
-    with Path(m8_file).open() as handle:
-        for line_number, raw_line in enumerate(handle, start=1):
-            line = raw_line.rstrip("\n")
-            if not line:
-                continue
-            fields = line.split("\t")
-            if len(fields) != 12:
-                raise ValueError(
-                    f"Malformed BLAST m8 row at {m8_file}:{line_number}: "
-                    f"expected 12 fields, found {len(fields)}"
-                )
-            query = fields[0]
-            hits_by_query.setdefault(query, []).append(
-                BlastHit(
-                    subject=fields[1],
-                    percent_identity=float(fields[2]),
-                    alignment_length=int(fields[3]),
-                    mismatches=int(fields[4]),
-                    gap_opens=int(fields[5]),
-                    query_start=int(fields[6]),
-                    query_end=int(fields[7]),
-                    subject_start=int(fields[8]),
-                    subject_end=int(fields[9]),
-                    evalue=float(fields[10]),
-                    bit_score=float(fields[11]),
-                )
-            )
-    for query, hits in hits_by_query.items():
-        unique_subjects: dict[str, BlastHit] = {}
-        for hit in sorted(hits, key=_blast_rank_key):
-            unique_subjects.setdefault(hit.subject, hit)
-        hits_by_query[query] = list(unique_subjects.values())
-    return hits_by_query
 
 
 def load_taxonomy_records(
@@ -230,61 +173,6 @@ def load_taxonomy_records(
     return records
 
 
-def lowest_common_taxonomy(taxonomies: list[str]) -> str:
-    paths = []
-    for taxonomy in taxonomies:
-        if not taxonomy:
-            continue
-        try:
-            paths.append(taxonomy_path(taxonomy))
-        except ValueError:
-            continue
-    if not paths:
-        return ""
-    return ";".join(lowest_common_ancestor(paths))
-
-
-def common_value(values: list[str]) -> str:
-    return _shared_common_value(values, conflict="mixed")
-
-
-def merged_taxonomy_alternatives(records: list[TaxonomyRecord]) -> str:
-    alternatives: dict[str, dict[str, str]] = {}
-    for record in records:
-        if record.taxonomy_alternatives:
-            try:
-                parsed = json.loads(record.taxonomy_alternatives)
-            except json.JSONDecodeError as error:
-                raise ValueError("Invalid taxonomy_alternatives JSON") from error
-            if not isinstance(parsed, list) or not all(
-                isinstance(alternative, dict) for alternative in parsed
-            ):
-                raise ValueError("taxonomy_alternatives must be a JSON array of objects")
-            candidates = parsed
-        elif record.taxonomy or record.domain:
-            candidates = [
-                {
-                    "taxonomy_source": record.taxonomy_source,
-                    "taxonomy": record.taxonomy,
-                    "domain": record.domain,
-                    "compartment": record.compartment,
-                    "assignment_method": record.assignment_method,
-                }
-            ]
-        else:
-            candidates = []
-        for candidate in candidates:
-            normalized = {str(key): str(value) for key, value in candidate.items()}
-            key = json.dumps(normalized, ensure_ascii=True, sort_keys=True)
-            alternatives[key] = normalized
-    return json.dumps(
-        [alternatives[key] for key in sorted(alternatives)],
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-
-
 def annotate_hits(
     hits_file: str | Path,
     m8_file: str | Path,
@@ -296,24 +184,15 @@ def annotate_hits(
     source_records_file: str | Path | None = None,
     top_hits_output: str | Path | None = None,
     top_hits: int = 5,
+    marker: str = "16S",
+    runtime_calibration: str | Path | None = None,
+    reference_digest: str = "",
 ) -> None:
     if max_targets < 1:
         raise ValueError("max_targets must be positive")
     if top_hits < 1:
         raise ValueError("top_hits must be positive")
     blast_hits = load_blast_hits(m8_file)
-    best_hits = {
-        query: sorted(
-            (hit for hit in hits if hit.bit_score == hits[0].bit_score),
-            key=lambda hit: (
-                -hit.percent_identity,
-                -hit.alignment_length,
-                hit.subject,
-            ),
-        )
-        for query, hits in blast_hits.items()
-        if hits
-    }
     taxonomy_records: dict[str, TaxonomyRecord] = {}
     reference_records: dict[str, ReferenceRecord] = {}
     subjects = {
@@ -326,6 +205,7 @@ def annotate_hits(
     if source_records_file is not None:
         reference_records = load_reference_records(source_records_file, subjects)
     query_sequences = load_query_sequences(query_fasta) if query_fasta else {}
+    calibration = load_runtime_calibration(runtime_calibration, reference_digest)
 
     with Path(hits_file).open(newline="") as hits_handle:
         reader = csv.DictReader(hits_handle, delimiter="\t")
@@ -345,6 +225,23 @@ def annotate_hits(
             "Extracted FASTA is missing hit sequence(s): " + ", ".join(missing_sequences)
         )
 
+    decisions: dict[str, RuntimeTaxonomyDecision] = {}
+    for row in hit_rows:
+        query = row["name"]
+        query_length = (
+            len(query_sequences[query])
+            if query in query_sequences
+            else int(row["length"])
+        )
+        decisions[query] = resolve_runtime_taxonomy(
+            blast_hits.get(query, ()),
+            taxonomy_records,
+            query_length=query_length,
+            marker=marker,
+            calibration=calibration,
+            max_targets=max_targets,
+        )
+
     if top_hits_output is not None:
         write_top_hits(
             top_hits_output,
@@ -354,6 +251,10 @@ def annotate_hits(
             reference_records,
             query_sequences,
             top_hits,
+            {
+                query: {hit.subject for hit in decision.candidate_hits}
+                for query, decision in decisions.items()
+            },
         )
 
     with Path(output_file).open("w", newline="") as output_handle:
@@ -365,14 +266,14 @@ def annotate_hits(
         )
         writer.writeheader()
         for row in hit_rows:
-            tied_hits = best_hits.get(row["name"], [])
-            blast_hit = tied_hits[0] if tied_hits else None
-            tied_taxonomies = [
-                taxonomy_records[hit.subject]
-                for hit in tied_hits
-                if hit.subject in taxonomy_records
-            ]
-            blast_taxonomy = (
+            query_hits = blast_hits.get(row["name"], [])
+            decision = decisions[row["name"]]
+            blast_hit = (
+                decision.candidate_hits[0]
+                if decision.candidate_hits
+                else (query_hits[0] if query_hits else None)
+            )
+            selected_taxonomy = (
                 taxonomy_records.get(blast_hit.subject) if blast_hit else None
             )
             blast_reference = (
@@ -380,55 +281,11 @@ def annotate_hits(
                 if blast_hit
                 else ReferenceRecord("", "", ())
             )
-            ties_truncated = len(tied_hits) > max_targets
-            concrete_domains = {
-                record.domain
-                for record in tied_taxonomies
-                if record.domain not in {"", "ambiguous", "Unclassified"}
-            }
-            cross_domain_ambiguity = (
-                len(concrete_domains) > 1
-                or any(
-                    record.cross_domain_conflict or record.domain == "ambiguous"
-                    for record in tied_taxonomies
-                )
-            )
-            if cross_domain_ambiguity:
-                taxonomy_domain = "ambiguous"
-                taxonomy = ""
-                compartment = "mixed"
-                assignment_method = (
-                    tied_taxonomies[0].assignment_method
-                    if len(tied_taxonomies) == 1
-                    else "cross_domain_ambiguous_equal_best"
-                )
-                taxonomy_alternatives = merged_taxonomy_alternatives(tied_taxonomies)
-            else:
-                taxonomy_domain = common_value(
-                    [record.domain for record in tied_taxonomies]
-                )
-                taxonomy = (
-                    taxonomy_domain
-                    if ties_truncated
-                    else lowest_common_taxonomy(
-                        [record.taxonomy for record in tied_taxonomies]
-                    )
-                )
-                if not taxonomy and tied_taxonomies:
-                    taxonomy = taxonomy_domain or "Unclassified"
-                compartment = "" if ties_truncated else common_value(
-                    [record.compartment for record in tied_taxonomies]
-                )
-                assignment_method = (
-                    "truncated_equal_best_lca"
-                    if ties_truncated and tied_taxonomies
-                    else common_value(
-                        [record.assignment_method for record in tied_taxonomies]
-                    )
-                )
-                taxonomy_alternatives = common_value(
-                    [record.taxonomy_alternatives for record in tied_taxonomies]
-                )
+            equal_best = [
+                hit
+                for hit in query_hits
+                if query_hits and hit.bit_score == query_hits[0].bit_score
+            ]
             writer.writerow(
                 {
                     "name": row["name"],
@@ -441,28 +298,26 @@ def annotate_hits(
                     "contig_name": row["contig_name"],
                     "blast_sseqid": blast_hit.subject if blast_hit else "",
                     "centroid_names": (
-                        blast_taxonomy.centroid_names if blast_taxonomy else ""
+                        selected_taxonomy.centroid_names if selected_taxonomy else ""
                     ),
                     "centroid_taxonomy": (
-                        blast_taxonomy.centroid_taxonomy if blast_taxonomy else ""
+                        selected_taxonomy.centroid_taxonomy if selected_taxonomy else ""
                     ),
                     "centroid_taxonomy_source": (
-                        blast_taxonomy.centroid_taxonomy_source
-                        if blast_taxonomy
+                        selected_taxonomy.centroid_taxonomy_source
+                        if selected_taxonomy
                         else ""
                     ),
                     "reference_identifiers": blast_reference.identifiers,
                     "reference_versions": blast_reference.versions,
                     "query_sequence": query_sequences.get(row["name"], ""),
                     "taxonomy_mode": "blast",
-                    "blast_taxonomy": taxonomy,
-                    "blast_taxonomy_source": common_value(
-                        [record.taxonomy_source for record in tied_taxonomies]
-                    ),
-                    "blast_taxonomy_domain": taxonomy_domain,
-                    "blast_compartment": compartment,
-                    "blast_taxonomy_assignment_method": assignment_method,
-                    "blast_taxonomy_alternatives": taxonomy_alternatives,
+                    "blast_taxonomy": decision.taxonomy,
+                    "blast_taxonomy_source": decision.taxonomy_source,
+                    "blast_taxonomy_domain": decision.domain,
+                    "blast_compartment": decision.compartment,
+                    "blast_taxonomy_assignment_method": decision.assignment_method,
+                    "blast_taxonomy_alternatives": decision.taxonomy_alternatives,
                     "blast_pident": (
                         str(round(blast_hit.percent_identity, 2)) if blast_hit else ""
                     ),
@@ -471,21 +326,59 @@ def annotate_hits(
                         format(blast_hit.bit_score, "g") if blast_hit else ""
                     ),
                     "is_assembled": row["is_assembled"],
-                    "reference_source": common_value(
-                        [record.reference_source for record in tied_taxonomies]
+                    "reference_source": (
+                        selected_taxonomy.reference_source if selected_taxonomy else ""
                     ),
-                    "taxonomy": taxonomy,
-                    "taxonomy_source": common_value(
-                        [record.taxonomy_source for record in tied_taxonomies]
-                    ),
-                    "taxonomy_domain": taxonomy_domain,
-                    "compartment": compartment,
-                    "taxonomy_assignment_method": assignment_method,
-                    "taxonomy_alternatives": taxonomy_alternatives,
-                    "blast_tied_subjects": len(tied_hits) if tied_hits else "",
+                    "taxonomy": decision.taxonomy,
+                    "taxonomy_source": decision.taxonomy_source,
+                    "taxonomy_domain": decision.domain,
+                    "compartment": decision.compartment,
+                    "taxonomy_assignment_method": decision.assignment_method,
+                    "taxonomy_alternatives": decision.taxonomy_alternatives,
+                    "blast_tied_subjects": len(equal_best) if equal_best else "",
                     "blast_ties_truncated": (
-                        str(ties_truncated).lower() if tied_hits else ""
+                        str(len(equal_best) > max_targets).lower()
+                        if equal_best
+                        else ""
                     ),
+                    "hit_length": row.get("hit_length", row["length"]),
+                    "model_coverage": row.get("model_coverage", ""),
+                    "fragment_count": row.get("fragment_count", ""),
+                    "component_coordinates": row.get(
+                        "component_coordinates", row["coordinates"]
+                    ),
+                    "blast_candidate_taxonomy": decision.candidate_taxonomy,
+                    "reference_taxonomy": (
+                        selected_taxonomy.taxonomy
+                        or selected_taxonomy.domain
+                        or "Unclassified"
+                        if selected_taxonomy
+                        else ""
+                    ),
+                    "reference_taxonomy_source": (
+                        selected_taxonomy.taxonomy_source if selected_taxonomy else ""
+                    ),
+                    "reference_taxonomy_assignment_method": (
+                        selected_taxonomy.assignment_method if selected_taxonomy else ""
+                    ),
+                    "blast_query_coverage": (
+                        format(
+                            query_coverage(
+                                blast_hit,
+                                len(query_sequences[row["name"]])
+                                if row["name"] in query_sequences
+                                else int(row["length"]),
+                            ),
+                            ".6g",
+                        )
+                        if blast_hit
+                        else ""
+                    ),
+                    "assignment_candidate_count": len(decision.candidate_hits),
+                    "assignment_unknown_count": decision.unknown_candidate_count,
+                    "assignment_candidates_truncated": str(
+                        decision.candidates_truncated
+                    ).lower(),
                 }
             )
 
@@ -522,6 +415,9 @@ def parse_args() -> argparse.Namespace:
         default=500,
         help="Policy limit; BLAST must request one additional overflow target.",
     )
+    parser.add_argument("--marker", required=True, choices=("16S", "18S"))
+    parser.add_argument("--runtime-calibration")
+    parser.add_argument("--reference-digest", required=True)
     return parser.parse_args()
 
 
@@ -537,6 +433,9 @@ def main() -> None:
         source_records_file=args.source_records_db,
         top_hits_output=args.top_hits_output,
         top_hits=args.top_hits,
+        marker=args.marker,
+        runtime_calibration=args.runtime_calibration,
+        reference_digest=args.reference_digest,
     )
 
 

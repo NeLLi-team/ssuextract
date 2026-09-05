@@ -270,6 +270,7 @@ PY
 
 cp -a "${test_dir}/database" "${test_dir}/shell-safe-database"
 python3 - "${test_dir}/shell-safe-database/curated" <<'PY'
+import hashlib
 import json
 import subprocess
 import sys
@@ -332,6 +333,14 @@ manifest["taxonomy_database"]["preferred"] = (
 manifest["taxonomy_database"]["source_records"] = (
     f"metadata/{hostile_source_records.name}"
 )
+manifest["artifacts"] = [
+    {
+        "path": path.relative_to(profile).as_posix(),
+        "bytes": path.stat().st_size,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+    for path in sorted(blast.iterdir()) + [hostile_taxonomy, hostile_source_records]
+]
 manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 PY
 
@@ -354,6 +363,45 @@ if find "${test_dir}/shell-safe-work" -type f \
     echo "Manifest-derived path executed shell syntax" >&2
     exit 1
 fi
+
+cp -a "${test_dir}/database" "${test_dir}/marker-database"
+python3 - "${test_dir}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+marker = '$(touch "' + str(root / "marker-command-ran") + '")'
+manifest_path = root / "marker-database/curated/manifest.json"
+manifest = json.loads(manifest_path.read_text())
+manifest["blast_databases"][marker] = manifest["blast_databases"].pop("16S")
+manifest_path.write_text(json.dumps(manifest) + "\n")
+(root / "invalid-marker-map.json").write_text(json.dumps({
+    "schema_version": 1, "models": {"RF00177": marker, "RF01960": "18S"},
+}) + "\n")
+PY
+
+for invalid in map manifest; do
+    database_root="${test_dir}/database"
+    expected_error="Invalid model-marker map"
+    if [[ "$invalid" == manifest ]]; then
+        database_root="${test_dir}/marker-database"
+        expected_error="Unsupported database marker"
+    fi
+    if nextflow run "${repo}/main.nf" \
+        --query "${test_dir}/query" \
+        --modeldir "${repo}/resources/models" \
+        --model_marker_map "${test_dir}/invalid-marker-map.json" \
+        --database_path "$database_root" --database_profile curated \
+        --outdir "${test_dir}/invalid-${invalid}-results" --threads_per_job 1 \
+        -work-dir "${test_dir}/invalid-${invalid}-work" \
+        >"${test_dir}/invalid-${invalid}.log" 2>&1; then
+        echo "Unsupported marker unexpectedly passed validation" >&2
+        exit 1
+    fi
+    grep -F "$expected_error" "${test_dir}/invalid-${invalid}.log"
+    test ! -e "${test_dir}/marker-command-ran"
+done
 
 cp -a "${test_dir}/database" "${test_dir}/traversal-database"
 cp \

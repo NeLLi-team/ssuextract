@@ -62,6 +62,28 @@ unavailable, or the remote release contract fails validation.
 | `tables/taxonomy_assignments.parquet` | Native and derived taxonomy evidence. |
 | `tables/img_location.parquet` | IMG taxon identifier and valid latitude/longitude values. |
 
+The optional manifest key `runtime_calibration` names a JSON file in the profile.
+That file must also appear in the artifact list with its size and SHA-256 hash.
+Runtime calibration uses schema 3, `calibration_use_case=runtime_query`,
+`classification_policy=runtime_lca_v1`, and
+`stratum_basis=predicted_candidate_source_set_and_lca_domain`. The root `status`
+must be `calibrated` when rank caps exist and `failed` when none exist.
+The positive integer `max_targets` must match the run's `--max_blast_targets`.
+Its reference digest covers the BLAST files and preferred-taxonomy table.
+Rank caps or identity rules apply to the predicted marker, source set, and domain.
+
+The schema-3 `img_centroid` calibration has a separate purpose: it limits labels
+assigned during IMG database construction. It cannot substitute for runtime
+query calibration. Released v1.0.2 profiles lack runtime calibration; nonexact
+query calls remain unclassified while reference evidence stays available.
+
+Centroid calibration can supply optional `rank_rules` for each predicted source
+and domain. Rules specify consecutive ranks from domain to the rank cap and
+nondecreasing minimum candidate identities. Every source route must pass. The
+classifier uses the lowest cap and highest required identity across those
+routes. Applying corrected centroid calibration to stored IMG labels requires a
+new profile build.
+
 Raw source FASTA files, source project descriptions, contacts, email addresses,
 comments, and cluster tables are not distributed in a runtime profile. The IMG
 profile retains only the centroid names required to interpret cluster-derived

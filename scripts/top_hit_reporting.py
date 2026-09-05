@@ -143,9 +143,11 @@ def select_reported_hits(
     hits: list[BlastHit],
     references: dict[str, ReferenceRecord],
     top_hits: int,
+    assignment_candidates: set[str] | None = None,
 ) -> list[tuple[int, BlastHit, str]]:
     reason_order = (
         "overall_top_n",
+        "assignment_candidate",
         "equal_best_assignment",
         "best_IMG",
         "best_PR2",
@@ -154,6 +156,8 @@ def select_reported_hits(
     reasons: dict[str, set[str]] = {}
     for hit in hits[:top_hits]:
         reasons.setdefault(hit.subject, set()).add("overall_top_n")
+    for subject in assignment_candidates or ():
+        reasons.setdefault(subject, set()).add("assignment_candidate")
     if hits:
         best_score = hits[0].bit_score
         for hit in hits:
@@ -192,6 +196,7 @@ def write_top_hits(
     reference_records: dict[str, ReferenceRecord],
     query_sequences: dict[str, str],
     top_hits: int,
+    assignment_candidates: dict[str, set[str]] | None = None,
 ) -> None:
     with Path(output_file).open("w", newline="") as output_handle:
         writer = csv.DictWriter(
@@ -205,7 +210,10 @@ def write_top_hits(
             query = row["name"]
             query_sequence = query_sequences.get(query, "")
             reported_hits = select_reported_hits(
-                blast_hits.get(query, []), reference_records, top_hits
+                blast_hits.get(query, []),
+                reference_records,
+                top_hits,
+                (assignment_candidates or {}).get(query),
             )
             for rank, hit, selection_reason in reported_hits:
                 taxonomy = taxonomy_records.get(hit.subject)

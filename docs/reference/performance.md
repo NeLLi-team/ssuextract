@@ -1,5 +1,9 @@
 # Runtime and memory by input size
 
+These measurements use the earlier workflow with BLAST's default megablast
+search and database v1.0.1. They do not measure the current explicit `blastn`
+search or runtime taxonomy checks.
+
 The benchmark uses nested subsets of the bundled assemblies containing 1, 10,
 100, or 1,000 query sequences. Each subset was run through the complete
 SSUextract workflow with both database profiles.

@@ -113,7 +113,7 @@ class ExampleOutputTests(unittest.TestCase):
         derived = next(
             row
             for row in rows
-            if row["taxonomy_assignment_method"] == "updated_reference_cluster"
+            if row["reference_taxonomy_assignment_method"] == "updated_reference_cluster"
         )
         derived["centroid_names"] = ""
         with tempfile.TemporaryDirectory() as temporary:
@@ -154,9 +154,9 @@ class ExampleOutputTests(unittest.TestCase):
         derived = next(
             row
             for row in rows
-            if row["taxonomy_assignment_method"] == "updated_reference_cluster"
+            if row["reference_taxonomy_assignment_method"] == "updated_reference_cluster"
         )
-        derived["taxonomy"] += ";Unsupported propagated lineage"
+        derived["reference_taxonomy"] += ";Unsupported propagated lineage"
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             expectations = root / "expectations.tsv"
@@ -176,10 +176,10 @@ class ExampleOutputTests(unittest.TestCase):
         prokaryotic = next(
             row
             for row in rows
-            if row["taxonomy_assignment_method"] == "updated_reference_cluster"
-            and row["taxonomy_domain"] in {"Bacteria", "Archaea"}
+            if row["reference_taxonomy_assignment_method"] == "updated_reference_cluster"
+            and row["reference_taxonomy"] in {"Bacteria", "Archaea"}
         )
-        prokaryotic["centroid_taxonomy"] = prokaryotic["taxonomy_domain"]
+        prokaryotic["centroid_taxonomy"] = prokaryotic["reference_taxonomy"]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             expectations = root / "expectations.tsv"
@@ -289,7 +289,9 @@ class ExampleOutputTests(unittest.TestCase):
             summary_fields[25:28],
             ["reference_identifiers", "reference_versions", "query_sequence"],
         )
-        self.assertEqual(summary_fields[28:], SUMMARY_TREE_FIELDS)
+        self.assertEqual(
+            summary_fields[28 : 28 + len(SUMMARY_TREE_FIELDS)], SUMMARY_TREE_FIELDS
+        )
 
     def test_ranked_hit_documentation_matches_the_output_schema(self) -> None:
         module = ast.parse(TOP_HIT_REPORTING.read_text())

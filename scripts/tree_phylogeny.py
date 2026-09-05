@@ -123,30 +123,87 @@ def _read_reference_rows(path: str | Path) -> list[dict[str, str]]:
 
 
 def _lineage(row: dict[str, str]) -> tuple[tuple[str, ...], str, str]:
-    if row["taxonomy_domain"] == "ambiguous":
+    if (
+        row["taxonomy_domain"] == "ambiguous"
+        or row["taxonomy_assignment_method"].startswith("cross_domain_ambiguous")
+    ):
         return (), "", "ambiguous"
-    candidates = [
-        (row["taxonomy"], row["taxonomy_source"], "preferred_taxonomy"),
-        (
-            row["centroid_taxonomy"],
-            row["centroid_taxonomy_source"],
-            "centroid_taxonomy",
-        ),
-    ]
-    parsed: list[tuple[tuple[str, ...], str, str]] = []
-    for value, source, basis in candidates:
-        if not value or value == "Unclassified":
-            continue
+    value = row["taxonomy"]
+    if value and value != "Unclassified":
         try:
-            parsed.append((taxonomy_path(value), source, basis))
+            return taxonomy_path(value), row["taxonomy_source"], "preferred_taxonomy"
         except ValueError:
-            continue
-    if parsed:
-        return max(parsed, key=lambda item: (len(item[0]), item[2]))
+            pass
     domain = row["taxonomy_domain"]
     if domain and domain not in {"ambiguous", "Unclassified"}:
         return (domain,), row["taxonomy_source"], "domain"
     return (), "", "unclassified"
+
+
+def _task_lineage(task: dict[str, object]) -> tuple[str, ...]:
+    taxonomy = str(task["tree_route_blast_taxonomy"])
+    if taxonomy and taxonomy != "Unclassified":
+        try:
+            return taxonomy_path(taxonomy)
+        except ValueError:
+            return ()
+    domain = str(task["tree_route_blast_taxonomy_domain"])
+    if domain and domain not in {"ambiguous", "Unclassified"}:
+        return (domain,)
+    return ()
+
+
+def _merged_alternatives(
+    task: dict[str, object], basis: list[tuple[object, ...]]
+) -> str:
+    alternatives: dict[str, dict[str, str]] = {}
+    route = {
+        "taxonomy": str(task.get("tree_route_blast_taxonomy", "")),
+        "taxonomy_source": str(task.get("tree_route_blast_taxonomy_source", "")),
+        "domain": str(task.get("tree_route_blast_taxonomy_domain", "")),
+        "compartment": str(task.get("tree_route_blast_compartment", "")),
+        "assignment_method": str(
+            task.get("tree_route_blast_assignment_method", "")
+        ),
+    }
+    encoded_values = [str(task.get("tree_route_blast_taxonomy_alternatives", ""))]
+    if not encoded_values[0] and (route["taxonomy"] or route["domain"]):
+        normalized = {key: value for key, value in route.items() if value}
+        alternatives[json.dumps(normalized, sort_keys=True)] = normalized
+    for neighbor in basis:
+        row = neighbor[3]
+        encoded = str(row.get("taxonomy_alternatives", ""))
+        encoded_values.append(encoded)
+        if not encoded and (row.get("taxonomy") or row.get("taxonomy_domain")):
+            normalized = {
+                "taxonomy": str(row.get("taxonomy", "")),
+                "taxonomy_source": str(row.get("taxonomy_source", "")),
+                "domain": str(row.get("taxonomy_domain", "")),
+                "compartment": str(row.get("compartment", "")),
+                "assignment_method": str(
+                    row.get("taxonomy_assignment_method", "")
+                ),
+            }
+            normalized = {key: value for key, value in normalized.items() if value}
+            alternatives[json.dumps(normalized, sort_keys=True)] = normalized
+    for encoded in encoded_values:
+        if not encoded:
+            continue
+        try:
+            parsed = json.loads(encoded)
+        except json.JSONDecodeError as error:
+            raise ValueError("Invalid tree taxonomy alternatives JSON") from error
+        if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
+            raise ValueError("Tree taxonomy alternatives must be a JSON array of objects")
+        for item in parsed:
+            normalized = {str(key): str(value) for key, value in item.items()}
+            alternatives[json.dumps(normalized, sort_keys=True)] = normalized
+    return json.dumps(
+        [alternatives[key] for key in sorted(alternatives)],
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def _format_number(value: float | None) -> str:
@@ -170,7 +227,7 @@ def classify_tree(
     from ete4 import Tree
 
     task = json.loads(Path(task_file).read_text())
-    if task.get("schema_version") != 1:
+    if task.get("schema_version") != 2:
         raise ValueError("Unsupported tree-task schema")
     reference_rows = _read_reference_rows(references_file)
     by_leaf = {row["leaf_id"]: row for row in reference_rows}
@@ -199,13 +256,12 @@ def classify_tree(
             )
         )
     neighbors.sort(key=lambda item: (item[0], item[1], item[2]))
-    informative = [neighbor for neighbor in neighbors if neighbor[4]]
-    basis = informative[:assignment_neighbors]
+    basis = neighbors[:assignment_neighbors]
     if basis:
         boundary_distance = basis[-1][0]
         basis = [
             neighbor
-            for neighbor in informative
+            for neighbor in neighbors
             if neighbor[0] < boundary_distance
             or math.isclose(
                 neighbor[0],
@@ -214,16 +270,50 @@ def classify_tree(
                 abs_tol=1e-12,
             )
         ]
-    lineage_lca = lowest_common_ancestor(neighbor[4] for neighbor in basis)
-    taxonomy = ";".join(lineage_lca) if lineage_lca else "Unclassified"
-    domain = lineage_lca[0] if lineage_lca else "Unclassified"
+    direct_lineages = [neighbor[4] for neighbor in basis if neighbor[4]]
+    route_lineage = _task_lineage(task)
+    route_domain = str(task["tree_route_blast_taxonomy_domain"])
+    route_ambiguous = route_domain == "ambiguous"
+    tree_ambiguous = any(neighbor[6] == "ambiguous" for neighbor in basis)
+    combined_lca = (
+        lowest_common_ancestor([route_lineage, *direct_lineages])
+        if route_lineage and direct_lineages
+        else route_lineage
+    )
+    cross_domain_conflict = bool(
+        route_lineage and direct_lineages and not combined_lca
+    )
+    if route_ambiguous or tree_ambiguous or cross_domain_conflict:
+        taxonomy = ""
+        domain = "ambiguous"
+        assignment_method = "tree_cross_domain_ambiguous"
+    elif not route_lineage:
+        taxonomy = "Unclassified"
+        domain = "Unclassified"
+        assignment_method = "tree_unclassified_no_supported_route"
+    else:
+        taxonomy = ";".join(combined_lca)
+        domain = combined_lca[0]
+        assignment_method = (
+            "tree_supported_route_lca" if direct_lineages else "tree_route_blast"
+        )
     taxonomy_sources = sorted(
-        {neighbor[5] for neighbor in basis if neighbor[5]}
+        {
+            str(task["tree_route_blast_taxonomy_source"]),
+            *(neighbor[5] for neighbor in basis if neighbor[5]),
+        }
+        - {""}
     )
     taxonomy_source = "|".join(taxonomy_sources)
     compartment = common_value(
-        (neighbor[3]["compartment"] for neighbor in basis), conflict="mixed"
+        [
+            str(task["tree_route_blast_compartment"]),
+            *(neighbor[3]["compartment"] for neighbor in basis if neighbor[4]),
+        ]
     )
+    if domain == "ambiguous":
+        compartment = ""
+    taxonomy_alternatives = _merged_alternatives(task, basis)
     nearest = neighbors[0]
     query_parent = query.parent
     parent_support = None if query_parent is None else query_parent.support
@@ -251,17 +341,28 @@ def classify_tree(
         "tree_taxonomy_source": taxonomy_source,
         "tree_taxonomy_domain": domain,
         "tree_compartment": compartment,
-        "tree_assignment_method": (
-            "tree_nearest_named_lca"
-            if basis
-            else "tree_unclassified_no_named_neighbors"
-        ),
+        "tree_assignment_method": assignment_method,
         "tree_basis_neighbors": str(len(basis)),
         "tree_nearest_sseqid": nearest[3]["blast_sseqid"],
         "tree_nearest_reference_identifiers": nearest[3]["reference_identifiers"],
         "tree_nearest_distance": _format_number(nearest[0]),
         "tree_query_edge_support": _format_number(edge_support),
         "tree_inference_model": inference_model,
+        "tree_route_blast_taxonomy": str(task["tree_route_blast_taxonomy"]),
+        "tree_route_blast_taxonomy_source": str(
+            task["tree_route_blast_taxonomy_source"]
+        ),
+        "tree_route_blast_taxonomy_domain": route_domain,
+        "tree_route_blast_compartment": str(
+            task["tree_route_blast_compartment"]
+        ),
+        "tree_route_blast_assignment_method": str(
+            task["tree_route_blast_assignment_method"]
+        ),
+        "tree_route_blast_candidate_taxonomy": str(
+            task["tree_route_blast_candidate_taxonomy"]
+        ),
+        "tree_taxonomy_alternatives": taxonomy_alternatives,
     }
     with Path(assignment_output).open("w", newline="") as handle:
         writer = csv.DictWriter(

@@ -23,6 +23,10 @@ HIT_FIELDS = [
     "sequence_type",
     "contig_name",
     "is_assembled",
+    "hit_length",
+    "model_coverage",
+    "fragment_count",
+    "component_coordinates",
 ]
 
 META_FIELDS = ["sample", "model"]
@@ -97,6 +101,21 @@ class ExtractionRegion:
     strand: str
     sequence_type: str
     is_assembled: bool
+    hit_length: int | None = None
+    model_coverage: float = 0.0
+    component_coordinates: tuple[tuple[int, int], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.hit_length is None:
+            object.__setattr__(self, "hit_length", self.end - self.start + 1)
+        if not self.component_coordinates:
+            object.__setattr__(
+                self, "component_coordinates", ((self.start, self.end),)
+            )
+
+    @property
+    def fragment_count(self) -> int:
+        return len(self.component_coordinates)
 
 
 @dataclass(frozen=True)
@@ -448,14 +467,34 @@ def select_model_hits(hits: Iterable[CmHit], model: CmModel) -> list[CmHit]:
     return selected
 
 
-def _simple_region(hit: CmHit) -> ExtractionRegion:
+def _union_length(intervals: Iterable[tuple[int, int]]) -> int:
+    merged: list[list[int]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return sum(end - start + 1 for start, end in merged)
+
+
+def _region_from_hits(hits: Sequence[CmHit], model_length: int) -> ExtractionRegion:
+    sequence_intervals = tuple(
+        (hit.sequence_start, hit.sequence_end) for hit in hits
+    )
+    model_support = _union_length(
+        (hit.model_start, hit.model_end) for hit in hits
+    )
+    assembled = len(hits) > 1
     return ExtractionRegion(
-        subject=hit.subject,
-        start=hit.sequence_start,
-        end=hit.sequence_end,
-        strand=hit.strand,
-        sequence_type="simple",
-        is_assembled=False,
+        subject=hits[0].subject,
+        start=min(start for start, _ in sequence_intervals),
+        end=max(end for _, end in sequence_intervals),
+        strand=hits[0].strand,
+        sequence_type="assembled" if assembled else "simple",
+        is_assembled=assembled,
+        hit_length=_union_length(sequence_intervals),
+        model_coverage=model_support / model_length,
+        component_coordinates=sequence_intervals,
     )
 
 
@@ -463,55 +502,52 @@ def _is_full_model_hit(hit: CmHit, model_length: int) -> bool:
     return hit.model_start == 1 and hit.model_end == model_length
 
 
-def _fragments_are_collinear(hits: Sequence[CmHit]) -> bool:
-    if len({hit.strand for hit in hits}) != 1:
+def _sequence_order(hit: CmHit) -> tuple[int, int]:
+    if hit.strand == "+":
+        return (hit.sequence_start, hit.sequence_end)
+    return (-hit.sequence_end, -hit.sequence_start)
+
+
+def _fragments_can_merge(left: CmHit, right: CmHit) -> bool:
+    if left.model_end >= right.model_start:
         return False
+    model_gap = right.model_start - left.model_end - 1
 
-    model_endpoints: list[tuple[int, int]] = []
-    sequence_endpoints: list[tuple[int, int]] = []
-    for index, hit in enumerate(hits):
-        start_marker = index * 2
-        end_marker = start_marker + 1
-        model_endpoints.extend(
-            [
-                (hit.model_from, start_marker),
-                (hit.model_to, end_marker),
-            ]
-        )
+    if left.strand == "+":
+        if left.sequence_end >= right.sequence_start:
+            return False
+        sequence_gap = right.sequence_start - left.sequence_end - 1
+    else:
+        if right.sequence_end >= left.sequence_start:
+            return False
+        sequence_gap = left.sequence_start - right.sequence_end - 1
+    return sequence_gap <= model_gap
 
-        if hit.strand == "+":
-            sequence_endpoints.extend(
-                [
-                    (hit.sequence_from, start_marker),
-                    (hit.sequence_to, end_marker),
-                ]
-            )
-        else:
-            sequence_endpoints.extend(
-                [
-                    (-hit.sequence_from, start_marker),
-                    (-hit.sequence_to, end_marker),
-                ]
-            )
 
-    model_positions = [position for position, _ in model_endpoints]
-    sequence_positions = [position for position, _ in sequence_endpoints]
-    if len(set(model_positions)) != len(model_positions):
-        return False
-    if len(set(sequence_positions)) != len(sequence_positions):
-        return False
-
-    model_order = [marker for _, marker in sorted(model_endpoints)]
-    sequence_order = [marker for _, marker in sorted(sequence_endpoints)]
-    return model_order == sequence_order
+def _full_hit_blocks_merge(
+    left: CmHit, right: CmHit, full_hits: Sequence[CmHit]
+) -> bool:
+    start = min(left.sequence_start, right.sequence_start)
+    end = max(left.sequence_end, right.sequence_end)
+    return any(
+        hit.sequence_start <= end and hit.sequence_end >= start for hit in full_hits
+    )
 
 
 def resolve_extraction_regions(
     hits: Iterable[CmHit], model_length: int
 ) -> list[ExtractionRegion]:
+    if model_length <= 0:
+        raise ValueError("model_length must be positive")
+
     by_subject: dict[str, list[CmHit]] = defaultdict(list)
     for hit in hits:
         if hit.included:
+            if hit.model_start < 1 or hit.model_end > model_length:
+                raise ValueError(
+                    f"Model interval for {hit.subject} is outside 1-{model_length}: "
+                    f"{hit.model_start}-{hit.model_end}"
+                )
             by_subject[hit.subject].append(hit)
 
     regions: list[ExtractionRegion] = []
@@ -519,26 +555,29 @@ def resolve_extraction_regions(
         full_hits = [
             hit for hit in subject_hits if _is_full_model_hit(hit, model_length)
         ]
-        partial_hits = [
-            hit for hit in subject_hits if not _is_full_model_hit(hit, model_length)
-        ]
+        regions.extend(_region_from_hits([hit], model_length) for hit in full_hits)
 
-        regions.extend(_simple_region(hit) for hit in full_hits)
-        if len(partial_hits) == 1:
-            regions.append(_simple_region(partial_hits[0]))
-        elif len(partial_hits) > 1 and _fragments_are_collinear(partial_hits):
-            regions.append(
-                ExtractionRegion(
-                    subject=subject,
-                    start=min(hit.sequence_start for hit in partial_hits),
-                    end=max(hit.sequence_end for hit in partial_hits),
-                    strand=partial_hits[0].strand,
-                    sequence_type="assembled",
-                    is_assembled=True,
-                )
+        for strand in ("+", "-"):
+            partial_hits = sorted(
+                (
+                    hit
+                    for hit in subject_hits
+                    if hit.strand == strand
+                    and not _is_full_model_hit(hit, model_length)
+                ),
+                key=_sequence_order,
             )
-        else:
-            regions.extend(_simple_region(hit) for hit in partial_hits)
+            current: list[CmHit] = []
+            for hit in partial_hits:
+                if current and (
+                    not _fragments_can_merge(current[-1], hit)
+                    or _full_hit_blocks_merge(current[-1], hit, full_hits)
+                ):
+                    regions.append(_region_from_hits(current, model_length))
+                    current = []
+                current.append(hit)
+            if current:
+                regions.append(_region_from_hits(current, model_length))
 
     return sorted(
         regions,
@@ -589,7 +628,7 @@ def extract_regions(
         sequence = source[region.start - 1 : region.end]
         if region.strand == "-":
             sequence = str(Seq(sequence).reverse_complement())
-        if len(sequence) >= minimum_length:
+        if region.hit_length >= minimum_length:
             extracted.append(ExtractedRecord(region=region, sequence=sequence))
     return extracted
 
@@ -605,7 +644,8 @@ def write_extraction_outputs(
     record_list = list(records)
     with Path(fasta_output).open("w") as fasta_handle:
         for record in record_list:
-            fasta_handle.write(f">{record.name}\n{record.sequence}\n")
+            output_name = f"{sample}|{model}|{record.name}"
+            fasta_handle.write(f">{output_name}\n{record.sequence}\n")
 
     with Path(hits_output).open("w", newline="") as hits_handle:
         writer = csv.DictWriter(
@@ -617,9 +657,10 @@ def write_extraction_outputs(
         writer.writeheader()
         for record in record_list:
             region = record.region
+            output_name = f"{sample}|{model}|{record.name}"
             writer.writerow(
                 {
-                    "name": record.name,
+                    "name": output_name,
                     "sample": sample,
                     "model": model,
                     "length": len(record.sequence),
@@ -628,6 +669,13 @@ def write_extraction_outputs(
                     "sequence_type": region.sequence_type,
                     "contig_name": region.subject,
                     "is_assembled": str(region.is_assembled),
+                    "hit_length": region.hit_length,
+                    "model_coverage": format(region.model_coverage, ".6g"),
+                    "fragment_count": region.fragment_count,
+                    "component_coordinates": ",".join(
+                        f"{start}-{end}"
+                        for start, end in region.component_coordinates
+                    ),
                 }
             )
 

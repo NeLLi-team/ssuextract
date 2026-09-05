@@ -74,6 +74,23 @@ def failed(reason: str = "insufficient_domain_calls") -> classifier.CalibrationS
     return classifier.CalibrationStratum("failed", None, reason)
 
 
+def calibration_document(
+    rank_caps: dict[str, int],
+    strata: dict[str, dict[str, object]],
+    rank_rules: dict[str, list[dict[str, object]]] | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": classifier.CALIBRATION_SCHEMA_VERSION,
+        "status": "complete" if rank_caps else "failed",
+        "calibration_use_case": "img_centroid",
+        "stratum_basis": "predicted_candidate_source_and_lca_domain",
+        "classification_policy": classifier.classification_policy(),
+        "rank_caps": rank_caps,
+        "rank_rules": rank_rules or {},
+        "strata": strata,
+    }
+
+
 class BlastParsingTests(unittest.TestCase):
     def test_one_hsp_per_subject_is_enforced(self) -> None:
         with self.assertRaisesRegex(ValueError, "Multiple HSPs"):
@@ -272,6 +289,55 @@ class ClassificationPolicyTests(unittest.TestCase):
         self.assertEqual(outcomes[0]["calibration_rank_cap"], 6)
         self.assertEqual(assignments[0]["taxonomy"], ";".join(path[:7]))
 
+    def test_identity_rules_require_every_candidate_source(self) -> None:
+        cluster_rows = clusters(("C1", "centroid", ["IMG_1"]))
+        path = ("Eukaryota", "TSAR", "Alveolata")
+        records = {
+            "pr2": taxonomy(path, "PR2"),
+            "silva": taxonomy(path, "SILVA", ""),
+        }
+        strata = {
+            "16S|PR2|Eukaryota": calibrated(1),
+            "16S|SILVA|Eukaryota": calibrated(0),
+        }
+        rules = {
+            "16S|PR2|Eukaryota": (
+                classifier.CalibrationRankRule(0, classifier.Decimal("95")),
+                classifier.CalibrationRankRule(1, classifier.Decimal("97")),
+            ),
+            "16S|SILVA|Eukaryota": (
+                classifier.CalibrationRankRule(0, classifier.Decimal("90")),
+            ),
+        }
+        assignments, outcomes, _ = classifier.classify_clusters(
+            cluster_rows,
+            hits(
+                ("centroid", "pr2", 96, 100, 100),
+                ("centroid", "silva", 96, 100, 100),
+            ),
+            records,
+            marker="16S",
+            calibration_strata=strata,
+            calibration_rank_rules=rules,
+        )
+        self.assertEqual(assignments[0]["taxonomy"], "Eukaryota")
+        self.assertEqual(outcomes[0]["calibration_rank_cap"], 0)
+        self.assertEqual(outcomes[0]["calibration_identity_threshold"], "95")
+
+        assignments, outcomes, _ = classifier.classify_clusters(
+            cluster_rows,
+            hits(
+                ("centroid", "pr2", 94, 100, 100),
+                ("centroid", "silva", 94, 100, 100),
+            ),
+            records,
+            marker="16S",
+            calibration_strata=strata,
+            calibration_rank_rules=rules,
+        )
+        self.assertEqual(assignments[0]["taxonomy"], "Unclassified")
+        self.assertEqual(outcomes[0]["reason"], "calibration_identity_below_domain")
+
     def test_cluster_propagation_cap_overrides_exact_species_call(self) -> None:
         cluster_rows = clusters(("C1", "centroid", ["IMG_1"]))
         species_path = EUK_PREFIX + ("Species_a",)
@@ -395,15 +461,16 @@ class ClassificationPolicyTests(unittest.TestCase):
             ],
         )
 
-    def test_missing_calibration_stratum_remains_fatal(self) -> None:
-        with self.assertRaisesRegex(ValueError, "lacks stratum.*16S\\|PR2\\|Eukaryota"):
-            classifier.classify_clusters(
-                clusters(("C1", "centroid", ["IMG_1"])),
-                hits(("centroid", "ref", 99, 100, 100)),
-                {"ref": taxonomy(("Eukaryota", "TSAR"))},
-                marker="16S",
-                calibration_strata={"16S|SILVA|Bacteria": calibrated(0)},
-            )
+    def test_missing_calibration_stratum_abstains(self) -> None:
+        assignments, outcomes, _ = classifier.classify_clusters(
+            clusters(("C1", "centroid", ["IMG_1"])),
+            hits(("centroid", "ref", 99, 100, 100)),
+            {"ref": taxonomy(("Eukaryota", "TSAR"))},
+            marker="16S",
+            calibration_strata={"16S|SILVA|Bacteria": calibrated(0)},
+        )
+        self.assertEqual(assignments[0]["taxonomy"], "Unclassified")
+        self.assertEqual(outcomes[0]["reason"], "calibration_stratum_missing")
 
     def test_no_hit_and_filtered_hit_are_explicitly_unclassified(self) -> None:
         cluster_rows = clusters(
@@ -494,10 +561,9 @@ class ClassificationPolicyTests(unittest.TestCase):
 class InputValidationTests(unittest.TestCase):
     def test_calibration_loader_accepts_an_explicit_failed_stratum(self) -> None:
         key = "16S|PR2|Eukaryota"
-        document = {
-            "schema_version": 2,
-            "rank_caps": {},
-            "strata": {
+        document = calibration_document(
+            {},
+            {
                 key: {
                     "status": "failed",
                     "rank_cap": None,
@@ -505,40 +571,131 @@ class InputValidationTests(unittest.TestCase):
                     "metrics": [{"rank": "domain", "called": 42}],
                 }
             },
-        }
+        )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "calibration.json"
             path.write_text(json.dumps(document), encoding="utf-8")
             loaded = classifier.load_calibration(path)
         self.assertEqual(loaded.rank_caps, {})
         self.assertEqual(loaded.strata[key], failed())
+        self.assertEqual(loaded.rank_rules, {})
 
-    def test_calibration_loader_rejects_invalid_schema_v2_contracts(self) -> None:
+    def test_calibration_loader_accepts_identity_rules(self) -> None:
+        key = "16S|SILVA|Bacteria"
+        document = calibration_document(
+            {key: 1},
+            {key: {"status": "calibrated", "rank_cap": 1, "reason": ""}},
+            {
+                key: [
+                    {"rank_index": 0, "min_candidate_identity": 90},
+                    {"rank_index": 1, "min_candidate_identity": 97.0},
+                ]
+            },
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "calibration.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            loaded = classifier.load_calibration(path)
+        self.assertEqual(
+            loaded.rank_rules[key],
+            (
+                classifier.CalibrationRankRule(0, classifier.Decimal("90")),
+                classifier.CalibrationRankRule(1, classifier.Decimal("97.0")),
+            ),
+        )
+
+    def test_calibration_loader_rejects_invalid_schema_v3_contracts(self) -> None:
         key = "16S|PR2|Eukaryota"
+        failed_document = calibration_document(
+            {}, {key: {"status": "failed", "rank_cap": None, "reason": "failed"}}
+        )
         invalid_documents = {
-            "old schema": {"schema_version": 1, "rank_caps": {}, "strata": {}},
+            "old schema": {**failed_document, "schema_version": 2},
+            "wrong use case": {
+                **failed_document,
+                "calibration_use_case": "runtime_query",
+            },
+            "wrong stratum basis": {
+                **failed_document,
+                "stratum_basis": "true_query_source_and_domain",
+            },
+            "wrong policy": {
+                **failed_document,
+                "classification_policy": {
+                    **classifier.classification_policy(),
+                    "min_query_coverage_percent": "79",
+                },
+            },
             "unknown status": {
-                "schema_version": 2,
-                "rank_caps": {},
+                **failed_document,
                 "strata": {
                     key: {"status": "unknown", "rank_cap": None, "reason": "failed"}
                 },
             },
             "failed with cap": {
-                "schema_version": 2,
+                **failed_document,
+                "status": "complete",
                 "rank_caps": {key: 0},
                 "strata": {
                     key: {"status": "failed", "rank_cap": 0, "reason": "failed"}
                 },
             },
             "rank caps mismatch": {
-                "schema_version": 2,
+                **failed_document,
                 "rank_caps": {},
                 "strata": {
                     key: {"status": "calibrated", "rank_cap": 0, "reason": ""}
                 },
             },
+            "wrong root status": {**failed_document, "status": "complete"},
         }
+        calibrated_document = calibration_document(
+            {key: 1},
+            {key: {"status": "calibrated", "rank_cap": 1, "reason": ""}},
+        )
+        invalid_documents.update(
+            {
+                "rule for failed stratum": {
+                    **failed_document,
+                    "rank_rules": {
+                        key: [{"rank_index": 0, "min_candidate_identity": 90}]
+                    },
+                },
+                "noncontiguous rules": {
+                    **calibrated_document,
+                    "rank_rules": {
+                        key: [
+                            {"rank_index": 0, "min_candidate_identity": 90},
+                            {"rank_index": 2, "min_candidate_identity": 95},
+                        ]
+                    },
+                },
+                "decreasing rules": {
+                    **calibrated_document,
+                    "rank_rules": {
+                        key: [
+                            {"rank_index": 0, "min_candidate_identity": 95},
+                            {"rank_index": 1, "min_candidate_identity": 90},
+                        ]
+                    },
+                },
+                "boolean threshold": {
+                    **calibrated_document,
+                    "rank_rules": {
+                        key: [
+                            {"rank_index": 0, "min_candidate_identity": True},
+                            {"rank_index": 1, "min_candidate_identity": 95},
+                        ]
+                    },
+                },
+                "rules do not reach cap": {
+                    **calibrated_document,
+                    "rank_rules": {
+                        key: [{"rank_index": 0, "min_candidate_identity": 90}]
+                    },
+                },
+            }
+        )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "calibration.json"
             for label, document in invalid_documents.items():
@@ -595,17 +752,16 @@ class OutputContractTests(unittest.TestCase):
             calibration = root / "calibration.json"
             calibration.write_text(
                 json.dumps(
-                    {
-                        "schema_version": 2,
-                        "rank_caps": {"16S|SILVA|Bacteria": 0},
-                        "strata": {
+                    calibration_document(
+                        {"16S|SILVA|Bacteria": 0},
+                        {
                             "16S|SILVA|Bacteria": {
                                 "status": "calibrated",
                                 "rank_cap": 0,
                                 "reason": "",
                             }
                         },
-                    }
+                    )
                 ),
                 encoding="utf-8",
             )
@@ -694,7 +850,7 @@ class OutputContractTests(unittest.TestCase):
                     "schema_version": 1,
                     "calibration": {
                         "sha256": classifier._file_sha256(calibration),
-                        "schema_version": 2,
+                        "schema_version": 3,
                     },
                     "marker": "16S",
                     "propagation_rank_cap": 0,

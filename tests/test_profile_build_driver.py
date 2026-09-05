@@ -13,6 +13,20 @@ sys.path.insert(0, str(REPO / "scripts"))
 import build_database_profiles as profiles
 
 
+def calibration_document(
+    rank_caps: dict[str, int], strata: dict[str, dict[str, object]]
+) -> dict[str, object]:
+    return {
+        "schema_version": profiles.classifier.CALIBRATION_SCHEMA_VERSION,
+        "status": "complete" if rank_caps else "failed",
+        "calibration_use_case": "img_centroid",
+        "stratum_basis": "predicted_candidate_source_and_lca_domain",
+        "classification_policy": profiles.classifier.classification_policy(),
+        "rank_caps": rank_caps,
+        "strata": strata,
+    }
+
+
 class ProfileBuildDriverTests(unittest.TestCase):
     def test_default_profile_version_tracks_taxonomy_policy_repair(self) -> None:
         args = profiles._parser().parse_args(
@@ -29,7 +43,7 @@ class ProfileBuildDriverTests(unittest.TestCase):
         self.assertEqual(args.version, "1.0.2")
 
     def test_search_and_classification_qc_bind_the_same_portable_provenance(self) -> None:
-        calibration = {"sha256": "a" * 64, "schema_version": 2}
+        calibration = {"sha256": "a" * 64, "schema_version": 3}
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             profile = root / "curated"
@@ -68,7 +82,7 @@ class ProfileBuildDriverTests(unittest.TestCase):
             )
             binding = {
                 "schema_version": 1,
-                "calibration": {"sha256": "a" * 64, "schema_version": 2},
+                "calibration": {"sha256": "a" * 64, "schema_version": 3},
                 "marker": "16S",
                 "propagation_rank_cap": 0,
                 "policy": profiles.classifier.classification_policy(),
@@ -118,9 +132,7 @@ class ProfileBuildDriverTests(unittest.TestCase):
             },
         }
         document = {
-            "schema_version": 2,
-            "rank_caps": {calibrated_key: 6},
-            "strata": strata,
+            **calibration_document({calibrated_key: 6}, strata),
             "curated_profile": {
                 "version": "1.0.0",
                 "manifest_sha256": "a" * 64,
@@ -131,7 +143,17 @@ class ProfileBuildDriverTests(unittest.TestCase):
             path.write_text(json.dumps(document), encoding="utf-8")
             provenance = profiles.calibration_provenance(path)
 
-        self.assertEqual(provenance["schema_version"], 2)
+        self.assertEqual(provenance["schema_version"], 3)
+        self.assertEqual(provenance["status"], "complete")
+        self.assertEqual(provenance["calibration_use_case"], "img_centroid")
+        self.assertEqual(
+            provenance["stratum_basis"],
+            "predicted_candidate_source_and_lca_domain",
+        )
+        self.assertEqual(
+            provenance["classification_policy"],
+            profiles.classifier.classification_policy(),
+        )
         self.assertEqual(provenance["rank_caps"], {calibrated_key: 6})
         self.assertEqual(provenance["strata"], strata)
         self.assertEqual(provenance["curated_profile"], document["curated_profile"])
@@ -149,6 +171,30 @@ class ProfileBuildDriverTests(unittest.TestCase):
         self.assertEqual(
             payload["failed_calibration_strata"][0]["key"], failed_key
         )
+
+    def test_build_provenance_rejects_schema_2_calibration(self) -> None:
+        document = {
+            **calibration_document(
+                {},
+                {
+                    "16S|SILVA|Bacteria": {
+                        "status": "failed",
+                        "rank_cap": None,
+                        "reason": "insufficient_domain_calls",
+                    }
+                },
+            ),
+            "schema_version": 2,
+            "curated_profile": {
+                "version": "1.0.2",
+                "manifest_sha256": "a" * 64,
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "calibration.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(Exception, "schema_version must be 3"):
+                profiles.calibration_provenance(path)
 
     def test_curated_manifest_must_match_calibration_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -190,11 +236,11 @@ class ProfileBuildDriverTests(unittest.TestCase):
     def test_classification_qc_binding_rejects_ungated_or_mismatched_runs(self) -> None:
         calibration = {
             "sha256": "a" * 64,
-            "schema_version": 2,
+            "schema_version": 3,
         }
         expected = {
             "schema_version": 1,
-            "calibration": {"sha256": "a" * 64, "schema_version": 2},
+            "calibration": {"sha256": "a" * 64, "schema_version": 3},
             "marker": "16S",
             "propagation_rank_cap": 0,
             "policy": profiles.classifier.classification_policy(),
@@ -239,7 +285,7 @@ class ProfileBuildDriverTests(unittest.TestCase):
                         **expected,
                         "calibration": {
                             "sha256": "b" * 64,
-                            "schema_version": 2,
+                            "schema_version": 3,
                         },
                     },
                 ),
@@ -383,6 +429,43 @@ class ProfileBuildDriverTests(unittest.TestCase):
             )
             self.assertEqual(len(mappings[assignments.resolve()]), 1)
             self.assertEqual(metadata["records"], 1)
+
+    def test_identity_gated_outcome_matches_calibration_rule(self) -> None:
+        key = "16S|SILVA|Bacteria"
+        outcome = {
+            "cluster_id": "cluster-1",
+            "centroid": "centroid-1",
+            "classification_status": "unclassified",
+            "reason": "calibration_identity_below_domain",
+            "candidates": [
+                {
+                    "subject": "SSU_ref",
+                    "taxonomy": "Bacteria;Firmicutes",
+                    "taxonomy_source": "SILVA",
+                    "percent_identity": "94",
+                }
+            ],
+            "required_calibration_strata": [key],
+            "minimum_candidate_identity": "94",
+        }
+        calibration = {
+            "strata": {key: {"status": "calibrated", "rank_cap": 0, "reason": ""}},
+            "rank_rules": {
+                key: [{"rank_index": 0, "min_candidate_identity": 95}]
+            },
+        }
+        profiles.validate_outcome_calibration("16S", outcome, calibration)
+        with self.assertRaisesRegex(Exception, "violates calibration identity rules"):
+            profiles.validate_outcome_calibration(
+                "16S",
+                {
+                    **outcome,
+                    "classification_status": "classified",
+                    "reason": "",
+                    "calibration_rank_cap": 0,
+                },
+                calibration,
+            )
 
     def test_source_path_resolution_uses_source_integrity_validator(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

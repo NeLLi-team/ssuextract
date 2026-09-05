@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import duckdb
@@ -27,6 +28,14 @@ from finalize_summaries import (
     write_top_hit_summary,
 )
 from hit_processing import HIT_FIELDS, META_FIELDS
+from runtime_taxonomy import (
+    STRATUM_BASIS,
+    BlastHit,
+    TaxonomyRecord,
+    load_blast_hits,
+    load_runtime_calibration,
+    resolve_runtime_taxonomy,
+)
 from top_hit_reporting import TOP_HIT_FIELDS, load_reference_records
 from tree_schema import TREE_ASSIGNMENT_FIELDS
 
@@ -109,17 +118,432 @@ def write_source_records_parquet(
     connection.close()
 
 
-class AnnotationTests(unittest.TestCase):
-    def test_lca_does_not_collapse_missing_internal_ranks(self) -> None:
-        from annotate_hits import lowest_common_taxonomy
+def taxonomy_record(
+    taxonomy: str,
+    *,
+    source: str = "PR2",
+    method: str = "native",
+    domain: str = "Eukaryota",
+) -> TaxonomyRecord:
+    return TaxonomyRecord(
+        reference_source=source,
+        taxonomy=taxonomy,
+        taxonomy_source=source,
+        domain=domain,
+        compartment="nucleus" if domain == "Eukaryota" else "",
+        assignment_method=method,
+        cross_domain_conflict=False,
+        taxonomy_alternatives="",
+        centroid_names="",
+        centroid_taxonomy="",
+        centroid_taxonomy_source="",
+    )
 
-        self.assertEqual(
-            lowest_common_taxonomy(
-                ["Bacteria;P;;OrderA", "Bacteria;P;ClassB;OrderB"]
-            ),
-            "Bacteria;P",
+
+class RuntimeTaxonomyTests(unittest.TestCase):
+    @staticmethod
+    def hit(
+        subject: str,
+        *,
+        identity: float = 100.0,
+        score: float = 100.0,
+        query_start: int = 1,
+        query_end: int = 100,
+        query_length: int | None = 100,
+        subject_length: int | None = 100,
+        mismatches: int = 0,
+        gaps: int = 0,
+    ) -> BlastHit:
+        return BlastHit(
+            subject=subject,
+            percent_identity=identity,
+            alignment_length=abs(query_end - query_start) + 1,
+            mismatches=mismatches,
+            gap_opens=gaps,
+            query_start=query_start,
+            query_end=query_end,
+            subject_start=1,
+            subject_end=abs(query_end - query_start) + 1,
+            evalue=0.0,
+            bit_score=score,
+            query_length=query_length,
+            subject_length=subject_length,
         )
 
+    def test_short_local_match_is_reference_evidence_only(self) -> None:
+        hit = self.hit(
+            "short",
+            query_end=80,
+            query_length=1500,
+            subject_length=80,
+        )
+        decision = resolve_runtime_taxonomy(
+            [hit],
+            {
+                "short": taxonomy_record(
+                    "Eukaryota;TSAR;Alveolata;Ciliophora;Oligohymenophorea;"
+                    "Peniculida;Parameciidae;Paramecium;Paramecium tetraurelia"
+                )
+            },
+            query_length=1500,
+            marker="18S",
+            calibration=None,
+            max_targets=500,
+        )
+
+        self.assertEqual(decision.taxonomy, "Unclassified")
+        self.assertEqual(decision.assignment_method, "no_eligible_blast_hits")
+        self.assertEqual(decision.candidate_hits, ())
+
+    def test_full_query_and_subject_native_match_can_assign_species(self) -> None:
+        lineage = (
+            "Eukaryota;TSAR;Alveolata;Ciliophora;Oligohymenophorea;"
+            "Peniculida;Parameciidae;Paramecium;Paramecium tetraurelia"
+        )
+        decision = resolve_runtime_taxonomy(
+            [self.hit("exact")],
+            {"exact": taxonomy_record(lineage)},
+            query_length=100,
+            marker="18S",
+            calibration=None,
+            max_targets=500,
+        )
+
+        self.assertEqual(decision.taxonomy, lineage)
+        self.assertEqual(decision.assignment_method, "exact_native_match")
+
+    def test_inconsistent_alignment_length_blocks_exact_assignment(self) -> None:
+        hit = replace(self.hit("inconsistent"), alignment_length=99)
+        decision = resolve_runtime_taxonomy(
+            [hit],
+            {"inconsistent": taxonomy_record("Eukaryota;Amoebozoa")},
+            query_length=100,
+            marker="18S",
+            calibration=None,
+            max_targets=500,
+        )
+
+        self.assertEqual(decision.taxonomy, "Unclassified")
+        self.assertEqual(decision.assignment_method, "no_runtime_calibration")
+
+    def test_legacy_blast_row_cannot_prove_an_exact_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            m8 = Path(tmp) / "legacy.m8"
+            m8.write_text("q\tref\t100\t100\t0\t0\t1\t100\t1\t100\t0\t100\n")
+            hit = load_blast_hits(m8)["q"][0]
+        decision = resolve_runtime_taxonomy(
+            [hit],
+            {"ref": taxonomy_record("Eukaryota;Amoebozoa")},
+            query_length=100,
+            marker="18S",
+            calibration=None,
+            max_targets=500,
+        )
+
+        self.assertEqual(decision.candidate_taxonomy, "Eukaryota;Amoebozoa")
+        self.assertEqual(decision.taxonomy, "Unclassified")
+        self.assertEqual(decision.assignment_method, "no_runtime_calibration")
+
+    def test_calibration_rank_rule_limits_the_selected_lineage(self) -> None:
+        key = "18S|PR2|Eukaryota"
+        payload = {
+            "schema_version": 3,
+            "calibration_use_case": "runtime_query",
+            "classification_policy": "runtime_lca_v1",
+            "stratum_basis": STRATUM_BASIS,
+            "reference_search_contract_sha256": "reference-digest",
+            "max_targets": 500,
+            "status": "calibrated",
+            "rank_caps": {key: 2},
+            "rank_rules": {
+                key: [
+                    {"rank_index": 0, "min_candidate_identity": 90.0},
+                    {"rank_index": 1, "min_candidate_identity": 95.0},
+                    {"rank_index": 2, "min_candidate_identity": 99.0},
+                ]
+            },
+            "strata": {
+                key: {"status": "calibrated", "reason": "", "rank_cap": 2}
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "calibration.json"
+            path.write_text(json.dumps(payload))
+            calibration = load_runtime_calibration(path, "reference-digest")
+        decision = resolve_runtime_taxonomy(
+            [
+                self.hit(
+                    "near",
+                    identity=97.0,
+                    mismatches=3,
+                    subject_length=101,
+                )
+            ],
+            {"near": taxonomy_record("Eukaryota;Amoebozoa;Discosea")},
+            query_length=100,
+            marker="18S",
+            calibration=calibration,
+            max_targets=500,
+        )
+
+        self.assertEqual(decision.candidate_taxonomy, "Eukaryota;Amoebozoa;Discosea")
+        self.assertEqual(decision.taxonomy, "Eukaryota;Amoebozoa")
+        self.assertEqual(decision.assignment_method, "runtime_calibrated_lca")
+
+    def test_unknown_candidate_blocks_exact_without_creating_mixed_taxonomy(self) -> None:
+        decision = resolve_runtime_taxonomy(
+            [self.hit("known"), self.hit("unknown")],
+            {
+                "known": taxonomy_record("Eukaryota;Amoebozoa"),
+                "unknown": taxonomy_record(
+                    "",
+                    source="PR2",
+                    method="unclassified",
+                    domain="Unclassified",
+                ),
+            },
+            query_length=100,
+            marker="18S",
+            calibration=None,
+            max_targets=500,
+        )
+
+        self.assertEqual(decision.candidate_taxonomy, "Eukaryota;Amoebozoa")
+        self.assertEqual(decision.taxonomy, "Unclassified")
+        self.assertEqual(decision.domain, "Unclassified")
+        self.assertEqual(decision.unknown_candidate_count, 1)
+        self.assertNotIn("mixed", decision.taxonomy)
+
+    def test_raw_overflow_hit_guards_an_incomplete_candidate_band(self) -> None:
+        decision = resolve_runtime_taxonomy(
+            [
+                self.hit("eligible", score=100.0),
+                self.hit(
+                    "short-overflow",
+                    score=99.0,
+                    query_end=79,
+                    query_length=100,
+                    subject_length=79,
+                ),
+            ],
+            {"eligible": taxonomy_record("Eukaryota;Amoebozoa")},
+            query_length=100,
+            marker="18S",
+            calibration=None,
+            max_targets=1,
+        )
+
+        self.assertTrue(decision.candidates_truncated)
+        self.assertEqual(decision.assignment_method, "candidate_set_truncated")
+        self.assertEqual(decision.taxonomy, "Unclassified")
+
+    def test_candidate_band_uses_the_best_eligible_score(self) -> None:
+        decision = resolve_runtime_taxonomy(
+            [
+                self.hit(
+                    "short-high",
+                    score=200.0,
+                    query_end=50,
+                    subject_length=50,
+                ),
+                self.hit("best-eligible", score=100.0),
+                self.hit("boundary", score=98.0),
+                self.hit("below", score=97.9),
+            ],
+            {
+                subject: taxonomy_record("Eukaryota;Amoebozoa")
+                for subject in ("short-high", "best-eligible", "boundary", "below")
+            },
+            query_length=100,
+            marker="18S",
+            calibration=None,
+            max_targets=500,
+        )
+
+        self.assertEqual(
+            [hit.subject for hit in decision.candidate_hits],
+            ["best-eligible", "boundary"],
+        )
+
+    def test_schema_two_runtime_calibration_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "calibration.json"
+            path.write_text(json.dumps({"schema_version": 2}))
+            with self.assertRaisesRegex(ValueError, "schema version 3"):
+                load_runtime_calibration(path, "reference-digest")
+
+    def test_runtime_calibration_rejects_wrong_basis_and_root_status(self) -> None:
+        key = "18S|PR2|Eukaryota"
+        payload = {
+            "schema_version": 3,
+            "calibration_use_case": "runtime_query",
+            "classification_policy": "runtime_lca_v1",
+            "stratum_basis": STRATUM_BASIS,
+            "reference_search_contract_sha256": "reference-digest",
+            "max_targets": 500,
+            "status": "calibrated",
+            "rank_caps": {key: 2},
+            "strata": {
+                key: {"status": "calibrated", "reason": "", "rank_cap": 2}
+            },
+        }
+        invalid_cases = [
+            ("stratum_basis", "true_class_source_and_domain", "stratum basis"),
+            ("status", "failed", "root status must be calibrated"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "calibration.json"
+            for field, value, message in invalid_cases:
+                with self.subTest(field=field):
+                    invalid = dict(payload)
+                    invalid[field] = value
+                    path.write_text(json.dumps(invalid))
+                    with self.assertRaisesRegex(ValueError, message):
+                        load_runtime_calibration(path, "reference-digest")
+
+            empty_caps = dict(payload)
+            empty_caps.update(status="calibrated", rank_caps={}, strata={})
+            path.write_text(json.dumps(empty_caps))
+            with self.assertRaisesRegex(ValueError, "root status must be failed"):
+                load_runtime_calibration(path, "reference-digest")
+
+            empty_caps["status"] = "failed"
+            path.write_text(json.dumps(empty_caps))
+            calibration = load_runtime_calibration(path, "reference-digest")
+            self.assertEqual(calibration.rank_caps, {})
+
+    def test_runtime_calibration_requires_a_positive_integer_max_targets(self) -> None:
+        key = "18S|PR2|Eukaryota"
+        payload = {
+            "schema_version": 3,
+            "calibration_use_case": "runtime_query",
+            "classification_policy": "runtime_lca_v1",
+            "stratum_basis": STRATUM_BASIS,
+            "reference_search_contract_sha256": "reference-digest",
+            "status": "calibrated",
+            "rank_caps": {key: 2},
+            "strata": {
+                key: {"status": "calibrated", "reason": "", "rank_cap": 2}
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "calibration.json"
+            invalid_values = [
+                ("absent", None),
+                ("null", None),
+                ("boolean", True),
+                ("zero", 0),
+                ("negative", -1),
+                ("float", 500.0),
+                ("string", "500"),
+            ]
+            for label, value in invalid_values:
+                with self.subTest(label=label):
+                    invalid = dict(payload)
+                    if label != "absent":
+                        invalid["max_targets"] = value
+                    path.write_text(json.dumps(invalid))
+                    with self.assertRaisesRegex(
+                        ValueError, "max_targets must be a positive integer"
+                    ):
+                        load_runtime_calibration(path, "reference-digest")
+
+    def test_calibrated_target_budget_controls_truncation_and_calls(self) -> None:
+        key = "16S|SILVA|Bacteria"
+        payload = {
+            "schema_version": 3,
+            "calibration_use_case": "runtime_query",
+            "classification_policy": "runtime_lca_v1",
+            "stratum_basis": STRATUM_BASIS,
+            "reference_search_contract_sha256": "reference-digest",
+            "max_targets": 5,
+            "status": "calibrated",
+            "rank_caps": {key: 0},
+            "strata": {
+                key: {"status": "calibrated", "reason": "", "rank_cap": 0}
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "calibration.json"
+            path.write_text(json.dumps(payload))
+            calibration = load_runtime_calibration(path, "reference-digest")
+        hits = [
+            self.hit(
+                f"bacterial-{index}",
+                identity=99.0,
+                mismatches=1,
+                subject_length=101,
+            )
+            for index in range(6)
+        ]
+        records = {
+            hit.subject: taxonomy_record(
+                "Bacteria;Pseudomonadota",
+                source="SILVA",
+                domain="Bacteria",
+            )
+            for hit in hits
+        }
+
+        with self.assertRaisesRegex(
+            ValueError, "max_targets differs from the calibrated value"
+        ):
+            resolve_runtime_taxonomy(
+                hits,
+                records,
+                query_length=100,
+                marker="16S",
+                calibration=calibration,
+                max_targets=6,
+            )
+
+        truncated = resolve_runtime_taxonomy(
+            hits,
+            records,
+            query_length=100,
+            marker="16S",
+            calibration=calibration,
+            max_targets=5,
+        )
+        called = resolve_runtime_taxonomy(
+            hits[:5],
+            records,
+            query_length=100,
+            marker="16S",
+            calibration=calibration,
+            max_targets=5,
+        )
+
+        self.assertTrue(truncated.candidates_truncated)
+        self.assertEqual(truncated.assignment_method, "candidate_set_truncated")
+        self.assertEqual(truncated.taxonomy, "Unclassified")
+        self.assertFalse(called.candidates_truncated)
+        self.assertEqual(called.assignment_method, "runtime_calibrated_lca")
+        self.assertEqual(called.taxonomy, "Bacteria")
+
+    def test_runtime_calibration_cannot_enable_nonexact_pr2_species(self) -> None:
+        key = "18S|PR2|Eukaryota"
+        payload = {
+            "schema_version": 3,
+            "calibration_use_case": "runtime_query",
+            "classification_policy": "runtime_lca_v1",
+            "stratum_basis": STRATUM_BASIS,
+            "reference_search_contract_sha256": "reference-digest",
+            "max_targets": 500,
+            "status": "calibrated",
+            "rank_caps": {key: 8},
+            "strata": {
+                key: {"status": "calibrated", "reason": "", "rank_cap": 8}
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "calibration.json"
+            path.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "unsupported nonexact rank"):
+                load_runtime_calibration(path, "reference-digest")
+
+
+class AnnotationTests(unittest.TestCase):
     def test_best_bitscore_is_selected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -270,10 +694,13 @@ class AnnotationTests(unittest.TestCase):
         self.assertEqual(top_rows[0]["taxonomy"], "Unclassified")
         self.assertEqual(
             top_rows[0]["selection_reason"],
-            "overall_top_n|equal_best_assignment|best_IMG",
+            "overall_top_n|assignment_candidate|equal_best_assignment|best_IMG",
         )
         self.assertIn("Echinamoebida", top_rows[0]["centroid_taxonomy"])
-        self.assertEqual(top_rows[1]["selection_reason"], "equal_best_assignment")
+        self.assertEqual(
+            top_rows[1]["selection_reason"],
+            "assignment_candidate|equal_best_assignment",
+        )
         self.assertIn("Echinamoeba", top_rows[2]["taxonomy"])
         self.assertEqual(top_rows[2]["selection_reason"], "best_PR2")
         self.assertEqual(
@@ -366,9 +793,11 @@ class AnnotationTests(unittest.TestCase):
                 row = next(csv.DictReader(handle, delimiter="\t"))
 
         self.assertEqual(row["blast_sseqid"], "SSU_a")
-        self.assertEqual(row["taxonomy"], "Eukaryota;TSAR")
-        self.assertEqual(row["taxonomy_source"], "PR2")
-        self.assertEqual(row["taxonomy_domain"], "Eukaryota")
+        self.assertEqual(row["taxonomy"], "Unclassified")
+        self.assertEqual(row["blast_candidate_taxonomy"], "Eukaryota;TSAR")
+        self.assertEqual(row["taxonomy_source"], "")
+        self.assertEqual(row["taxonomy_domain"], "Unclassified")
+        self.assertEqual(row["taxonomy_assignment_method"], "no_runtime_calibration")
         self.assertEqual(row["blast_tied_subjects"], "2")
 
     def test_manifest_database_requires_taxonomy_for_every_subject(self) -> None:
@@ -450,19 +879,27 @@ class AnnotationTests(unittest.TestCase):
             annotate_hits(hits, m8, output, taxonomy)
             with output.open(newline="") as handle:
                 result = next(csv.DictReader(handle, delimiter="\t"))
-            raw_output = output.read_text()
 
         self.assertEqual(result["blast_sseqid"], "SSU_img")
         self.assertEqual(
             result["centroid_names"],
             "IMG_centroid_1|REF_SILVA_AB123.1.1500",
         )
-        self.assertNotIn('""', raw_output)
         self.assertEqual(
             result["centroid_taxonomy"],
             "Bacteria;Bacteroidota;Bacteroidia;Flavobacteriales;Flavobacteriaceae",
         )
         self.assertEqual(result["centroid_taxonomy_source"], "SILVA")
+        self.assertEqual(result["reference_taxonomy"], "Bacteria")
+        self.assertEqual(
+            result["reference_taxonomy_assignment_method"],
+            "updated_reference_cluster",
+        )
+        self.assertEqual(result["blast_candidate_taxonomy"], "Bacteria")
+        self.assertEqual(result["blast_query_coverage"], "1")
+        self.assertEqual(result["assignment_candidate_count"], "1")
+        self.assertEqual(result["assignment_unknown_count"], "0")
+        self.assertEqual(result["assignment_candidates_truncated"], "false")
 
     def test_invalid_centroid_names_json_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -551,9 +988,10 @@ class AnnotationTests(unittest.TestCase):
             with output.open(newline="") as handle:
                 result = next(csv.DictReader(handle, delimiter="\t"))
 
-        self.assertEqual(result["taxonomy"], "Eukaryota")
+        self.assertEqual(result["taxonomy"], "Unclassified")
+        self.assertEqual(result["blast_candidate_taxonomy"], "Eukaryota;TSAR")
         self.assertEqual(result["compartment"], "")
-        self.assertEqual(result["taxonomy_assignment_method"], "truncated_equal_best_lca")
+        self.assertEqual(result["taxonomy_assignment_method"], "candidate_set_truncated")
         self.assertEqual(result["blast_ties_truncated"], "true")
 
     def test_cross_domain_subject_ambiguity_is_preserved(self) -> None:
@@ -627,10 +1065,11 @@ class AnnotationTests(unittest.TestCase):
 
         self.assertEqual(result["taxonomy_domain"], "ambiguous")
         self.assertEqual(result["taxonomy"], "")
-        self.assertEqual(result["compartment"], "mixed")
+        self.assertEqual(result["blast_candidate_taxonomy"], "")
+        self.assertEqual(result["compartment"], "")
         self.assertEqual(
             result["taxonomy_assignment_method"],
-            "cross_domain_ambiguous_equal_best",
+            "cross_domain_ambiguous_candidates",
         )
         self.assertEqual(
             {row["domain"] for row in json.loads(result["taxonomy_alternatives"])},
@@ -698,6 +1137,27 @@ class FinalSummaryTests(unittest.TestCase):
 
         self.assertEqual(lines[0], "\tBacteriaSSU\tPatescibacteriaSSU")
         self.assertEqual(lines[1], "sample\t1\t1")
+
+    def test_tree_assignment_counts_without_original_blast_subject(self) -> None:
+        row = dict.fromkeys(SUMMARY_FIELDS, "")
+        row.update(
+            name="q1",
+            sample="sample",
+            model="RF01960",
+            contig_name="contig1",
+            coordinates="1-100",
+            strand="+",
+            taxonomy="Eukaryota;Amoebozoa",
+            taxonomy_domain="Eukaryota",
+            taxonomy_mode="tree",
+        )
+        metadata = [{"sample": "sample", "model": "RF01960"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "categories.tsv"
+            write_category_summary([row], metadata, output)
+            lines = output.read_text().splitlines()
+
+        self.assertEqual(lines, ["\tEukaryotaSSU", "sample\t1"])
 
     def test_categories_use_normalized_taxonomy_and_compartment(self) -> None:
         row = dict.fromkeys(SUMMARY_FIELDS, "")
@@ -908,6 +1368,12 @@ class FinalSummaryTests(unittest.TestCase):
             tree_marker="18S",
             tree_route_decision="majority_global_top_hits",
             tree_route_18s_votes="2",
+            tree_route_blast_taxonomy="Eukaryota;Amoebozoa",
+            tree_route_blast_taxonomy_source="PR2",
+            tree_route_blast_taxonomy_domain="Eukaryota",
+            tree_route_blast_compartment="nucleus",
+            tree_route_blast_assignment_method="native",
+            tree_taxonomy_alternatives="[]",
             tree_assignment_method="tree_skipped_insufficient_references",
             tree_basis_neighbors="0",
         )
@@ -917,6 +1383,130 @@ class FinalSummaryTests(unittest.TestCase):
         self.assertEqual(merged["taxonomy_mode"], "blast")
         self.assertEqual(merged["taxonomy"], "Eukaryota;Amoebozoa")
         self.assertEqual(merged["taxonomy_assignment_method"], "native")
+        self.assertEqual(merged["compartment"], "nucleus")
+        self.assertEqual(merged["taxonomy_alternatives"], "[]")
+        self.assertEqual(
+            merged["tree_assignment_method"],
+            "tree_skipped_insufficient_references",
+        )
+
+    def test_sparse_unclassified_route_replaces_original_call(self) -> None:
+        row = dict.fromkeys(SUMMARY_FIELDS, "")
+        row.update(
+            name="query1",
+            sample="sample",
+            model="RF01960",
+            taxonomy="Eukaryota;Amoebozoa",
+            taxonomy_source="PR2",
+            taxonomy_domain="Eukaryota",
+            compartment="nucleus",
+            taxonomy_assignment_method="runtime_calibrated_lca",
+            taxonomy_alternatives='[{"taxonomy":"Eukaryota;Amoebozoa"}]',
+            taxonomy_mode="blast",
+            blast_sseqid="original-reference",
+            blast_pident="99.5",
+            blast_length="1500",
+            blast_bitscore="2500",
+            blast_taxonomy="Eukaryota;Amoebozoa",
+            blast_taxonomy_source="PR2",
+            blast_taxonomy_domain="Eukaryota",
+            blast_compartment="nucleus",
+            blast_taxonomy_assignment_method="runtime_calibrated_lca",
+            blast_taxonomy_alternatives=(
+                '[{"taxonomy":"Eukaryota;Amoebozoa"}]'
+            ),
+        )
+        assignment = dict.fromkeys(TREE_ASSIGNMENT_FIELDS, "")
+        assignment.update(
+            name="query1",
+            sample="sample",
+            model="RF01960",
+            tree_model="RF01960",
+            tree_marker="16S",
+            tree_route_decision="majority_global_top_hits",
+            tree_route_16s_votes="2",
+            tree_route_blast_taxonomy="Unclassified",
+            tree_route_blast_taxonomy_domain="Unclassified",
+            tree_route_blast_assignment_method="no_runtime_calibration",
+            tree_taxonomy_alternatives="[]",
+            tree_assignment_method="tree_skipped_insufficient_references",
+            tree_basis_neighbors="0",
+        )
+
+        merged = apply_tree_assignments([row], [assignment], "tree")[0]
+
+        self.assertEqual(merged["taxonomy_mode"], "blast")
+        self.assertEqual(merged["taxonomy"], "Unclassified")
+        self.assertEqual(merged["taxonomy_source"], "")
+        self.assertEqual(merged["taxonomy_domain"], "Unclassified")
+        self.assertEqual(merged["compartment"], "")
+        self.assertEqual(
+            merged["taxonomy_assignment_method"], "no_runtime_calibration"
+        )
+        self.assertEqual(merged["taxonomy_alternatives"], "[]")
+        self.assertEqual(merged["blast_sseqid"], "original-reference")
+        self.assertEqual(merged["blast_pident"], "99.5")
+        self.assertEqual(merged["blast_length"], "1500")
+        self.assertEqual(merged["blast_bitscore"], "2500")
+        self.assertEqual(merged["blast_taxonomy"], "Eukaryota;Amoebozoa")
+        self.assertEqual(merged["blast_taxonomy_source"], "PR2")
+        self.assertEqual(merged["blast_taxonomy_domain"], "Eukaryota")
+        self.assertEqual(merged["blast_compartment"], "nucleus")
+        self.assertEqual(
+            merged["blast_taxonomy_assignment_method"],
+            "runtime_calibrated_lca",
+        )
+        self.assertEqual(
+            merged["blast_taxonomy_alternatives"],
+            '[{"taxonomy":"Eukaryota;Amoebozoa"}]',
+        )
+
+    def test_sparse_alternate_route_ambiguity_replaces_original_call(self) -> None:
+        row = dict.fromkeys(SUMMARY_FIELDS, "")
+        row.update(
+            name="query1",
+            sample="sample",
+            model="RF01960",
+            taxonomy="Eukaryota;Amoebozoa",
+            taxonomy_source="PR2",
+            taxonomy_domain="Eukaryota",
+            compartment="nucleus",
+            taxonomy_assignment_method="runtime_calibrated_lca",
+            taxonomy_alternatives='[{"taxonomy":"Eukaryota;Amoebozoa"}]',
+            taxonomy_mode="blast",
+        )
+        alternatives = (
+            '[{"domain":"Bacteria","taxonomy":"Bacteria"},'
+            '{"domain":"Eukaryota","taxonomy":"Eukaryota"}]'
+        )
+        assignment = dict.fromkeys(TREE_ASSIGNMENT_FIELDS, "")
+        assignment.update(
+            name="query1",
+            sample="sample",
+            model="RF01960",
+            tree_model="RF01960",
+            tree_marker="18S",
+            tree_route_decision="majority_global_top_hits",
+            tree_route_18s_votes="2",
+            tree_route_blast_taxonomy_domain="ambiguous",
+            tree_route_blast_assignment_method="cross_domain_ambiguous_candidates",
+            tree_taxonomy_alternatives=alternatives,
+            tree_assignment_method="tree_skipped_insufficient_references",
+            tree_basis_neighbors="0",
+        )
+
+        merged = apply_tree_assignments([row], [assignment], "tree")[0]
+
+        self.assertEqual(merged["taxonomy_mode"], "blast")
+        self.assertEqual(merged["taxonomy"], "")
+        self.assertEqual(merged["taxonomy_source"], "")
+        self.assertEqual(merged["taxonomy_domain"], "ambiguous")
+        self.assertEqual(merged["compartment"], "")
+        self.assertEqual(
+            merged["taxonomy_assignment_method"],
+            "cross_domain_ambiguous_candidates",
+        )
+        self.assertEqual(merged["taxonomy_alternatives"], alternatives)
         self.assertEqual(
             merged["tree_assignment_method"],
             "tree_skipped_insufficient_references",
