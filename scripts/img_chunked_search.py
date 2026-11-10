@@ -187,15 +187,21 @@ def prepare_chunks(
                 "requested chunk_count differs from the existing chunk plan"
             )
         return plan
-    if directory.exists():
-        if not force and any(directory.iterdir()):
-            raise RuntimeError(f"chunk directory exists without a valid plan: {directory}")
-        if force:
-            shutil.rmtree(directory)
-    directory.mkdir(parents=True, exist_ok=True)
     records = _read_fasta_records(centroids)
     if chunk_count > len(records):
         raise ValueError("chunk_count exceeds the number of centroid records")
+    if directory.exists() and any(directory.iterdir()):
+        # --force replaces an earlier plan; it never deletes other content.
+        if not force or not plan_path.is_file():
+            raise RuntimeError(
+                f"chunk directory exists without a valid plan: {directory}"
+            )
+        if centroids.is_relative_to(directory):
+            raise RuntimeError(
+                f"centroid FASTA lies inside the chunk directory: {centroids}"
+            )
+        shutil.rmtree(directory)
+    directory.mkdir(parents=True, exist_ok=True)
     base_size, remainder = divmod(len(records), chunk_count)
     chunks: list[dict[str, object]] = []
     offset = 0

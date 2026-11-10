@@ -1,13 +1,13 @@
 import getpass
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -252,6 +252,51 @@ class ImgChunkedSearchTests(unittest.TestCase):
                 chunked.validate_plan(
                     "16S", paths["centroids"], paths["chunk_directory"]
                 )
+
+    def test_force_keeps_a_directory_without_a_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = self._fixture(Path(temporary))
+            unrelated = paths["chunk_directory"] / "unrelated.txt"
+            unrelated.parent.mkdir(parents=True, exist_ok=True)
+            unrelated.write_text("keep", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "without a valid plan"):
+                chunked.prepare_chunks(
+                    "16S", paths["centroids"], paths["chunk_directory"], 2, force=True
+                )
+
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep")
+
+    def test_force_validates_inputs_before_it_deletes_the_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = self._fixture(Path(temporary))
+            chunked.prepare_chunks(
+                "16S", paths["centroids"], paths["chunk_directory"], 2
+            )
+            plan_path = paths["chunk_directory"] / chunked.PLAN_NAME
+
+            with self.assertRaisesRegex(ValueError, "exceeds the number"):
+                chunked.prepare_chunks(
+                    "16S", paths["centroids"], paths["chunk_directory"], 6, force=True
+                )
+
+            self.assertTrue(plan_path.is_file())
+
+    def test_force_refuses_a_chunk_directory_that_holds_the_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = self._fixture(Path(temporary))
+            chunked.prepare_chunks(
+                "16S", paths["centroids"], paths["chunk_directory"], 2
+            )
+            inner_centroids = paths["chunk_directory"] / "centroids.fna"
+            shutil.copyfile(paths["centroids"], inner_centroids)
+
+            with self.assertRaisesRegex(RuntimeError, "inside the chunk directory"):
+                chunked.prepare_chunks(
+                    "16S", inner_centroids, paths["chunk_directory"], 2, force=True
+                )
+
+            self.assertTrue(inner_centroids.is_file())
 
     def test_valid_receipt_skips_and_force_reruns_chunk(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
