@@ -58,6 +58,102 @@ def select_profile(selection: str, default: str = "curated") -> subprocess.Compl
     )
 
 
+def read_config_failure(path: Path, reader: str) -> subprocess.CompletedProcess:
+    command = 'source "$1"; CONFIG_FILE="$2"; "$3"'
+    return subprocess.run(
+        ["bash", "-c", command, "bash", str(CLI), str(path), reader],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+FAKE_MANAGER = """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$CALLS"
+case "$2" in
+  validate)
+    if [[ -e "$INSTALLED" ]]; then exit 0; fi
+    echo "database-manager: $VALIDATE_MESSAGE" >&2
+    exit "$VALIDATE_STATUS" ;;
+  install) touch "$INSTALLED" ;;
+  version) echo 1.0.1 ;;
+  profiles)
+    printf 'curated\\t1.0.1\\t345.4 MiB\\tPR2 and SILVA\\n'
+    printf 'img\\t1.0.1\\t828.8 MiB\\tIMG enhanced\\n' ;;
+  check-update) printf '%s\\n' "$UPDATE_STATUS" ;;
+  *) exit 99 ;;
+esac
+"""
+VALIDATE_MESSAGE = "validation exploded"
+
+
+class Sandbox:
+    """A wrapper run with a fake database manager and a fake nextflow."""
+
+    def __init__(
+        self,
+        root: Path,
+        validate_status: int = 0,
+        installed: bool = False,
+        update_status: str = "current\t1.0.1\t1.0.1\t-",
+    ) -> None:
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        self.python = root / "fake-python"
+        self.python.write_text(FAKE_MANAGER)
+        self.python.chmod(0o755)
+        (bin_dir / "nextflow").write_text(
+            '#!/usr/bin/env bash\nprintf \'NEXTFLOW %s\\n\' "$*" >> "$CALLS"\n'
+        )
+        (bin_dir / "tput").write_text("#!/usr/bin/env bash\nexit 0\n")
+        for executable in bin_dir.iterdir():
+            executable.chmod(0o755)
+        self.calls = root / "calls.txt"
+        self.config_dir = root / "config"
+        self.config_dir.mkdir()
+        self.config = self.config_dir / "local.config"
+        self.env = {
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "TERM": "xterm-kitty",
+            "CALLS": str(self.calls),
+            "INSTALLED": str(root / "installed"),
+            "VALIDATE_STATUS": str(validate_status),
+            "VALIDATE_MESSAGE": VALIDATE_MESSAGE,
+            "UPDATE_STATUS": update_status,
+        }
+        if installed:
+            (root / "installed").touch()
+
+    def run(self, command: str, *arguments: str) -> subprocess.CompletedProcess:
+        script = (
+            'source "$1"; PYTHON="$2"; CONFIG_FILE="$3"; DEFAULT_DB_DIR=/database; '
+            "shift 3; " + command
+        )
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                script,
+                "bash",
+                str(CLI),
+                str(self.python),
+                str(self.config),
+                *arguments,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            env=self.env,
+        )
+
+    def manager_calls(self) -> list[str]:
+        if not self.calls.exists():
+            return []
+        return self.calls.read_text().splitlines()
+
+
 def write_config(path: Path, database_path: str, profile: str) -> subprocess.CompletedProcess:
     command = 'source "$1"; CONFIG_FILE="$2"; write_database_config "$3" "$4"'
     return subprocess.run(
@@ -146,13 +242,12 @@ class DatabaseConfigTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "1.2.2")
         self.assertEqual(result.stderr, "")
 
-    def test_example_default_wiring_persists_curated_and_uses_two_threads(self) -> None:
+    def test_example_default_wiring_uses_two_threads_and_saved_selection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             temporary = Path(tmp)
             first = temporary / "first.fna"
             second = temporary / "second.fna"
             fake_python = temporary / "fake-python"
-            captured_config = temporary / "config.txt"
             captured_arguments = temporary / "arguments.txt"
             first.write_text(">first\nACGT\n")
             second.write_text(">second\nTGCA\n")
@@ -170,14 +265,12 @@ class DatabaseConfigTests(unittest.TestCase):
             command = (
                 'source "$1"; '
                 'SMOKE_FASTAS=("$2" "$3"); PYTHON="$4"; '
-                'CAPTURED_CONFIG="$5"; CAPTURED_ARGUMENTS="$6"; '
+                'CAPTURED_ARGUMENTS="$5"; '
                 'resolve_database_profile() { printf "curated\\n"; }; '
                 'resolve_database_path() { printf "/database\\n"; }; '
-                'write_database_config() { printf "%s|%s\\n" "$1" "$2" '
-                '> "$CAPTURED_CONFIG"; }; '
                 'run_pipeline() { printf "%s\\n" "$@" '
                 '> "$CAPTURED_ARGUMENTS"; }; '
-                'run_smoke'
+                "run_smoke"
             )
             subprocess.run(
                 [
@@ -189,7 +282,6 @@ class DatabaseConfigTests(unittest.TestCase):
                     str(first),
                     str(second),
                     str(fake_python),
-                    str(captured_config),
                     str(captured_arguments),
                 ],
                 check=True,
@@ -197,8 +289,6 @@ class DatabaseConfigTests(unittest.TestCase):
                 text=True,
             )
             arguments = captured_arguments.read_text().splitlines()
-            config = captured_config.read_text().strip()
-        self.assertEqual(config, "/database|curated")
         self.assertEqual(arguments[arguments.index("--threads_per_job") + 1], "2")
         self.assertNotIn("--database_path", arguments)
         self.assertNotIn("--database_profile", arguments)
@@ -272,9 +362,10 @@ class DatabaseConfigTests(unittest.TestCase):
                 'source "$1"; '
                 'resolve_database_profile() { printf "curated\\n"; }; '
                 'resolve_database_path() { printf "/database\\n"; }; '
-                'write_database_config() { :; }; ensure_database() { :; }; '
-                'check_database_update() { :; }; '
-                'run_pipeline --query /queries --outdir /output'
+                "write_database_config() { :; }; ensure_database() { :; }; "
+                "require_known_profile() { :; }; "
+                "check_database_update() { :; }; "
+                "run_pipeline --query /queries --outdir /output"
             )
             result = subprocess.run(
                 ["bash", "-c", command, "bash", str(CLI)],
@@ -310,7 +401,8 @@ class DatabaseConfigTests(unittest.TestCase):
                 'source "$1"; shift; '
                 'resolve_database_profile() { printf "curated\\n"; }; '
                 'resolve_database_path() { printf "/database\\n"; }; '
-                'write_database_config() { :; }; ensure_database() { :; }; '
+                "write_database_config() { :; }; ensure_database() { :; }; "
+                "require_known_profile() { :; }; "
                 'check_database_update() { :; }; run_pipeline "$@"'
             )
             for arguments, query_path in cases:
@@ -372,8 +464,9 @@ class DatabaseConfigTests(unittest.TestCase):
                 'source "$1"; '
                 'resolve_database_profile() { printf "curated\\n"; }; '
                 'resolve_database_path() { printf "/database\\n"; }; '
-                'write_database_config() { :; }; ensure_database() { :; }; '
-                'check_database_update() { :; }; run_pipeline'
+                "write_database_config() { :; }; ensure_database() { :; }; "
+                "require_known_profile() { :; }; "
+                "check_database_update() { :; }; run_pipeline"
             )
             result = subprocess.run(
                 ["bash", "-c", command, "bash", str(CLI)],
@@ -410,11 +503,11 @@ class DatabaseConfigTests(unittest.TestCase):
             nextflow.chmod(0o755)
             command = (
                 'source "$1"; CAPTURED="$2"; '
-                'ensure_database() { :; }; '
+                "ensure_database() { :; }; require_known_profile() { :; }; "
                 'check_database_update() { printf "%s|%s\\n" "$3" "$5" '
                 '> "$CAPTURED"; }; '
-                'run_pipeline --database_path /custom --database_profile img '
-                '--query /queries --outdir /output'
+                "run_pipeline --database_path /custom --database_profile img "
+                "--query /queries --outdir /output"
             )
             subprocess.run(
                 ["bash", "-c", command, "bash", str(CLI), str(captured)],
@@ -444,10 +537,11 @@ class DatabaseConfigTests(unittest.TestCase):
                 'source "$1"; CAPTURED="$2"; '
                 'resolve_database_profile() { printf "img\\n"; }; '
                 'resolve_database_path() { printf "/managed\\n"; }; '
-                'write_database_config() { :; }; ensure_database() { :; }; '
+                "write_database_config() { :; }; ensure_database() { :; }; "
+                "require_known_profile() { :; }; "
                 'check_database_update() { printf "%s|%s\\n" "$3" "$5" '
                 '> "$CAPTURED"; }; '
-                'run_pipeline --query /queries --outdir /output'
+                "run_pipeline --query /queries --outdir /output"
             )
             subprocess.run(
                 ["bash", "-c", command, "bash", str(CLI), str(captured)],
@@ -495,8 +589,9 @@ class DatabaseConfigTests(unittest.TestCase):
                 'source "$1"; PYTHON="$2"; '
                 'resolve_database_profile() { printf "curated\\n"; }; '
                 'resolve_database_path() { printf "/database\\n"; }; '
-                'write_database_config() { :; }; ensure_database() { :; }; '
-                'run_pipeline --query /queries --outdir /output'
+                "write_database_config() { :; }; ensure_database() { :; }; "
+                "require_known_profile() { :; }; "
+                "run_pipeline --query /queries --outdir /output"
             )
             for update_status, expected_notice in cases:
                 with self.subTest(update_status=update_status):
@@ -544,17 +639,35 @@ class DatabaseConfigTests(unittest.TestCase):
             re.search(r"^pixi run (?:setup|ssuextract).*\\$", text, re.MULTILINE)
         )
 
-    def test_plain_path_may_contain_database_path(self) -> None:
+    def test_config_bare_first_line_is_not_read_as_a_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "local.config"
             config.write_text("/data/database_path/db\n")
-            self.assertEqual(read_config(config), "/data/database_path/db")
+            result = read_config_failure(config, "read_config_database_path")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
 
-    def test_legacy_nextflow_config_is_still_read(self) -> None:
+    def test_config_nextflow_params_block_is_not_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "local.config"
-            config.write_text("params {\n    database_path = '/legacy/db'\n}\n")
-            self.assertEqual(read_config(config), "/legacy/db")
+            config.write_text(
+                "params {\n    database_path = '/old/db'\n"
+                "    database_profile = 'img'\n}\n"
+            )
+            path_result = read_config_failure(config, "read_config_database_path")
+            profile_result = read_config_failure(config, "read_config_database_profile")
+        self.assertNotEqual(path_result.returncode, 0)
+        self.assertEqual(path_result.stdout, "")
+        self.assertNotEqual(profile_result.returncode, 0)
+        self.assertEqual(profile_result.stdout, "")
+
+    def test_config_with_only_a_profile_yields_no_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "local.config"
+            config.write_text("database_profile=img\n")
+            result = read_config_failure(config, "read_config_database_path")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
 
     def test_current_config_stores_path_and_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -563,12 +676,6 @@ class DatabaseConfigTests(unittest.TestCase):
                 "database_path=/data/ssuextract\ndatabase_profile=img\n"
             )
             self.assertEqual(read_config(config), "/data/ssuextract")
-            self.assertEqual(read_config_profile(config), "img")
-
-    def test_legacy_nextflow_profile_is_still_read(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config = Path(tmp) / "local.config"
-            config.write_text("params {\n    database_profile = 'img'\n}\n")
             self.assertEqual(read_config_profile(config), "img")
 
     def test_database_profile_accepts_separate_value(self) -> None:
@@ -811,10 +918,10 @@ class DatabaseConfigTests(unittest.TestCase):
             'source "$1"; '
             'resolve_setup_database_profile() { printf "img\\n"; }; '
             'resolve_database_path() { printf "/database\\n"; }; '
-            'write_database_config() { :; }; database_ready() { return 0; }; '
-            'ensure_database() { :; }; database_version() { printf "1.0.1\\n"; }; '
+            "write_database_config() { :; }; require_known_profile() { :; }; "
+            "ensure_database() { :; }; "
             'check_database_update() { printf "%s|%s|%s|%s\\n" "$@"; }; '
-            'setup_database --database_profile img --update'
+            "setup_database --database_profile img --update"
         )
         result = subprocess.run(
             ["bash", "-c", command, "bash", str(CLI)],
@@ -823,6 +930,319 @@ class DatabaseConfigTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.stdout.strip(), "/database|img|1|1")
+
+    def test_profile_selection_rejects_zero_without_error_output(self) -> None:
+        result = select_profile("0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+    def test_path_prompt_expands_home_and_stores_absolute_paths(self) -> None:
+        cases = (
+            ("~/db\n", "/home/fake/db"),
+            ("~\n", "/home/fake"),
+            ("\n", "/default"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for answer, expected in cases:
+                with self.subTest(answer=answer):
+                    result = subprocess.run(
+                        [
+                            "bash",
+                            "-c",
+                            'source "$1"; prompt_database_path /default',
+                            "bash",
+                            str(CLI),
+                        ],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        input=answer,
+                        env={**os.environ, "HOME": "/home/fake"},
+                    )
+                    self.assertEqual(result.stdout, expected + "\n")
+            relative = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"; prompt_database_path /default',
+                    "bash",
+                    str(CLI),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                input="rel/db\n",
+                cwd=tmp,
+            )
+            self.assertEqual(relative.stdout, f"{tmp}/rel/db\n")
+
+    def test_config_writer_skips_write_when_content_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp)
+            config = config_dir / "local.config"
+            config.write_text("database_path=/db\ndatabase_profile=img\n")
+            config_dir.chmod(0o555)
+            try:
+                unchanged = write_config(config, "/db", "img")
+                changed = write_config(config, "/db", "curated")
+            finally:
+                config_dir.chmod(0o755)
+        self.assertEqual(unchanged.returncode, 0)
+        self.assertNotEqual(changed.returncode, 0)
+
+
+class DatabaseInstallPolicyTests(unittest.TestCase):
+    def ensure(
+        self, validate_status: int, explicit_path: int = 0
+    ) -> tuple[subprocess.CompletedProcess, list[str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), validate_status=validate_status)
+            result = sandbox.run(f"ensure_database /database curated {explicit_path}")
+            return result, sandbox.manager_calls()
+
+    def installs(self, calls: list[str]) -> list[str]:
+        return [call for call in calls if " install " in call]
+
+    def test_validation_error_is_shown_to_the_user(self) -> None:
+        for status in (2, 3, 4):
+            with self.subTest(status=status):
+                result, _ = self.ensure(status)
+                self.assertIn(VALIDATE_MESSAGE, result.stderr)
+
+    def test_absent_profile_is_installed_without_force(self) -> None:
+        result, calls = self.ensure(3)
+        installs = self.installs(calls)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(installs), 1)
+        self.assertNotIn("--force", installs[0])
+
+    def test_absent_profile_is_installed_under_explicit_database_path(self) -> None:
+        result, calls = self.ensure(3, explicit_path=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.installs(calls)), 1)
+
+    def test_damaged_profile_is_replaced_with_force(self) -> None:
+        result, calls = self.ensure(4)
+        installs = self.installs(calls)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(installs), 1)
+        self.assertIn("--force", installs[0])
+
+    def test_damaged_profile_under_explicit_database_path_is_not_replaced(self) -> None:
+        result, calls = self.ensure(4, explicit_path=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.installs(calls), [])
+        self.assertIn("--database_path", result.stderr)
+
+    def test_other_validation_failure_stops_without_download(self) -> None:
+        result, calls = self.ensure(2)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.installs(calls), [])
+
+
+class SetupArgumentTests(unittest.TestCase):
+    def test_help_prints_usage_without_side_effects(self) -> None:
+        for flag in ("-h", "--help"):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as tmp:
+                sandbox = Sandbox(Path(tmp))
+                result = sandbox.run("setup_database " + flag)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("Usage:", result.stdout)
+                self.assertEqual(sandbox.manager_calls(), [])
+                self.assertFalse(sandbox.config.exists())
+
+    def test_invalid_arguments_fail_with_status_two_before_any_side_effect(
+        self,
+    ) -> None:
+        cases = (
+            ("--bogus",),
+            ("extra",),
+            ("--database_profile",),
+            ("--database_profile", "--update"),
+            ("--database_path",),
+            ("--database_path=",),
+            ("--database_path=-cache",),
+            ("--database_profile=-curated",),
+            ("--update=1",),
+        )
+        for arguments in cases:
+            with (
+                self.subTest(arguments=arguments),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                sandbox = Sandbox(Path(tmp))
+                result = sandbox.run('setup_database "$@"', *arguments)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(sandbox.manager_calls(), [])
+                self.assertFalse(sandbox.config.exists())
+
+    def test_documented_argument_forms_are_accepted(self) -> None:
+        cases = (
+            ("--database_profile", "img"),
+            ("--database_profile=img",),
+            ("--database_path", "/db"),
+            ("--database_path=/db",),
+            ("--database_profile", "img", "--database_path", "/db", "--update"),
+            (),
+        )
+        for arguments in cases:
+            with (
+                self.subTest(arguments=arguments),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                sandbox = Sandbox(Path(tmp), installed=True)
+                result = sandbox.run('setup_database "$@"', *arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unknown_profile_is_rejected_before_any_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), validate_status=3)
+            result = sandbox.run("setup_database --database_profile nope")
+            calls = sandbox.manager_calls()
+            self.assertFalse(sandbox.config.exists())
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("nope", result.stderr)
+        self.assertIn("curated", result.stderr)
+        self.assertIn("img", result.stderr)
+        self.assertEqual(len(calls), 1)
+        self.assertIn(" profiles", calls[0])
+
+    def test_config_is_written_after_the_database_is_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), validate_status=3)
+            result = sandbox.run("setup_database --database_profile img")
+            config = sandbox.config.read_text()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(config, "database_path=/database\ndatabase_profile=img\n")
+
+    def test_config_is_not_written_when_the_database_is_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), validate_status=2)
+            result = sandbox.run("setup_database --database_profile img")
+            config_exists = sandbox.config.exists()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(config_exists)
+
+    def test_update_fails_when_the_update_check_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(
+                Path(tmp),
+                installed=True,
+                update_status="unavailable\t1.0.1\t-\toffline",
+            )
+            forced = sandbox.run("setup_database --database_profile img --update")
+            plain = sandbox.run("setup_database --database_profile img")
+        self.assertNotEqual(forced.returncode, 0)
+        self.assertIn("offline", forced.stderr)
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertIn("offline", plain.stderr)
+
+    def test_update_is_checked_after_a_fresh_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(
+                Path(tmp),
+                validate_status=3,
+                update_status="unavailable\t1.0.1\t-\toffline",
+            )
+            forced = sandbox.run("setup_database --database_profile img --update")
+            forced_calls = sandbox.manager_calls()
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), validate_status=3)
+            plain = sandbox.run("setup_database --database_profile img")
+            plain_calls = sandbox.manager_calls()
+
+        self.assertNotEqual(forced.returncode, 0)
+        self.assertTrue(any("check-update" in call for call in forced_calls))
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertFalse(any("check-update" in call for call in plain_calls))
+
+    def test_failed_config_write_stops_setup_and_keeps_the_saved_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), installed=True)
+            sandbox.config.write_text("database_path=/old\ndatabase_profile=curated\n")
+            result = sandbox.run(
+                # The redirection still creates the temporary file.
+                'printf() { [[ "$1" == database_path=* ]] && return 1; '
+                'builtin printf "$@"; }; '
+                "setup_database --database_profile img --database_path /new"
+            )
+            saved = sandbox.config.read_text()
+            leftovers = [path.name for path in sandbox.config_dir.iterdir()]
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(saved, "database_path=/old\ndatabase_profile=curated\n")
+        self.assertEqual(leftovers, ["local.config"])
+
+
+class RunArgumentTests(unittest.TestCase):
+    def test_database_options_without_a_value_fail_with_status_two(self) -> None:
+        cases = (
+            ("--database_profile",),
+            ("--database_path",),
+            ("--database_profile", "--query", "/queries"),
+            ("--database_path", "--query", "/queries"),
+            ("--database_path=",),
+            ("--database_path=-cache",),
+            ("--database_profile=-curated",),
+        )
+        for command in ("run_pipeline", "run_smoke"):
+            for arguments in cases:
+                with (
+                    self.subTest(command=command, arguments=arguments),
+                    tempfile.TemporaryDirectory() as tmp,
+                ):
+                    sandbox = Sandbox(Path(tmp))
+                    result = sandbox.run(f'{command} "$@"', *arguments)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(sandbox.manager_calls(), [])
+
+    def test_unknown_profile_is_rejected_before_any_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), validate_status=3)
+            result = sandbox.run("run_pipeline --database_profile nope --query /q")
+            calls = sandbox.manager_calls()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("curated", result.stderr)
+        self.assertEqual(len(calls), 1)
+        self.assertIn(" profiles", calls[0])
+
+    def test_run_writes_config_only_after_the_database_is_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), validate_status=3)
+            ok = sandbox.run("run_pipeline --query /q")
+            config = sandbox.config.read_text()
+            nextflow_calls = [
+                c for c in sandbox.manager_calls() if c.startswith("NEXTFLOW")
+            ]
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(config, "database_path=/database\ndatabase_profile=curated\n")
+        self.assertEqual(len(nextflow_calls), 1)
+
+    def test_run_does_not_write_config_when_the_database_is_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), validate_status=2)
+            result = sandbox.run("run_pipeline --query /q")
+            config_exists = sandbox.config.exists()
+            nextflow_calls = [
+                c for c in sandbox.manager_calls() if c.startswith("NEXTFLOW")
+            ]
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(config_exists)
+        self.assertEqual(nextflow_calls, [])
+
+    def test_run_with_explicit_database_path_does_not_replace_a_damaged_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), validate_status=4)
+            result = sandbox.run(
+                "run_pipeline --database_path /custom --database_profile img --query /q"
+            )
+            calls = sandbox.manager_calls()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(VALIDATE_MESSAGE, result.stderr)
+        self.assertFalse(any(" install " in call for call in calls))
 
 
 if __name__ == "__main__":

@@ -39,11 +39,12 @@ from database_updates import (
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_CATALOG = REPO / "config" / "database_catalog.json"
-DEFAULT_MARKERS = REPO / "config" / "model_markers.json"
 DEFAULT_ROOT = REPO / "resources" / "database"
 MANIFEST_NAME = "manifest.json"
-LEGACY_PREFIX = "silva-138-1_pr2-4-12"
 SCHEMA_VERSION = 1
+EXIT_ERROR = 2
+EXIT_NOT_INSTALLED = 3
+EXIT_DAMAGED = 4
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -78,8 +79,12 @@ class InstallError(DatabaseError):
     """A database profile could not be installed safely."""
 
 
-class LegacyDatabaseWarning(FutureWarning):
-    """A pre-profile SSUextract database was selected."""
+class NotInstalledError(DatabaseError):
+    """The profile directory or its manifest is absent."""
+
+
+class ArtifactDamagedError(IntegrityError):
+    """A manifest artifact is missing, empty, or differs in size or SHA-256."""
 
 
 def _read_json(path: str | Path, label: str) -> object:
@@ -289,34 +294,6 @@ def load_catalog(path: str | Path = DEFAULT_CATALOG) -> dict:
     return catalog
 
 
-def _parse_marker_file(path: str | Path) -> dict[str, str]:
-    source = Path(path)
-    data = _require_object(_read_json(source, "model marker map"), "marker map", ManifestError)
-    if "models" in data:
-        if data.get("schema_version") != SCHEMA_VERSION:
-            raise ManifestError(f"marker map schema_version must be {SCHEMA_VERSION}: {source}")
-        raw_models = data.get("models")
-    else:
-        raw_models = data
-    models = _require_object(raw_models, "marker map models", ManifestError)
-    parsed: dict[str, str] = {}
-    for model, marker in models.items():
-        parsed[_require_identifier(model, "model name", ManifestError)] = _require_identifier(
-            marker, f"marker for model {model!r}", ManifestError
-        )
-    return parsed
-
-
-def load_marker_mapping(
-    default_path: str | Path = DEFAULT_MARKERS,
-    override_path: str | Path | None = None,
-) -> dict[str, str]:
-    models = _parse_marker_file(default_path)
-    if override_path is not None:
-        models.update(_parse_marker_file(override_path))
-    return models
-
-
 def load_manifest(profile_directory: str | Path, expected_profile: str | None = None) -> dict:
     directory = Path(profile_directory)
     manifest = _require_object(
@@ -412,7 +389,11 @@ def validate_profile_directory(
 ) -> dict:
     directory = Path(profile_directory).resolve()
     if not directory.is_dir():
-        raise IntegrityError(f"Database profile directory does not exist: {directory}")
+        raise NotInstalledError(
+            f"Database profile directory does not exist: {directory}"
+        )
+    if not (directory / MANIFEST_NAME).exists():
+        raise NotInstalledError(f"Database profile {directory} has no {MANIFEST_NAME}")
     manifest = load_manifest(directory, expected_profile=expected_profile)
 
     for artifact in manifest["artifacts"]:
@@ -421,18 +402,22 @@ def validate_profile_directory(
         path = listed_path.resolve()
         if not _inside(directory, path):
             raise IntegrityError(f"Artifact escapes profile directory: {relative}")
-        if not path.is_file() or listed_path.is_symlink():
-            raise IntegrityError(f"Manifest artifact is not a regular file: {relative}")
+        if listed_path.is_symlink():
+            raise IntegrityError(f"Manifest artifact is a symbolic link: {relative}")
+        if not path.is_file():
+            raise ArtifactDamagedError(
+                f"Manifest artifact is not a regular file: {relative}"
+            )
         actual_size = path.stat().st_size
         if actual_size == 0:
-            raise IntegrityError(f"Manifest artifact is empty: {relative}")
+            raise ArtifactDamagedError(f"Manifest artifact is empty: {relative}")
         if actual_size != artifact["bytes"]:
-            raise IntegrityError(
+            raise ArtifactDamagedError(
                 f"Artifact size mismatch for {relative}: expected {artifact['bytes']}, found {actual_size}"
             )
         actual_digest = _sha256(path)
         if actual_digest != artifact["sha256"]:
-            raise IntegrityError(
+            raise ArtifactDamagedError(
                 f"Artifact SHA-256 mismatch for {relative}: expected {artifact['sha256']}, "
                 f"found {actual_digest}"
             )
@@ -491,58 +476,6 @@ def check_profile_update(
         "latest": latest,
         "reason": "",
     }
-
-
-def detect_legacy_database(
-    root: str | Path, blastdbcmd: str = "blastdbcmd"
-) -> Path | None:
-    prefix = Path(root).resolve() / LEGACY_PREFIX
-    try:
-        _validate_blast_prefix(prefix, blastdbcmd)
-    except IntegrityError:
-        return None
-    return prefix
-
-
-def resolve_database(
-    root: str | Path,
-    profile: str,
-    model: str,
-    marker_override: str | Path | None = None,
-    marker_file: str | Path = DEFAULT_MARKERS,
-    blastdbcmd: str = "blastdbcmd",
-) -> Path:
-    _require_identifier(profile, "profile", ManifestError)
-    models = load_marker_mapping(marker_file, marker_override)
-    try:
-        marker = models[model]
-    except KeyError as error:
-        raise ManifestError(
-            f"Unknown covariance model {model!r}; add it to a model-marker override file"
-        ) from error
-
-    directory = Path(root).resolve() / profile
-    if directory.exists():
-        manifest = validate_profile_directory(directory, profile, blastdbcmd)
-        databases = manifest["blast_databases"]
-        if marker not in databases:
-            raise ManifestError(
-                f"Profile {profile!r} has no BLAST database for marker {marker!r}"
-            )
-        relative = _safe_relative_path(databases[marker]["prefix"], "BLAST prefix", ManifestError)
-        return directory / Path(relative)
-
-    if profile == "curated":
-        legacy = detect_legacy_database(root, blastdbcmd)
-        if legacy is not None:
-            warnings.warn(
-                "Using the legacy unprofiled SSUextract database; reinstall the curated "
-                "profile because legacy support will be removed in a future release",
-                LegacyDatabaseWarning,
-                stacklevel=2,
-            )
-            return legacy
-    raise IntegrityError(f"Database profile is not installed: {directory}")
 
 
 def download_archive(
@@ -753,7 +686,14 @@ def _install_profile_locked(
     root_path.mkdir(parents=True, exist_ok=True)
     target = root_path / profile
     if target.exists() and not replace:
-        raise InstallError(f"Database profile already exists: {target}; use --force to replace it")
+        try:
+            validate_profile_directory(target, profile, blastdbcmd)
+        except DatabaseError:
+            raise InstallError(
+                f"Database profile already exists: {target}; use --force to replace it"
+            ) from None
+        _report(progress, f"Profile {profile!r} is already installed and valid.")
+        return target
 
     _report(
         progress,
@@ -912,7 +852,9 @@ def install_profile(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Install and resolve SSUextract database profiles.")
+    parser = argparse.ArgumentParser(
+        description="Install and validate SSUextract database profiles."
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     profiles = subparsers.add_parser("profiles", help="list available database profiles")
@@ -935,14 +877,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     update.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     update.add_argument("--timeout", type=float, default=5.0)
     update.add_argument("--format", choices=("human", "tsv"), default="human")
-
-    resolve = subparsers.add_parser("resolve", help="print the BLAST prefix for a model")
-    resolve.add_argument("--root", type=Path, default=DEFAULT_ROOT)
-    resolve.add_argument("--profile", default="curated")
-    resolve.add_argument("--model", required=True)
-    resolve.add_argument("--markers", type=Path, default=DEFAULT_MARKERS)
-    resolve.add_argument("--marker-override", type=Path)
-    resolve.add_argument("--blastdbcmd", default="blastdbcmd")
 
     install = subparsers.add_parser("install", help="download and validate a profile installation")
     install.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -997,6 +931,16 @@ def _print_update_result(result: dict[str, str], profile: str, output_format: st
         )
 
 
+def _failure_status(command: str, error: Exception) -> int:
+    """Return the exit status; `validate` separates absent and damaged profiles."""
+    if command == "validate":
+        if isinstance(error, NotInstalledError):
+            return EXIT_NOT_INSTALLED
+        if isinstance(error, ArtifactDamagedError):
+            return EXIT_DAMAGED
+    return EXIT_ERROR
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     progress = _ConsoleProgress(sys.stderr)
@@ -1027,17 +971,6 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
             )
             _print_update_result(result, args.profile, args.format)
-        elif args.command == "resolve":
-            print(
-                resolve_database(
-                    args.root,
-                    args.profile,
-                    args.model,
-                    marker_override=args.marker_override,
-                    marker_file=args.markers,
-                    blastdbcmd=args.blastdbcmd,
-                )
-            )
         else:
             print(
                 install_profile(
@@ -1055,7 +988,7 @@ def main(argv: list[str] | None = None) -> int:
     except (DatabaseError, OSError) as error:
         progress.finish()
         print(f"database-manager: {error}", file=sys.stderr)
-        return 2
+        return _failure_status(args.command, error)
     finally:
         progress.finish()
     return 0

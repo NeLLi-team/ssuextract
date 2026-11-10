@@ -15,6 +15,11 @@ EXAMPLE_EXPECTATIONS="${PROJECT_DIR}/data/example/expected_annotations.tsv"
 EXAMPLE_VALIDATOR="${PROJECT_DIR}/scripts/validate_example_output.py"
 EXAMPLE_THREADS_PER_JOB=2
 PYTHON=${PYTHON:-python3}
+# Exit statuses of `database_manager.py validate` for an absent or damaged profile.
+DB_NOT_INSTALLED=3
+DB_DAMAGED=4
+# Set to 1 by ensure_database when it installed or replaced the profile.
+DATABASE_INSTALLED=0
 
 main() {
     local command="${1:-run}"
@@ -94,26 +99,61 @@ read_cli_database_path() {
     read_cli_option --database_path "$@"
 }
 
-read_config_database_path() {
-    [[ -f "${CONFIG_FILE}" ]] || return 1
-    if grep -Eq '^database_path=' "${CONFIG_FILE}"; then
-        sed -n 's/^database_path=//p' "${CONFIG_FILE}" | sed -n '1p'
-    elif grep -Eq '^[[:space:]]*database_path[[:space:]]*=' "${CONFIG_FILE}"; then
-        awk -F"'" '/^[[:space:]]*database_path[[:space:]]*=/ {print $2; exit}' "${CONFIG_FILE}"
-    else
-        sed -n '1p' "${CONFIG_FILE}"
+validate_database_options() {
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --database_profile | --database_path)
+                if [[ "$#" -lt 2 || -z "$2" || "$2" == -* ]]; then
+                    printf '%s requires a value that does not start with "-".\n' "$1" >&2
+                    return 2
+                fi
+                shift 2
+                ;;
+            --database_profile=* | --database_path=*)
+                if [[ -z "${1#*=}" || "${1#*=}" == -* ]]; then
+                    printf '%s requires a value that does not start with "-".\n' \
+                        "${1%%=*}" >&2
+                    return 2
+                fi
+                shift
+                ;;
+            *) shift ;;
+        esac
+    done
+}
+
+require_known_profile() {
+    local profile="$1"
+    local names=""
+    local profiles=""
+    if ! profiles=$("${PYTHON}" "${DATABASE_MANAGER}" profiles); then
+        printf 'Could not list database profiles.\n' >&2
+        return 1
     fi
+    names=$(printf '%s\n' "${profiles}" | cut -f1)
+    if printf '%s\n' "${names}" | grep -Fxq -- "${profile}"; then
+        return 0
+    fi
+    printf 'Unknown database profile: %s\nValid profiles: %s\n' "${profile}" \
+        "$(printf '%s\n' "${names}" | awk 'NR > 1 {printf ", "} {printf "%s", $0}')" >&2
+    return 2
+}
+
+read_config_value() {
+    local key="$1"
+    local value=""
+    [[ -f "${CONFIG_FILE}" ]] || return 1
+    value=$(sed -n "s/^${key}=//p" "${CONFIG_FILE}" | sed -n '1p')
+    [[ -n "${value}" ]] || return 1
+    printf '%s\n' "${value}"
+}
+
+read_config_database_path() {
+    read_config_value database_path
 }
 
 read_config_database_profile() {
-    [[ -f "${CONFIG_FILE}" ]] || return 1
-    if grep -Eq '^database_profile=' "${CONFIG_FILE}"; then
-        sed -n 's/^database_profile=//p' "${CONFIG_FILE}" | sed -n '1p'
-    elif grep -Eq '^[[:space:]]*database_profile[[:space:]]*=' "${CONFIG_FILE}"; then
-        awk -F"'" '/^[[:space:]]*database_profile[[:space:]]*=/ {print $2; exit}' "${CONFIG_FILE}"
-    else
-        return 1
-    fi
+    read_config_value database_profile
 }
 
 write_database_config() {
@@ -128,8 +168,17 @@ write_database_config() {
         printf 'Database profile is not a safe identifier: %s\n' "${profile}" >&2
         return 1
     fi
-    printf 'database_path=%s\ndatabase_profile=%s\n' "${db_dir}" "${profile}" > "${temp_file}"
-    mv "${temp_file}" "${CONFIG_FILE}"
+    if [[ -f "${CONFIG_FILE}" && \
+        "$(<"${CONFIG_FILE}")" == "database_path=${db_dir}"$'\n'"database_profile=${profile}" ]]; then
+        return 0
+    fi
+    # Callers use `|| return`, which turns errexit off here: check each step.
+    if ! printf 'database_path=%s\ndatabase_profile=%s\n' "${db_dir}" "${profile}" \
+        > "${temp_file}" || ! mv "${temp_file}" "${CONFIG_FILE}"; then
+        rm -f "${temp_file}"
+        printf 'Could not save the database selection to %s.\n' "${CONFIG_FILE}" >&2
+        return 1
+    fi
 }
 
 profile_from_selection() {
@@ -140,7 +189,7 @@ profile_from_selection() {
 
     if [[ -z "${selection}" ]]; then
         selected="${default_profile}"
-    elif [[ "${selection}" =~ ^[0-9]+$ ]]; then
+    elif [[ "${selection}" =~ ^0*[1-9][0-9]*$ ]]; then
         selected=$(printf '%s\n' "${profiles}" | sed -n "${selection}p" | cut -f1)
     else
         selected="${selection}"
@@ -196,7 +245,13 @@ prompt_database_path() {
     local user_path=""
     printf 'Database path [%s]: ' "${default_path}" >&2
     read -r user_path
-    printf '%s\n' "${user_path:-${default_path}}"
+    user_path="${user_path:-${default_path}}"
+    case "${user_path}" in
+        "~") user_path="${HOME}" ;;
+        "~/"*) user_path="${HOME}/${user_path#\~/}" ;;
+    esac
+    [[ "${user_path}" == /* ]] || user_path="${PWD}/${user_path}"
+    printf '%s\n' "${user_path}"
 }
 
 resolve_database_profile() {
@@ -250,19 +305,10 @@ resolve_database_path() {
 database_ready() {
     local db_dir="$1"
     local profile="$2"
-    if "${PYTHON}" "${DATABASE_MANAGER}" validate \
+    "${PYTHON}" "${DATABASE_MANAGER}" validate \
         --root "${db_dir}" \
         --profile "${profile}" \
-        >/dev/null 2>&1; then
-        return 0
-    fi
-
-    # The resolver is needed only for the deprecated unprofiled curated layout.
-    "${PYTHON}" "${DATABASE_MANAGER}" resolve \
-        --root "${db_dir}" \
-        --profile "${profile}" \
-        --model RF00177 \
-        >/dev/null 2>&1
+        >/dev/null
 }
 
 database_version() {
@@ -276,43 +322,68 @@ database_version() {
 install_database() {
     local db_dir="$1"
     local profile="$2"
+    local replace="${3:-0}"
     local install_args=(
         "${PYTHON}" "${DATABASE_MANAGER}" install
         --root "${db_dir}"
         --profile "${profile}"
         --latest
     )
-    if [[ -e "${db_dir}/${profile}" ]]; then
-        printf 'Existing profile %s failed validation and will be replaced safely.\n' \
-            "${db_dir}/${profile}" >&2
+    if [[ "${replace}" -eq 1 ]]; then
         install_args+=(--force)
     fi
     "${install_args[@]}"
 }
 
-ensure_database() {
+report_database_ready() {
     local db_dir="$1"
     local profile="$2"
     local version=""
+    version=$(database_version "${db_dir}" "${profile}") || return 1
+    printf 'Database profile %s v%s ready at %s\n' \
+        "${profile}" "${version}" "${db_dir}" >&2
+}
 
-    if ! database_ready "${db_dir}" "${profile}"; then
-        printf 'Database profile %s is not ready in %s; starting installation.\n' \
-            "${profile}" "${db_dir}" >&2
-        install_database "${db_dir}" "${profile}"
-        if ! database_ready "${db_dir}" "${profile}"; then
-            printf 'Installed database profile failed validation: %s/%s\n' \
-                "${db_dir}" "${profile}" >&2
-            return 1
-        fi
-    fi
+# Installs an absent profile. Replaces a damaged profile unless the user gave
+# --database_path. Any other validation failure is an error.
+ensure_database() {
+    local db_dir="$1"
+    local profile="$2"
+    local explicit_path="${3:-0}"
+    local status=0
 
-    if version=$(database_version "${db_dir}" "${profile}"); then
-        printf 'Database profile %s v%s ready at %s\n' \
-            "${profile}" "${version}" "${db_dir}" >&2
-    else
-        printf 'Legacy database ready at %s; reinstall the curated profile to track versions.\n' \
-            "${db_dir}" >&2
+    DATABASE_INSTALLED=0
+    database_ready "${db_dir}" "${profile}" || status=$?
+    case "${status}" in
+        0) ;;
+        "${DB_NOT_INSTALLED}")
+            printf 'Database profile %s is not installed in %s; starting installation.\n' \
+                "${profile}" "${db_dir}" >&2
+            install_database "${db_dir}" "${profile}" 0 || return 1
+            DATABASE_INSTALLED=1
+            ;;
+        "${DB_DAMAGED}")
+            if [[ "${explicit_path}" -eq 1 ]]; then
+                printf 'Database profile %s in %s is damaged. It is not replaced because --database_path was given.\n' \
+                    "${profile}" "${db_dir}" >&2
+                printf 'To reinstall it, remove %s/%s and run setup again.\n' \
+                    "${db_dir}" "${profile}" >&2
+                return 1
+            fi
+            printf 'Database profile %s in %s is damaged and will be replaced safely.\n' \
+                "${profile}" "${db_dir}" >&2
+            install_database "${db_dir}" "${profile}" 1 || return 1
+            DATABASE_INSTALLED=1
+            ;;
+        *) return 1 ;;
+    esac
+
+    if [[ "${DATABASE_INSTALLED}" -eq 1 ]] && ! database_ready "${db_dir}" "${profile}"; then
+        printf 'Installed database profile failed validation: %s/%s\n' \
+            "${db_dir}" "${profile}" >&2
+        return 1
     fi
+    report_database_ready "${db_dir}" "${profile}"
 }
 
 check_database_update() {
@@ -328,9 +399,6 @@ check_database_update() {
     local reason=""
     local answer=""
 
-    if ! database_version "${db_dir}" "${profile}" >/dev/null; then
-        return 0
-    fi
     printf 'Checking Zenodo for database updates...\n' >&2
     result=$("${PYTHON}" "${DATABASE_MANAGER}" check-update \
         --root "${db_dir}" \
@@ -368,6 +436,9 @@ check_database_update() {
             ;;
         unavailable)
             printf 'Database update check unavailable: %s\n' "${reason}" >&2
+            if [[ "${force_update}" -eq 1 ]]; then
+                return 1
+            fi
             ;;
         *)
             printf 'Unexpected database update status: %s\n' "${status}" >&2
@@ -395,7 +466,8 @@ install_database_update() {
             "${profile}" >&2
         return 1
     fi
-    ensure_database "${db_dir}" "${profile}"
+    database_ready "${db_dir}" "${profile}" || return 1
+    report_database_ready "${db_dir}" "${profile}"
 }
 
 print_database_update_command() {
@@ -422,25 +494,62 @@ setup_requests_update() {
     return 1
 }
 
+print_setup_usage() {
+    cat <<'USAGE'
+Usage: pixi run setup [--database_profile NAME] [--database_path DIR] [--update]
+
+Install a database profile, or with --update check for and install a newer
+release. In a terminal, setup asks for a profile or path that you do not give.
+USAGE
+}
+
+validate_setup_arguments() {
+    validate_database_options "$@" || return
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --update | --database_profile=* | --database_path=*) shift ;;
+            --database_profile | --database_path) shift 2 ;;
+            *)
+                printf 'Unknown setup argument: %s\n' "$1" >&2
+                print_setup_usage >&2
+                return 2
+                ;;
+        esac
+    done
+}
+
+setup_has_help() {
+    local arg
+    for arg in "$@"; do
+        [[ "${arg}" == "-h" || "${arg}" == "--help" ]] && return 0
+    done
+    return 1
+}
+
 setup_database() {
     local db_dir=""
     local profile=""
     local force_update=0
+    local explicit_path=0
 
-    profile=$(resolve_setup_database_profile "$@")
-    db_dir=$(resolve_database_path "$@")
-    write_database_config "${db_dir}" "${profile}"
-
-    if ! database_ready "${db_dir}" "${profile}"; then
-        ensure_database "${db_dir}" "${profile}"
-        return
+    if setup_has_help "$@"; then
+        print_setup_usage
+        return 0
     fi
-    ensure_database "${db_dir}" "${profile}"
-    if ! database_version "${db_dir}" "${profile}" >/dev/null; then
-        return
+    validate_setup_arguments "$@" || return
+    profile=$(resolve_setup_database_profile "$@") || return
+    require_known_profile "${profile}" || return
+    db_dir=$(resolve_database_path "$@") || return
+    if cli_has_database_path "$@"; then
+        explicit_path=1
     fi
+    ensure_database "${db_dir}" "${profile}" "${explicit_path}" || return
+    write_database_config "${db_dir}" "${profile}" || return
     if setup_requests_update "$@"; then
         force_update=1
+    fi
+    if [[ "${DATABASE_INSTALLED}" -eq 1 && "${force_update}" -eq 0 ]]; then
+        return 0
     fi
     check_database_update "${db_dir}" "${profile}" 1 "${force_update}"
 }
@@ -494,16 +603,18 @@ run_pipeline() {
         return
     fi
 
-    profile=$(resolve_database_profile "$@")
-    db_dir=$(resolve_database_path "$@")
-    if ! cli_has_database_path "$@" && ! cli_has_database_profile "$@"; then
-        write_database_config "${db_dir}" "${profile}"
-    fi
+    validate_database_options "$@" || return
+    profile=$(resolve_database_profile "$@") || return
+    require_known_profile "${profile}" || return
+    db_dir=$(resolve_database_path "$@") || return
     if cli_has_database_path "$@"; then
         allow_update_prompt=0
         include_database_path=1
     fi
-    ensure_database "${db_dir}" "${profile}"
+    ensure_database "${db_dir}" "${profile}" "${include_database_path}" || return
+    if ! cli_has_database_path "$@" && ! cli_has_database_profile "$@"; then
+        write_database_config "${db_dir}" "${profile}" || return
+    fi
     if ! check_database_update \
         "${db_dir}" "${profile}" "${allow_update_prompt}" 0 "${include_database_path}"; then
         return 1
@@ -534,11 +645,7 @@ run_smoke() {
         run_pipeline "$@"
         return
     fi
-    profile=$(resolve_database_profile "$@")
-    db_dir=$(resolve_database_path "$@")
-    if ! cli_has_database_path "$@" && ! cli_has_database_profile "$@"; then
-        write_database_config "${db_dir}" "${profile}"
-    fi
+    validate_database_options "$@" || return
     smoke_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssuextract-smoke.XXXXXX")
     trap "rm -rf '${smoke_dir}'" EXIT
     cp "${SMOKE_FASTAS[@]}" "${smoke_dir}/"
@@ -547,7 +654,11 @@ run_smoke() {
         --outdir "${PROJECT_DIR}/results/smoke"
         --threads_per_job "${EXAMPLE_THREADS_PER_JOB}"
     )
-    run_pipeline "${smoke_args[@]}" "$@"
+    # run_pipeline resolves the selection, readies the database, and saves the
+    # selection; resolving afterwards reads the same values without a second prompt.
+    run_pipeline "${smoke_args[@]}" "$@" || return
+    profile=$(resolve_database_profile "$@") || return
+    db_dir=$(resolve_database_path "$@") || return
     database_version=$("${PYTHON}" "${DATABASE_MANAGER}" version \
         --root "${db_dir}" --profile "${profile}")
     "${PYTHON}" "${EXAMPLE_VALIDATOR}" \

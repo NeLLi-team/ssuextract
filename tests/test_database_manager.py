@@ -67,6 +67,43 @@ def blast_ok(*args, **kwargs) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args[0], 0, stdout="Database: test\n", stderr="")
 
 
+def run_validate(root: Path, blastdbcmd: str = "blastdbcmd") -> tuple[int, str]:
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        status = manager.main(
+            [
+                "validate",
+                "--root",
+                str(root),
+                "--profile",
+                "curated",
+                "--blastdbcmd",
+                blastdbcmd,
+            ]
+        )
+    return status, stderr.getvalue()
+
+
+def write_published_catalog(path: Path) -> None:
+    write_json(
+        path,
+        {
+            "schema_version": 1,
+            "default_profile": "curated",
+            "profiles": {
+                "curated": {
+                    "version": "test-1",
+                    "archive": {
+                        "url": "https://example.org/curated.tar.gz",
+                        "bytes": 1,
+                        "sha256": sha256(b"x"),
+                    },
+                }
+            },
+        },
+    )
+
+
 class FakeResponse(io.BytesIO):
     def __enter__(self):
         return self
@@ -157,42 +194,6 @@ class DatabaseManagerTests(unittest.TestCase):
         self.assertEqual(manager._human_size(1024**2), "1.0 MiB")
         self.assertEqual(manager._human_size(1024**3), "1.0 GiB")
 
-    def test_marker_override_extends_defaults(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            override = Path(tmp) / "markers.json"
-            write_json(override, {"RFTEST": "16S"})
-            markers = manager.load_marker_mapping(override_path=override)
-        self.assertEqual(markers["RF00177"], "16S")
-        self.assertEqual(markers["RF01960"], "18S")
-        self.assertEqual(markers["RFTEST"], "16S")
-
-    @mock.patch.object(manager.subprocess, "run", side_effect=blast_ok)
-    def test_profile_resolution_uses_model_marker_and_blastdbcmd(self, run) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_profile(root)
-            resolved = manager.resolve_database(root, "curated", "RF00177")
-        self.assertEqual(resolved, root / "curated" / "blast" / "ssu")
-        run.assert_called_once()
-        command = run.call_args.args[0]
-        self.assertEqual(command[:2], ["blastdbcmd", "-db"])
-        self.assertEqual(command[-1], "-info")
-
-    def test_unknown_model_fails_before_profile_resolution(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(manager.ManifestError, "Unknown covariance model"):
-                manager.resolve_database(tmp, "curated", "RF_UNKNOWN")
-
-    @mock.patch.object(manager.subprocess, "run", side_effect=blast_ok)
-    def test_legacy_prefix_is_resolved_with_visible_deprecation(self, run) -> None:
-        with tempfile.TemporaryDirectory() as tmp, self.assertWarns(
-            manager.LegacyDatabaseWarning
-        ):
-            root = Path(tmp)
-            resolved = manager.resolve_database(root, "curated", "RF00177")
-        self.assertEqual(resolved, root / manager.LEGACY_PREFIX)
-        self.assertIn(str(resolved), run.call_args.args[0])
-
     @mock.patch.object(manager.subprocess, "run", side_effect=blast_ok)
     def test_artifact_size_must_match_manifest(self, run) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -218,8 +219,13 @@ class DatabaseManagerTests(unittest.TestCase):
             artifact.rename(target)
             artifact.symlink_to(target.name)
 
-            with self.assertRaisesRegex(manager.IntegrityError, "not a regular file"):
+            with self.assertRaisesRegex(
+                manager.IntegrityError, "symbolic link"
+            ) as caught:
                 manager.validate_profile_directory(directory, "curated")
+            status, _ = run_validate(Path(tmp))
+        self.assertNotIsInstance(caught.exception, manager.ArtifactDamagedError)
+        self.assertEqual(status, 2)
         run.assert_not_called()
 
     def test_manifest_rejects_artifact_traversal(self) -> None:
@@ -240,6 +246,58 @@ class DatabaseManagerTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(manager.ManifestError, "escapes"):
                 manager.load_manifest(directory, "curated")
+
+    def test_validate_reports_absent_profile_directory_as_not_installed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            status, stderr = run_validate(Path(tmp))
+        self.assertEqual(status, 3)
+        self.assertIn("does not exist", stderr)
+
+    def test_validate_reports_absent_manifest_as_not_installed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "curated").mkdir()
+            status, stderr = run_validate(Path(tmp))
+        self.assertEqual(status, 3)
+        self.assertIn(manager.MANIFEST_NAME, stderr)
+
+    def test_validate_reports_size_mismatch_as_damaged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            write_profile(Path(tmp), artifact_bytes=99)
+            status, stderr = run_validate(Path(tmp))
+        self.assertEqual(status, 4)
+        self.assertIn("size mismatch", stderr)
+
+    def test_validate_reports_hash_mismatch_as_damaged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            write_profile(Path(tmp), artifact_sha256="0" * 64)
+            status, stderr = run_validate(Path(tmp))
+        self.assertEqual(status, 4)
+        self.assertIn("SHA-256 mismatch", stderr)
+
+    def test_validate_reports_missing_artifact_as_damaged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = write_profile(Path(tmp))
+            (directory / "blast" / "ssu.unusual").unlink()
+            status, stderr = run_validate(Path(tmp))
+        self.assertEqual(status, 4)
+        self.assertIn("not a regular file", stderr)
+
+    def test_validate_reports_invalid_manifest_with_generic_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = write_profile(Path(tmp))
+            (directory / manager.MANIFEST_NAME).write_text("{", encoding="utf-8")
+            status, stderr = run_validate(Path(tmp))
+        self.assertEqual(status, 2)
+        self.assertIn("database-manager:", stderr)
+
+    def test_validate_reports_missing_blastdbcmd_with_generic_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            write_profile(Path(tmp))
+            status, stderr = run_validate(
+                Path(tmp), blastdbcmd="/nonexistent/blastdbcmd"
+            )
+        self.assertEqual(status, 2)
+        self.assertIn("BLAST validator not found", stderr)
 
     def test_unusable_database_root_is_reported_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -276,17 +334,11 @@ class DatabaseManagerTests(unittest.TestCase):
             )
 
     def test_declared_python_range_can_read_zstd_archives(self) -> None:
-        declared_minimums = {
-            "pixi.toml": r'^python = ">=3\.(\d+),',
-            "config/environment.yml": r"^  - python >=3\.(\d+),",
-        }
-        for name, pattern in declared_minimums.items():
-            with self.subTest(file=name):
-                text = (REPO / name).read_text(encoding="utf-8")
-                match = re.search(pattern, text, flags=re.MULTILINE)
-                self.assertIsNotNone(match)
-                # tarfile reads .tar.zst archives from Python 3.14.
-                self.assertGreaterEqual(int(match.group(1)), 14)
+        text = (REPO / "pixi.toml").read_text(encoding="utf-8")
+        match = re.search(r'^python = ">=3\.(\d+),', text, flags=re.MULTILINE)
+        self.assertIsNotNone(match)
+        # tarfile reads .tar.zst archives from Python 3.14.
+        self.assertGreaterEqual(int(match.group(1)), 14)
 
     def test_tar_extraction_rejects_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -568,6 +620,50 @@ class DatabaseManagerTests(unittest.TestCase):
 
             self.assertTrue(target.is_dir())
             self.assertFalse(backup.exists())
+
+    @mock.patch.object(manager.subprocess, "run", side_effect=blast_ok)
+    def test_install_keeps_profile_restored_from_interrupted_backup(self, run) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "databases"
+            catalog = Path(tmp) / "catalog.json"
+            write_published_catalog(catalog)
+            backup = write_profile(root).rename(root / ".curated.backup-test")
+            opener = mock.Mock(side_effect=AssertionError("must not download"))
+
+            with self.assertWarns(RuntimeWarning):
+                installed = manager.install_profile(
+                    root, "curated", catalog_path=catalog, opener=opener
+                )
+
+            self.assertEqual(installed, root / "curated")
+            self.assertFalse(backup.exists())
+            opener.assert_not_called()
+
+    @mock.patch.object(manager.subprocess, "run", side_effect=blast_ok)
+    def test_install_without_replace_keeps_valid_existing_profile(self, run) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "databases"
+            catalog = Path(tmp) / "catalog.json"
+            write_published_catalog(catalog)
+            write_profile(root)
+            opener = mock.Mock(side_effect=AssertionError("must not download"))
+
+            installed = manager.install_profile(
+                root, "curated", catalog_path=catalog, opener=opener
+            )
+
+            self.assertEqual(installed, root / "curated")
+            opener.assert_not_called()
+
+    def test_install_without_replace_rejects_invalid_existing_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "databases"
+            catalog = Path(tmp) / "catalog.json"
+            write_published_catalog(catalog)
+            (root / "curated").mkdir(parents=True)
+
+            with self.assertRaisesRegex(manager.InstallError, "use --force"):
+                manager.install_profile(root, "curated", catalog_path=catalog)
 
     def test_cross_host_winner_is_not_replaced_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

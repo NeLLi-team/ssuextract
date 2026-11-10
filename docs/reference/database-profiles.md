@@ -15,8 +15,37 @@ pipeline run.
 ## Installation and update checks
 
 `pixi run setup` lists each profile with the version and compressed download
-size from `config/database_catalog.json`. The selected path and profile are
-stored as `database_path` and `database_profile` in `config/local.config`.
+size from `config/database_catalog.json`. After the profile is ready, the
+selected path and profile are stored as `database_path` and `database_profile`
+in `config/local.config`. Commands read only these `key=value` lines and write
+the file only when its content changes. `pixi run setup` accepts only
+`--database_profile`, `--database_path`, `--update`, and `-h` or `--help`; any
+other argument, a missing option value, or a profile name outside the catalog
+exits with status 2 before any installation or Zenodo request.
+
+## Validation
+
+`database_manager.py validate --root DIR --profile NAME` prints the validation
+error to standard error and sets the exit status:
+
+| Status | Meaning |
+| --- | --- |
+| 0 | The profile validates. |
+| 3 | The profile directory or its `manifest.json` is absent. |
+| 4 | A manifest artifact is missing, empty, or differs in size or SHA-256 digest. |
+| 2 | Any other failure, such as an invalid manifest, an artifact that is a symbolic link, a missing `blastdbcmd`, or a BLAST index check failure. |
+
+`pixi run setup`, `pixi run ssuextract`, and `pixi run example` show the error
+and install an absent profile (status 3). They replace a damaged profile
+(status 4) by installing with `--force`: the old profile stays in place until
+the new archive validates. They do not replace a damaged profile when
+`--database_path` is given on the command line: the message names the directory
+to remove before running setup again. Only `pixi run setup --update` with that
+path replaces the profile, with a newer release. On every other failure they
+stop with a nonzero status without a download. `database_manager.py install`
+without `--force`
+keeps an existing profile that validates, including one restored from an
+interrupted replacement.
 
 The installer accepts a Zenodo release only when all of these values agree:
 
@@ -46,7 +75,9 @@ Nextflow. The check has a five-second total timeout. Interactive runs offer to
 install an available release. Non-interactive runs and runs with an explicit
 `--database_path` report the update and continue with the installed profile. A
 valid installed profile remains usable when the check times out, Zenodo is
-unavailable, or the remote release contract fails validation.
+unavailable, or the remote release contract fails validation. Only
+`pixi run setup --update` treats an unavailable check as a failure and exits
+with a nonzero status.
 
 ## Runtime files
 
