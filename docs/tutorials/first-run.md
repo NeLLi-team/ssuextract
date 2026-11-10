@@ -65,12 +65,20 @@ The run creates `results/smoke/`. Check the summary and ranked-hit files:
 
 ```bash
 test -s results/smoke/cmsearch_summary.tsv
-test -s results/smoke/cmsearch_summary.tab
 test -s results/smoke/blast_top_hits.tsv
+cat results/smoke/cmsearch_summary.tab
 ```
 
-`cmsearch_summary.tsv` contains one row per extracted region;
-`cmsearch_summary.tab` contains per-sample counts by annotation category. View
+`cmsearch_summary.tab` contains per-sample contig counts by annotation
+category. With database v1.0.2 its only column is `Unclassified`:
+
+```text
+	Unclassified
+LKH462_P08_Rh	9
+LKH565_P11_Ci	1
+```
+
+`cmsearch_summary.tsv` contains one row per extracted region. View
 the sample, marker model, coordinates, reference source, final taxonomy,
 centroid evidence, and public reference identifier:
 

@@ -25,10 +25,6 @@ docs/handoffs/
 
 # Pipeline execution reports
 pipeline_info/
-trace.txt
-report.html
-timeline.html
-dag.svg
 
 # Generated documentation site
 site/

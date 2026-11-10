@@ -2,12 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add an `Unclassified` column to `cmsearch_summary.tab`. It counts the contigs
+  with at least one query whose selected taxonomy is `Unclassified`.
+- Add `pixi run setup --help`.
+
 ### Fixed
 
 - Record the Infernal version in each per-query `tool_versions.txt`. The file
   held the `cmalign` banner line and no version.
 - List each taxonomy alternative once in `tree_taxonomy_alternatives`. Bacterial
   and archaeal alternatives appeared twice in tree mode.
+- Show the validation error when a database profile is not ready. A missing
+  profile is installed. A profile with a missing or changed artifact is
+  replaced, but never under an explicit `--database_path`. Every other
+  validation failure stops the command without a download.
+- Keep a valid profile when `install` runs without `--force`, including a
+  profile restored from an interrupted replacement.
+- Reject unknown `setup` arguments, a database option without a value, and a
+  profile name outside the catalog with exit status 2 before any change.
+- Save `config/local.config` only after the database is ready and only when
+  its content changes.
+- Exit with a nonzero status when `setup --update` cannot reach the release
+  record.
+- Expand `~` at the database path prompt and save an absolute path.
 - Reject a manifest artifact that is a symbolic link, including a link to a
   file inside the profile.
 - Download an archive once when the server ignores the byte range and the full
@@ -16,11 +35,22 @@
   Python traceback.
 - Declare Python 3.14 as the minimum version. Database archives are `.tar.zst`
   files, which `tarfile` reads from Python 3.14.
+- Validate the inputs of `img_chunked_search.py prepare --force` before any
+  deletion, and delete only a chunk directory that holds an earlier plan.
 - Record the `-title` argument in the `makeblastdb` command template of the
   database provenance.
 
 ### Changed
 
+- Pass `nextflow lint` and run under the strict syntax parser
+  (`NXF_SYNTAX_PARSER=v2`). `process.resourceLimits` applies `--max_cpus`,
+  `--max_memory`, and `--max_time`.
+- Write the per-run DAG report as `.html`; it needs no Graphviz.
+- Require the `qlen` and `slen` columns in BLAST input and the taxonomy and
+  source-record tables in `annotate_hits.py`.
+- `database_manager.py validate` exits with status 3 for a profile that is not
+  installed and 4 for a damaged artifact.
+- `pixi run dryrun` uses the saved database selection.
 - Compare competing model hits only within one contig and strand. The step
   took 8.6 s for 16,000 hits and now takes 0.03 s, with identical output.
 - Load database release tables in bulk. In a comparison on five tables of
@@ -31,8 +61,17 @@
 
 ### Removed
 
-- Remove `scripts/get_cmsequences.py` and `docs/requirements.txt`. Nothing
-  called either file.
+- Remove support for the unprofiled `silva-138-1_pr2-4-12` database layout,
+  the `--querydir` migration message, the two old `config/local.config`
+  formats, and 12-column BLAST input.
+- Remove `database_manager.py resolve` with `--markers` and
+  `--marker-override`.
+- Remove the Nextflow profiles `debug`, `conda`, `local`, `slurm`, and `test`
+  with `config/environment.yml`.
+- Remove the Pixi tasks `download-db`, `dag`, `run-verbose`, and `report` and
+  the `dev` environment.
+- Remove `scripts/get_cmsequences.py`, `docs/requirements.txt`, and
+  `docs/releases/1.1.0.md`. Nothing used them.
 
 ## [1.2.2] - 2026-09-04
 

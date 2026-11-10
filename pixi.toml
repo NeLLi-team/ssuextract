@@ -22,9 +22,6 @@ duckdb = ">=1.4,<2"      # selective taxonomy lookup from Parquet
 ete4 = ">=4.4,<5"         # tree distances and neighbor traversal
 
 [tasks]
-# Download the default database
-download-db = { cmd = "bash scripts/pipeline_cli.sh setup", description = "Select and install a database profile" }
-
 # Setup: resolve the database path and download the database
 setup = { cmd = "bash scripts/pipeline_cli.sh setup", description = "Select, install, or update a database profile" }
 
@@ -49,21 +46,4 @@ clean = "nextflow clean -f"
 clean-results = { cmd = "rm -rf results/ work/", description = "Remove all results and work directories" }
 
 # Dry run to see what will be executed
-dryrun = "nextflow run main.nf -preview"
-
-# Generate pipeline visualization
-dag = "bash scripts/pipeline_cli.sh run -with-dag pipeline.svg"
-
-[environments]
-dev = ["dev"]
-
-[feature.dev.dependencies]
-# Development dependencies
-graphviz = "*"           # for DAG visualization
-
-[feature.dev.tasks]
-# Run with detailed output
-run-verbose = "bash scripts/pipeline_cli.sh run -with-trace -with-timeline -with-report"
-
-# Create pipeline report
-report = "bash scripts/pipeline_cli.sh run -with-report report.html"
+dryrun = { cmd = "bash scripts/pipeline_cli.sh run -preview", description = "Preview the Nextflow graph without executing tasks" }

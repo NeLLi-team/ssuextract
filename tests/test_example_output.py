@@ -21,7 +21,6 @@ RUN_ASSEMBLIES = REPO / "docs" / "how-to" / "run-assemblies.md"
 CLI_REFERENCE = REPO / "docs" / "reference" / "cli.md"
 OUTPUT_REFERENCE = REPO / "docs" / "reference" / "outputs.md"
 TOP_HIT_REPORTING = REPO / "scripts" / "top_hit_reporting.py"
-CONDA_ENVIRONMENT = REPO / "config" / "environment.yml"
 DATABASE_VERSION = "1.0.2"
 SPEC = importlib.util.spec_from_file_location("validate_example_output", SCRIPT)
 validator = importlib.util.module_from_spec(SPEC)
@@ -328,11 +327,6 @@ class ExampleOutputTests(unittest.TestCase):
         self.assertIn("`blast_top_hits.tsv`", OUTPUT_REFERENCE.read_text())
         self.assertIn("`--tree_classification` | off", CLI_REFERENCE.read_text())
         self.assertIn("`tree_nearest_neighbors.tsv`", OUTPUT_REFERENCE.read_text())
-
-    def test_tree_dependencies_are_declared_in_the_conda_environment(self) -> None:
-        environment = CONDA_ENVIRONMENT.read_text()
-        self.assertIn("  - iqtree >=3.0,<4\n", environment)
-        self.assertIn("  - ete4 >=4.4,<5\n", environment)
 
 
 if __name__ == "__main__":

@@ -27,9 +27,17 @@ Run `pixi run ssuextract --help` for the installed version's generated help.
 | Command | Effect |
 | --- | --- |
 | `pixi run setup` | Select, install, validate, or update a database profile. |
+| `pixi run setup --help` | Print the setup arguments without changing anything. |
 | `pixi run setup --database_profile img` | Install or inspect the IMG profile without the profile prompt. |
 | `pixi run setup --database_profile curated --update` | Install the latest verified curated profile without an update prompt. |
 | `pixi run example` | Run the bundled assemblies. |
 | `pixi run ssuextract` | Run the pipeline with supplied Nextflow arguments. |
 | `pixi run test` | Run unit, integration, profile-routing, and version checks. |
 | `pixi run dryrun` | Preview the Nextflow graph without executing tasks. |
+
+`pixi run setup` accepts `--database_profile`, `--database_path`, `--update`,
+and `--help`. `--database_profile` and `--database_path` need a value in every
+command. A missing value, an unknown setup argument, or a profile name outside
+the catalog stops the command with exit status 2. In a terminal without a saved
+selection, `pixi run ssuextract` and `pixi run example` ask for the profile and
+the database path.

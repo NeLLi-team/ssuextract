@@ -10,7 +10,6 @@ copyright: Copyright &copy; 2023–2026 NeLLi-team
 exclude_docs: |
   data/build_receipt.json
   handoffs/
-  releases/
 
 theme:
   name: material

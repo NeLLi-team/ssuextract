@@ -3,7 +3,7 @@
 ```text
 ssuextract/
 ├── main.nf                       # Nextflow workflow with seven processes
-├── nextflow.config               # Parameters, profiles, reports, and manifest
+├── nextflow.config               # Parameters, reports, and manifest
 ├── pixi.toml                     # Environment constraints and commands
 ├── pixi.lock                     # Resolved cross-platform environment
 ├── mkdocs.yml                    # Documentation site configuration
@@ -17,7 +17,6 @@ ssuextract/
 │   ├── img_search_execution.json # Chunk and thread layout of the IMG search
 │   ├── empty.tree_assignment.tsv # Header-only tree table for BLAST-mode runs
 │   ├── empty.tree_neighbors.tsv  # Header-only neighbor table for BLAST-mode runs
-│   ├── environment.yml           # Optional Nextflow Conda environment
 │   └── local.config              # Local database path and profile; generated and ignored
 ├── data/example/                 # Bundled example assemblies and expected annotations
 ├── resources/
@@ -25,7 +24,7 @@ ssuextract/
 │   └── database_notices/         # Source licenses and attribution
 ├── scripts/
 │   ├── pipeline_cli.sh           # Database setup and Pixi-facing runner
-│   ├── database_manager.py       # Profile validation, installation, and resolution
+│   ├── database_manager.py       # Profile validation and installation
 │   ├── database_download.py      # Resumable, checksum-verified archive download
 │   ├── database_updates.py       # Zenodo release discovery and verification
 │   ├── atomic_io.py              # Durable file replacement
