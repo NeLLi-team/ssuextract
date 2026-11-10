@@ -66,9 +66,10 @@ header. PR2 centroid names retain the original public PR2 header label.
 `blast_top_hits.tsv` reports the first `--top_hits` subjects for each extracted
 query. It also reports the highest-ranked IMG, PR2, and SILVA subject among the
 fetched BLAST candidates when that source occurs below the requested cutoff.
-`hit_rank` is the rank among those candidates. `selection_reason` distinguishes
-`overall_top_n`, `assignment_candidate`, `equal_best_assignment`, `best_IMG`, `best_PR2`, and
-`best_SILVA` rows.
+`hit_rank` is the rank among those candidates. `selection_reason` lists every
+reason that applies to a row, joined by `|`: `overall_top_n`,
+`assignment_candidate`, `equal_best_assignment`, `best_IMG`, `best_PR2`, and
+`best_SILVA`.
 
 Each row joins the stable `blast_sseqid` to its public source identifier,
 reference version, preferred taxonomy, centroid evidence, BLAST statistics, and

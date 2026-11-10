@@ -13,9 +13,9 @@ Run `pixi run ssuextract --help` for the installed version's generated help.
 | `--max_blast_targets` | `500` | Candidate policy limit; one extra hit detects truncation. Must match `max_targets` when the profile has runtime calibration. |
 | `--top_hits` | `5` | Number of ranked BLAST subjects reported per query. All assignment candidates, equal-best subjects, and the best fetched IMG, PR2, and SILVA subjects are retained below this cutoff. |
 | `--tree_classification` | off | Use a query-plus-reference tree for taxonomy assignment. |
-| `--tree_reference_count` | `100` | Unique BLAST reference sequences aligned with each query in tree mode. |
-| `--tree_assignment_neighbors` | `5` | Neighbor count for direct-reference tree evidence; includes distance ties and nearby explicit ambiguity. |
-| `--tree_trim_gap_fraction` | `0.9` | After masking covariance-model insert columns, remove match columns with a larger gap fraction. |
+| `--tree_reference_count` | `100` | Unique BLAST reference sequences aligned with each query in tree mode. Must be at least 3. |
+| `--tree_assignment_neighbors` | `5` | Neighbor count for direct-reference tree evidence; includes distance ties and nearby explicit ambiguity. Cannot exceed `--tree_reference_count`. |
+| `--tree_trim_gap_fraction` | `0.9` | After masking covariance-model insert columns, remove match columns with a larger gap fraction. Must be at least 0 and less than 1. |
 | `--min_extract_length` | `500` | Minimum union length of CM-hit sequence spans; gaps between joined fragments do not count. `0` disables the filter. |
 | `--threads_per_job` | `2` | CPUs assigned to each Infernal, BLAST, or `cmalign` task. IQ-TREE uses one thread for reproducible neighbor ordering. |
 | `--max_cpus` | `16` | Maximum CPUs assigned to one Nextflow task. |

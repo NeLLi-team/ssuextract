@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Record the Infernal version in each per-query `tool_versions.txt`. The file
+  held the `cmalign` banner line and no version.
+- List each taxonomy alternative once in `tree_taxonomy_alternatives`. Bacterial
+  and archaeal alternatives appeared twice in tree mode.
+- Reject a manifest artifact that is a symbolic link, including a link to a
+  file inside the profile.
+- Download an archive once when the server ignores the byte range and the full
+  response fails its checksum.
+- Report an unusable database root as a `database-manager` error instead of a
+  Python traceback.
+- Declare Python 3.14 as the minimum version. Database archives are `.tar.zst`
+  files, which `tarfile` reads from Python 3.14.
+- Record the `-title` argument in the `makeblastdb` command template of the
+  database provenance.
+
+### Changed
+
+- Compare competing model hits only within one contig and strand. The step
+  took 8.6 s for 16,000 hits and now takes 0.03 s, with identical output.
+- Load database release tables in bulk. In a comparison on five tables of
+  20,000 rows, the write time fell from 122 s to 0.7 s and the Parquet files
+  were byte-identical. Values of a type other than the column type are now
+  rejected instead of cast.
+- Read the reference taxonomy table for IMG classification in one pass.
+
+### Removed
+
+- Remove `scripts/get_cmsequences.py` and `docs/requirements.txt`. Nothing
+  called either file.
+
 ## [1.2.2] - 2026-09-04
 
 ### Fixed

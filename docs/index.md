@@ -37,9 +37,10 @@ category counts, and Nextflow reports under `results/smoke/`.
 3. SSUextract extracts each retained interval on the reported strand.
 4. Each sequence is searched against the 16S rRNA gene or 18S rRNA gene index
    selected by its model.
-5. By default, equal-best BLAST subjects determine taxonomy. Tree mode instead
-   aligns the query with 100 references and assigns taxonomy from its nearest
-   named tree neighbors.
+5. By default, BLAST subjects with at least 80% query coverage and a bit score
+   of at least 98% of the best eligible score determine taxonomy. Tree mode
+   instead aligns the query with 100 references and assigns taxonomy from its
+   nearest named tree neighbors.
 6. The workflow writes extracted FASTA files, one row per hit, reference
    evidence, category counts, and execution reports.
 
