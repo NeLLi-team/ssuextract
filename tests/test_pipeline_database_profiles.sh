@@ -135,49 +135,6 @@ for marker in 16S 18S; do
     rm "${test_dir}/database/curated/blast/${marker}.fna"
 done
 
-mkdir -p "${test_dir}/legacy-database"
-{
-    awk '/^>/ { print ">ref16"; next } { print }' "${test_dir}/RF00177.fna"
-    awk '/^>/ { print ">ref18"; next } { print }' "${test_dir}/RF01960.fna"
-} > "${test_dir}/legacy.fna"
-makeblastdb \
-    -in "${test_dir}/legacy.fna" \
-    -dbtype nucl \
-    -blastdb_version 4 \
-    -out "${test_dir}/legacy-database/silva-138-1_pr2-4-12" \
-    >/dev/null
-
-if nextflow run "${repo}/main.nf" \
-    --query "${test_dir}/query" \
-    --modeldir "${repo}/resources/models" \
-    --database_path "${test_dir}/legacy-database" \
-    --database_profile img \
-    --outdir "${test_dir}/legacy-fallback-results" \
-    --threads_per_job 1 \
-    -work-dir "${test_dir}/legacy-fallback-work" \
-    >"${test_dir}/legacy-fallback.log" 2>&1; then
-    echo "IMG profile unexpectedly accepted the deprecated curated-only database" >&2
-    exit 1
-fi
-grep -F "Database profile 'img' is not installed" "${test_dir}/legacy-fallback.log"
-
-if nextflow run "${repo}/main.nf" \
-    --query "${test_dir}/query" \
-    --modeldir "${repo}/resources/models" \
-    --database_path "${test_dir}/legacy-database" \
-    --database_profile curated \
-    --outdir "${test_dir}/legacy-tree-results" \
-    --threads_per_job 1 \
-    --tree_classification \
-    -work-dir "${test_dir}/legacy-tree-work" \
-    >"${test_dir}/legacy-tree.log" 2>&1; then
-    echo "Tree mode unexpectedly accepted the deprecated database" >&2
-    exit 1
-fi
-grep -F -- \
-    "--tree_classification requires a managed curated or img database profile" \
-    "${test_dir}/legacy-tree.log"
-
 python3 - "${test_dir}/database/curated" <<'PY'
 import hashlib
 import json
@@ -202,15 +159,18 @@ connection.execute(
         compartment VARCHAR,
         assignment_method VARCHAR,
         cross_domain_conflict BOOLEAN,
-        taxonomy_alternatives VARCHAR
+        taxonomy_alternatives VARCHAR,
+        centroid_names VARCHAR,
+        centroid_taxonomy VARCHAR,
+        centroid_taxonomy_source VARCHAR
     )
     """
 )
 connection.executemany(
-    "INSERT INTO taxonomy VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO taxonomy VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
-        ("ref16", "SILVA", "Bacteria", "SILVA", "Bacteria", "", "native", False, ""),
-        ("ref18", "PR2", "Eukaryota", "PR2", "Eukaryota", "nucleus", "native", False, ""),
+        ("ref16", "SILVA", "Bacteria", "SILVA", "Bacteria", "", "native", False, "", "", "", ""),
+        ("ref18", "PR2", "Eukaryota", "PR2", "Eukaryota", "nucleus", "native", False, "", "", "", ""),
     ],
 )
 connection.execute("COPY taxonomy TO ? (FORMAT PARQUET)", [str(taxonomy)])
@@ -267,6 +227,25 @@ manifest = {
 }
 (profile / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 PY
+
+if nextflow run "${repo}/main.nf" \
+    --query "${test_dir}/query" \
+    --modeldir "${repo}/resources/models" \
+    --database_path "${test_dir}/database" \
+    --database_profile img \
+    --outdir "${test_dir}/missing-profile-results" \
+    -ansi-log false \
+    --threads_per_job 1 \
+    -work-dir "${test_dir}/missing-profile-work" \
+    >"${test_dir}/missing-profile.log" 2>&1; then
+    echo "A missing database profile unexpectedly started the pipeline" >&2
+    exit 1
+fi
+grep -F "Database profile 'img' is not installed" "${test_dir}/missing-profile.log"
+if grep -Fq "Submitted process" "${test_dir}/missing-profile.log"; then
+    echo "A missing database profile submitted a process" >&2
+    exit 1
+fi
 
 cp -a "${test_dir}/database" "${test_dir}/shell-safe-database"
 python3 - "${test_dir}/shell-safe-database/curated" <<'PY'

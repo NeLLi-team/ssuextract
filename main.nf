@@ -1,108 +1,92 @@
 #!/usr/bin/env nextflow
 
-import groovy.json.JsonSlurper
-import groovy.json.JsonOutput
-import java.security.MessageDigest
-
-nextflow.enable.dsl = 2
-
-
-if (params.help) {
-    helpMessage()
-    exit 0
-}
-
-if (params.version) {
-    log.info "SSUextract ${workflow.manifest.version}"
-    exit 0
-}
-
-if (params.containsKey('querydir')) {
-    throw new IllegalArgumentException('--querydir has been replaced by --query')
-}
-
-validateNonNegativeInteger(params.min_extract_length, 'min_extract_length')
-validatePositiveInteger(params.threads_per_job, 'threads_per_job')
-validatePositiveInteger(params.max_blast_targets, 'max_blast_targets')
-validatePositiveInteger(params.top_hits, 'top_hits')
-validateBoolean(params.tree_classification, 'tree_classification')
-validateMinimumInteger(params.tree_reference_count, 'tree_reference_count', 3)
-validatePositiveInteger(params.tree_assignment_neighbors, 'tree_assignment_neighbors')
-validateFraction(params.tree_trim_gap_fraction, 'tree_trim_gap_fraction')
-if ((params.tree_assignment_neighbors as int) > (params.tree_reference_count as int)) {
-    throw new IllegalArgumentException(
-        '--tree_assignment_neighbors cannot exceed --tree_reference_count'
-    )
-}
-validateIdentifier(params.database_profile.toString(), 'database profile')
-database_config = loadDatabaseConfig(params.database_path, params.database_profile)
-runtime_code_digest = runtimeCodeDigest()
-model_markers = loadModelMarkers(params.model_marker_map)
-tree_model_ids = params.tree_classification \
-    ? loadTreeModelIds(model_markers) \
-    : [:]
-if (params.tree_classification && database_config.legacy) {
-    throw new IllegalArgumentException(
-        '--tree_classification requires a managed curated or img database profile'
-    )
-}
-
-
 workflow {
-    query_input = file(params.query, checkIfExists: true)
-    query_files = query_input.isDirectory() \
-        ? Channel.fromPath("${query_input}/*.{fna,fa,fasta}", checkIfExists: true) \
-        : Channel.of(validateQueryFasta(query_input))
-    fna_files = query_files
-        .map { file ->
-            sample_id = file.baseName
+    if (params.help) {
+        helpMessage()
+        exit 0
+    }
+
+    if (params.version) {
+        log.info "SSUextract ${workflow.manifest.version}"
+        exit 0
+    }
+
+    validateNonNegativeInteger(params.min_extract_length, 'min_extract_length')
+    validatePositiveInteger(params.threads_per_job, 'threads_per_job')
+    validatePositiveInteger(params.max_blast_targets, 'max_blast_targets')
+    validatePositiveInteger(params.top_hits, 'top_hits')
+    validateBoolean(params.tree_classification, 'tree_classification')
+    validateMinimumInteger(params.tree_reference_count, 'tree_reference_count', 3)
+    validatePositiveInteger(params.tree_assignment_neighbors, 'tree_assignment_neighbors')
+    validateFraction(params.tree_trim_gap_fraction, 'tree_trim_gap_fraction')
+    if ((params.tree_assignment_neighbors as int) > (params.tree_reference_count as int)) {
+        throw new IllegalArgumentException(
+            '--tree_assignment_neighbors cannot exceed --tree_reference_count'
+        )
+    }
+    validateIdentifier(params.database_profile.toString(), 'database profile')
+    def database_config = loadDatabaseConfig(params.database_path, params.database_profile)
+    def runtime_code_digest = runtimeCodeDigest()
+    def model_markers = loadModelMarkers(params.model_marker_map)
+    def tree_classification = params.tree_classification.toString() == 'true'
+    def tree_model_ids = tree_classification \
+        ? loadTreeModelIds(model_markers) \
+        : [:]
+
+    def query_input = file(params.query, checkIfExists: true)
+    def query_files = query_input.isDirectory() \
+        ? channel.fromPath("${query_input}/*.{fna,fa,fasta}", checkIfExists: true) \
+        : channel.of(validateQueryFasta(query_input))
+    def fna_files = query_files
+        .map { fasta ->
+            def sample_id = fasta.baseName
             validateIdentifier(sample_id, 'sample')
-            tuple(sample_id, file)
+            tuple(sample_id, fasta)
         }
 
-    cm_models = Channel
+    def cm_models = channel
         .fromPath("${params.modeldir}/*.cm", checkIfExists: true)
-        .map { file ->
-            model_id = file.baseName
+        .map { model_file ->
+            def model_id = model_file.baseName
             validateIdentifier(model_id, 'model')
-            marker = markerForModel(model_id, model_markers)
-            db_prefix = databasePrefixForMarker(database_config, marker)
+            def marker = markerForModel(model_id, model_markers)
             tuple(
                 model_id,
-                file,
+                model_file,
                 marker,
-                db_prefix,
-                database_config.taxonomy_file ?: '',
-                database_config.source_records_file ?: '',
-                database_config.legacy
+                databasePrefixForMarker(database_config, marker),
+                database_config.taxonomy_file,
+                database_config.source_records_file
             )
         }
 
-    sample_model_combinations = fna_files.combine(cm_models)
+    def sample_model_combinations = fna_files.combine(cm_models)
 
     CMSEARCH(sample_model_combinations)
-    cmsearch_files_by_sample = CMSEARCH.out
-        .map { sample_id, model_id, cmsearch_out, fna_file, cm_model, marker, db_prefix, taxonomy_file, source_records_file, legacy_database ->
+    def cmsearch_files_by_sample = CMSEARCH.out
+        .map { sample_id, model_id, cmsearch_out, fna_file, cm_model, marker, db_prefix, taxonomy_file, source_records_file ->
             tuple(sample_id, cmsearch_out)
         }
         .groupTuple()
-    RESOLVE_MODEL_HITS(cmsearch_files_by_sample)
-    extraction_inputs = CMSEARCH.out
-        .map { sample_id, model_id, cmsearch_out, fna_file, cm_model, marker, db_prefix, taxonomy_file, source_records_file, legacy_database ->
-            tuple(sample_id, model_id, fna_file, cm_model, marker, db_prefix, taxonomy_file, source_records_file, legacy_database)
+    RESOLVE_MODEL_HITS(cmsearch_files_by_sample, runtime_code_digest)
+    def extraction_inputs = CMSEARCH.out
+        .map { sample_id, model_id, cmsearch_out, fna_file, cm_model, marker, db_prefix, taxonomy_file, source_records_file ->
+            tuple(sample_id, model_id, fna_file, cm_model, marker, db_prefix, taxonomy_file, source_records_file)
         }
         .combine(RESOLVE_MODEL_HITS.out, by: 0)
-    EXTRACT_HITS(extraction_inputs)
-    BLAST_ANNOTATE(EXTRACT_HITS.out)
+    EXTRACT_HITS(extraction_inputs, runtime_code_digest)
+    BLAST_ANNOTATE(EXTRACT_HITS.out, database_config, runtime_code_digest)
 
-    if (params.tree_classification) {
-        PREPARE_TREE_TASKS(EXTRACT_HITS.out)
-        tree_task_inputs = PREPARE_TREE_TASKS.out.tasks.flatMap { sample_id, model_id, task_directories ->
+    def tree_assignment_files
+    def tree_neighbor_files
+    if (tree_classification) {
+        PREPARE_TREE_TASKS(EXTRACT_HITS.out, database_config, runtime_code_digest, tree_model_ids)
+        def tree_task_inputs = PREPARE_TREE_TASKS.out.tasks.flatMap { sample_id, model_id, task_directories ->
             def directories = task_directories instanceof Collection \
                 ? task_directories \
                 : [task_directories]
             directories.collect { task_directory ->
-                def task_config = new JsonSlurper().parse(
+                def task_config = new groovy.json.JsonSlurper().parse(
                     new File(task_directory.toString(), 'task.json')
                 )
                 def marker = task_config.tree_marker.toString()
@@ -117,7 +101,7 @@ workflow {
                 )
             }
         }
-        TREE_CLASSIFY(tree_task_inputs)
+        TREE_CLASSIFY(tree_task_inputs, database_config, runtime_code_digest)
         tree_assignment_files = TREE_CLASSIFY.out
             .map { sample_id, model_id, query_key, tree_directory ->
                 file("${tree_directory}/${query_key}.tree_assignment.tsv")
@@ -138,24 +122,24 @@ workflow {
             }
             .ifEmpty([file("${projectDir}/config/empty.tree_neighbors.tsv")])
     } else {
-        tree_assignment_files = Channel.value(
+        tree_assignment_files = channel.value(
             [file("${projectDir}/config/empty.tree_assignment.tsv")]
         )
-        tree_neighbor_files = Channel.value(
+        tree_neighbor_files = channel.value(
             [file("${projectDir}/config/empty.tree_neighbors.tsv")]
         )
     }
 
-    summary_files = BLAST_ANNOTATE.out
+    def summary_files = BLAST_ANNOTATE.out
         .map { sample_id, model_id, m8, summary, top_hits, metadata -> summary }
         .collect()
-    metadata_files = BLAST_ANNOTATE.out
+    def metadata_files = BLAST_ANNOTATE.out
         .map { sample_id, model_id, m8, summary, top_hits, metadata -> metadata }
         .collect()
-    m8_files = BLAST_ANNOTATE.out
+    def m8_files = BLAST_ANNOTATE.out
         .map { sample_id, model_id, m8, summary, top_hits, metadata -> m8 }
         .collect()
-    top_hit_files = BLAST_ANNOTATE.out
+    def top_hit_files = BLAST_ANNOTATE.out
         .map { sample_id, model_id, m8, summary, top_hits, metadata -> top_hits }
         .collect()
 
@@ -165,15 +149,23 @@ workflow {
         m8_files,
         top_hit_files,
         tree_assignment_files,
-        tree_neighbor_files
+        tree_neighbor_files,
+        tree_classification ? 'tree' : 'blast',
+        database_config,
+        runtime_code_digest
     )
+
+    workflow.onComplete = {
+        println "Pipeline completed at: ${workflow.complete}"
+        println "Execution status: ${workflow.success ? 'OK' : 'failed'}"
+        println "Results directory: ${params.outdir}"
+    }
 }
 
 
 process CMSEARCH {
     tag "${sample_id}_${model_id}"
     publishDir "${params.outdir}/out", mode: 'copy', pattern: '*.out'
-    cpus params.threads_per_job
 
     input:
     tuple \
@@ -184,8 +176,7 @@ process CMSEARCH {
         val(marker), \
         val(db_prefix), \
         val(taxonomy_file), \
-        val(source_records_file), \
-        val(legacy_database)
+        val(source_records_file)
 
     output:
     tuple \
@@ -197,8 +188,7 @@ process CMSEARCH {
         val(marker), \
         val(db_prefix), \
         val(taxonomy_file), \
-        val(source_records_file), \
-        val(legacy_database)
+        val(source_records_file)
 
     script:
     """
@@ -218,13 +208,14 @@ process RESOLVE_MODEL_HITS {
 
     input:
     tuple val(sample_id), path(cmsearch_files)
+    val(runtime_code_digest)
 
     output:
     tuple val(sample_id), path("${sample_id}.accepted-hits.tsv")
 
     script:
-    cmsearch_arguments = cmsearch_files
-        .collect { "--cmsearch ${shellQuote(it)}" }
+    def cmsearch_arguments = cmsearch_files
+        .collect { cmsearch_file -> "--cmsearch ${shellQuote(cmsearch_file)}" }
         .join(' ')
     """
     # Runtime code SHA-256: ${runtime_code_digest}
@@ -250,8 +241,8 @@ process EXTRACT_HITS {
         val(db_prefix), \
         val(taxonomy_file), \
         val(source_records_file), \
-        val(legacy_database), \
         path(accepted_hits)
+    val(runtime_code_digest)
 
     output:
     tuple \
@@ -263,8 +254,7 @@ process EXTRACT_HITS {
         val(marker), \
         val(db_prefix), \
         val(taxonomy_file), \
-        val(source_records_file), \
-        val(legacy_database)
+        val(source_records_file)
 
     script:
     """
@@ -287,7 +277,6 @@ process BLAST_ANNOTATE {
     tag "${sample_id}_${model_id}"
     publishDir "${params.outdir}/m8", mode: 'copy', pattern: '*.m8'
     publishDir "${params.outdir}/m8", mode: 'copy', pattern: '*.top_hits.tsv'
-    cpus params.threads_per_job
 
     input:
     tuple \
@@ -299,8 +288,9 @@ process BLAST_ANNOTATE {
         val(marker), \
         val(db_prefix), \
         val(taxonomy_file), \
-        val(source_records_file), \
-        val(legacy_database)
+        val(source_records_file)
+    val(database_config)
+    val(runtime_code_digest)
 
     output:
     tuple \
@@ -312,18 +302,14 @@ process BLAST_ANNOTATE {
         path(metadata)
 
     script:
-    db_prefix_argument = shellQuote(db_prefix)
-    taxonomy_argument = legacy_database \
-        ? '' \
-        : "--taxonomy-db ${shellQuote(taxonomy_file)}"
-    source_records_argument = legacy_database \
-        ? '' \
-        : "--source-records-db ${shellQuote(source_records_file)}"
-    blast_fetch_targets = Math.max(
+    def db_prefix_argument = shellQuote(db_prefix)
+    def taxonomy_argument = shellQuote(taxonomy_file)
+    def source_records_argument = shellQuote(source_records_file)
+    def blast_fetch_targets = Math.max(
         (params.max_blast_targets as int) + 1,
         params.top_hits as int
     )
-    calibration_argument = database_config.runtime_calibration \
+    def calibration_argument = database_config.runtime_calibration \
         ? "--runtime-calibration ${shellQuote(database_config.runtime_calibration)}" \
         : ''
     """
@@ -343,8 +329,8 @@ process BLAST_ANNOTATE {
     python3 "${projectDir}/scripts/annotate_hits.py" \
         --hits "${hits_table}" \
         --m8 "${sample_id}_${model_id}.m8" \
-        ${taxonomy_argument} \
-        ${source_records_argument} \
+        --taxonomy-db ${taxonomy_argument} \
+        --source-records-db ${source_records_argument} \
         ${calibration_argument} \
         --marker ${shellQuote(marker.toString())} \
         --reference-digest "${database_config.reference_digest}" \
@@ -359,7 +345,6 @@ process BLAST_ANNOTATE {
 
 process PREPARE_TREE_TASKS {
     tag "${sample_id}_${model_id}"
-    cpus params.threads_per_job
 
     input:
     tuple \
@@ -371,8 +356,10 @@ process PREPARE_TREE_TASKS {
         val(marker), \
         val(db_prefix), \
         val(taxonomy_file), \
-        val(source_records_file), \
-        val(legacy_database)
+        val(source_records_file)
+    val(database_config)
+    val(runtime_code_digest)
+    val(tree_model_ids)
 
     output:
     tuple \
@@ -384,20 +371,20 @@ process PREPARE_TREE_TASKS {
     path("${sample_id}_${model_id}.skipped.tree_assignment.tsv"), emit: skipped
 
     script:
-    marker_model_arguments = tree_model_ids
+    def marker_model_arguments = tree_model_ids
         .collect { tree_marker, tree_model ->
             "--marker-model ${shellQuote("${tree_marker}=${tree_model}")}"
         }
         .join(' ')
-    fetch_targets = Math.max(
+    def fetch_targets = Math.max(
         Math.max(params.tree_reference_count as int, params.max_blast_targets as int),
         100
     ) + 1
-    database_16s = shellQuote(databasePrefixForMarker(database_config, '16S'))
-    database_18s = shellQuote(databasePrefixForMarker(database_config, '18S'))
-    taxonomy_argument = shellQuote(taxonomy_file)
-    source_records_argument = shellQuote(source_records_file)
-    calibration_argument = database_config.runtime_calibration \
+    def database_16s = shellQuote(databasePrefixForMarker(database_config, '16S'))
+    def database_18s = shellQuote(databasePrefixForMarker(database_config, '18S'))
+    def taxonomy_argument = shellQuote(taxonomy_file)
+    def source_records_argument = shellQuote(source_records_file)
+    def calibration_argument = database_config.runtime_calibration \
         ? "--runtime-calibration ${shellQuote(database_config.runtime_calibration)}" \
         : ''
     """
@@ -448,8 +435,7 @@ process PREPARE_TREE_TASKS {
 
 process TREE_CLASSIFY {
     tag "${sample_id}_${query_key}"
-    publishDir "${params.outdir}/phylogeny/${sample_id}/${model_id}", mode: 'copy'
-    cpus params.threads_per_job
+    publishDir path: { "${params.outdir}/phylogeny/${sample_id}/${model_id}" }, mode: 'copy'
 
     input:
     tuple \
@@ -459,6 +445,8 @@ process TREE_CLASSIFY {
         path(tree_task, name: 'tree_input'), \
         path(cm_model), \
         val(db_prefix)
+    val(database_config)
+    val(runtime_code_digest)
 
     output:
     tuple \
@@ -468,7 +456,7 @@ process TREE_CLASSIFY {
         path("${query_key}")
 
     script:
-    db_prefix_argument = shellQuote(db_prefix)
+    def db_prefix_argument = shellQuote(db_prefix)
     """
     # Database SHA-256: ${database_config.content_digest}
     # Runtime code SHA-256: ${runtime_code_digest}
@@ -544,6 +532,9 @@ process FINALIZE_SUMMARIES {
     path(top_hit_files)
     path(tree_assignment_files)
     path(tree_neighbor_files)
+    val(taxonomy_mode)
+    val(database_config)
+    val(runtime_code_digest)
 
     output:
     path('cmsearch_summary.tsv')
@@ -554,7 +545,7 @@ process FINALIZE_SUMMARIES {
     path('run_provenance.json')
 
     script:
-    provenance = JsonOutput.prettyPrint(JsonOutput.toJson([
+    def provenance = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([
         schema_version: 1,
         application_version: workflow.manifest.version,
         database_profile: params.database_profile,
@@ -565,7 +556,7 @@ process FINALIZE_SUMMARIES {
         runtime_code_sha256: runtime_code_digest,
         assignment_policy: 'runtime_lca_v1',
         max_blast_targets: params.max_blast_targets as int,
-        taxonomy_mode: params.tree_classification ? 'tree' : 'blast',
+        taxonomy_mode: taxonomy_mode,
         runtime_calibration_sha256: database_config.calibration_digest
     ]))
     """
@@ -575,17 +566,10 @@ process FINALIZE_SUMMARIES {
         --summary-output cmsearch_summary.tsv \
         --category-output cmsearch_summary.tab \
         --top-hits-output blast_top_hits.tsv \
-        --taxonomy-mode "${params.tree_classification ? 'tree' : 'blast'}" \
+        --taxonomy-mode "${taxonomy_mode}" \
         --tree-neighbor-output tree_nearest_neighbors.tsv \
         --merged-m8-output merged.m8
     """
-}
-
-
-workflow.onComplete {
-    println "Pipeline completed at: $workflow.complete"
-    println "Execution status: ${workflow.success ? 'OK' : 'failed'}"
-    println "Results directory: ${params.outdir}"
 }
 
 
@@ -600,7 +584,7 @@ def loadJsonFile(pathValue, label) {
     if (!path.isFile()) {
         throw new IllegalArgumentException("Missing ${label}: ${path}")
     }
-    return new JsonSlurper().parse(path)
+    return new groovy.json.JsonSlurper().parse(path)
 }
 
 
@@ -657,41 +641,13 @@ def loadDatabaseConfig(databasePath, profile) {
     def profileDir = new File(root, profile.toString())
     def manifestFile = new File(profileDir, 'manifest.json')
     if (!manifestFile.isFile()) {
-        if (profile.toString() != 'curated') {
-            throw new IllegalArgumentException(
-                "Database profile '${profile}' is not installed under ${root}. " +
-                "Run 'pixi run setup --database_profile ${profile}'."
-            )
-        }
-        def legacyPrefix = new File(root, 'silva-138-1_pr2-4-12').toString()
-        ['nhr', 'nin', 'nsq'].each { suffix ->
-            if (!new File("${legacyPrefix}.${suffix}").isFile()) {
-                throw new IllegalArgumentException(
-                    "Database profile '${profile}' is not installed under ${root}. " +
-                    "Run 'pixi run setup --database_profile ${profile}'."
-                )
-            }
-        }
-        log.warn 'Using deprecated legacy SILVA 138.1/PR2 4.12 database layout.'
-        def hashes = blastFiles(legacyPrefix).collectEntries { path ->
-            [path.name, sha256File(path)]
-        }
-        def digest = contentDigest(hashes)
-        return [
-            legacy: true,
-            prefixes: ['16S': legacyPrefix, '18S': legacyPrefix],
-            taxonomy_file: null,
-            source_records_file: null,
-            runtime_calibration: null,
-            calibration_digest: null,
-            manifest_digest: null,
-            content_digest: digest,
-            reference_digest: digest,
-            version: 'legacy'
-        ]
+        throw new IllegalArgumentException(
+            "Database profile '${profile}' is not installed under ${root}. " +
+            "Run 'pixi run setup --database_profile ${profile}'."
+        )
     }
 
-    def manifest = new JsonSlurper().parse(manifestFile)
+    def manifest = new groovy.json.JsonSlurper().parse(manifestFile)
     if (manifest.schema_version != 1 || manifest.profile != profile) {
         throw new IllegalArgumentException(
             "Invalid database manifest ${manifestFile}: schema/profile mismatch"
@@ -752,7 +708,7 @@ def loadDatabaseConfig(databasePath, profile) {
     def calibrationFile = manifest.runtime_calibration \
         ? resolveContainedPath(profileDir, manifest.runtime_calibration.toString(), 'runtime calibration') \
         : null
-    def referenceFiles = prefixes.values().collectMany { blastFiles(it) }
+    def referenceFiles = prefixes.values().collectMany { prefix -> blastFiles(prefix) }
     referenceFiles.add(taxonomyFile)
     def runtimeFiles = referenceFiles + [sourceRecordsFile]
     if (calibrationFile) {
@@ -782,7 +738,6 @@ def loadDatabaseConfig(databasePath, profile) {
         ? profileDir.canonicalFile.toPath().relativize(calibrationFile.toPath()).toString() \
         : null
     return [
-        legacy: false,
         prefixes: prefixes,
         taxonomy_file: taxonomyFile.toString(),
         source_records_file: sourceRecordsFile.toString(),
@@ -797,29 +752,26 @@ def loadDatabaseConfig(databasePath, profile) {
 
 
 def sha256File(path) {
-    def digest = MessageDigest.getInstance('SHA-256')
+    def digest = java.security.MessageDigest.getInstance('SHA-256')
     path.withInputStream { input ->
-        byte[] buffer = new byte[1024 * 1024]
-        int count
-        while ((count = input.read(buffer)) != -1) {
-            digest.update(buffer, 0, count)
-        }
+        new java.security.DigestInputStream(input, digest)
+            .transferTo(java.io.OutputStream.nullOutputStream())
     }
     digest.digest().encodeHex().toString()
 }
 
 
 def contentDigest(hashes) {
-    def text = hashes.keySet().sort().collect { "${it}\t${hashes[it]}\n" }.join('')
-    MessageDigest.getInstance('SHA-256').digest(text.getBytes('UTF-8')).encodeHex().toString()
+    def text = hashes.keySet().sort().collect { name -> "${name}\t${hashes[name]}\n" }.join('')
+    java.security.MessageDigest.getInstance('SHA-256').digest(text.getBytes('UTF-8')).encodeHex().toString()
 }
 
 
 def blastFiles(prefixValue) {
     def prefix = new File(prefixValue.toString()).canonicalFile
-    (prefix.parentFile.listFiles() ?: []).findAll {
-        it.isFile() && it.name.startsWith(prefix.name + '.')
-    }.sort { it.name }
+    (prefix.parentFile.listFiles() ?: []).findAll { candidate ->
+        candidate.isFile() && candidate.name.startsWith(prefix.name + '.')
+    }.sort { candidate -> candidate.name }
 }
 
 
@@ -858,11 +810,11 @@ def databasePrefixForMarker(databaseConfig, marker) {
 
 
 def validateBlastPrefix(prefix) {
-    def process = new ProcessBuilder('blastdbcmd', '-db', prefix, '-info')
+    def blastdbcmd = new ProcessBuilder('blastdbcmd', '-db', prefix, '-info')
         .redirectErrorStream(true)
         .start()
-    def output = process.inputStream.text
-    if (process.waitFor() != 0) {
+    def output = blastdbcmd.inputStream.text
+    if (blastdbcmd.waitFor() != 0) {
         throw new IllegalArgumentException(
             "Invalid BLAST database prefix '${prefix}': ${output.trim()}"
         )
@@ -890,7 +842,7 @@ def validatePositiveInteger(value, name) {
         if ((value as int) < 1) {
             throw new IllegalArgumentException("--${name} must be at least 1")
         }
-    } catch (NumberFormatException ignored) {
+    } catch (NumberFormatException _ignored) {
         throw new IllegalArgumentException("--${name} must be an integer")
     }
 }
@@ -903,7 +855,7 @@ def validateMinimumInteger(value, name, minimum) {
                 "--${name} must be at least ${minimum}"
             )
         }
-    } catch (NumberFormatException ignored) {
+    } catch (NumberFormatException _ignored) {
         throw new IllegalArgumentException("--${name} must be an integer")
     }
 }
@@ -914,7 +866,7 @@ def validateNonNegativeInteger(value, name) {
         if ((value as int) < 0) {
             throw new IllegalArgumentException("--${name} must be non-negative")
         }
-    } catch (NumberFormatException ignored) {
+    } catch (NumberFormatException _ignored) {
         throw new IllegalArgumentException("--${name} must be an integer")
     }
 }
@@ -936,7 +888,7 @@ def validateQueryFasta(path) {
 
 
 def validateBoolean(value, name) {
-    if (!(value instanceof Boolean)) {
+    if (!(value.toString() in ['true', 'false'])) {
         throw new IllegalArgumentException(
             "--${name} must be supplied as a bare flag"
         )
@@ -952,7 +904,7 @@ def validateFraction(value, name) {
                 "--${name} must be at least 0 and less than 1"
             )
         }
-    } catch (NumberFormatException ignored) {
+    } catch (NumberFormatException _ignored) {
         throw new IllegalArgumentException("--${name} must be numeric")
     }
 }
