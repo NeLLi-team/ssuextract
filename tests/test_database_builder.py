@@ -8,12 +8,20 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+import duckdb
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import build_database_release as builder
-
+from database_contracts import (  # noqa: E402  # needs the scripts path set above
+    ImgLocation,
+    SourceRecord,
+)
+from database_release_io import (  # noqa: E402  # needs the scripts path set above
+    write_img_location_parquet,
+    write_source_records_parquet,
+)
 
 PR2_HEADER = (
     "AB353770.1.1740_U|18S_rRNA|nucleus||Eukaryota|TSAR|Alveolata|"
@@ -965,6 +973,91 @@ class PrivacyAndOutputTests(unittest.TestCase):
                     "centroid_taxonomy_source",
                 }.issubset(preferred_columns)
             )
+
+    def test_parquet_rows_round_trip_nulls_and_special_characters(self) -> None:
+        headers = [
+            "plain",
+            "",
+            'quote " inside',
+            "comma, inside",
+            "line\nbreak",
+            "carriage\rreturn",
+            "Ünïcode τ",
+            "\\N",
+            "NULL",
+            " leading space",
+        ]
+        source_records = [
+            SourceRecord(
+                f"SRC_{index:02d}",
+                f"SSU_{index:02d}",
+                "IMG",
+                "1",
+                f"id_{index}",
+                header,
+                "16S",
+                None if index % 2 else header,
+            )
+            for index, header in enumerate(headers)
+        ]
+        locations = [
+            ImgLocation("3300000001", 1.5, None),
+            ImgLocation("3300000002", None, -122.25),
+            ImgLocation("3300000003", 0.1 + 0.2, 1e-05),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            write_source_records_parquet(output / "source.parquet", source_records)
+            write_img_location_parquet(output / "location.parquet", locations)
+            connection = duckdb.connect(":memory:")
+            try:
+                source_rows = connection.execute(
+                    "SELECT * FROM read_parquet(?)", [str(output / "source.parquet")]
+                ).fetchall()
+                location_rows = connection.execute(
+                    "SELECT * FROM read_parquet(?)", [str(output / "location.parquet")]
+                ).fetchall()
+            finally:
+                connection.close()
+
+        self.assertEqual(
+            source_rows,
+            [
+                (
+                    record.source_record_id,
+                    record.sequence_id,
+                    record.reference_source,
+                    record.source_version,
+                    record.source_identifier,
+                    record.original_header,
+                    record.marker,
+                    record.taxon_oid,
+                )
+                for record in source_records
+            ],
+        )
+        self.assertEqual(
+            location_rows,
+            [(item.taxon_oid, item.latitude, item.longitude) for item in locations],
+        )
+
+    def test_parquet_row_longer_than_the_default_csv_line_limit_is_written(
+        self,
+    ) -> None:
+        header = "x" * 2_100_000
+        record = SourceRecord("SRC_long", "SSU_long", "IMG", "1", "id", header, "16S")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "source.parquet"
+            write_source_records_parquet(target, [record])
+            connection = duckdb.connect(":memory:")
+            try:
+                stored = connection.execute(
+                    "SELECT original_header FROM read_parquet(?)", [str(target)]
+                ).fetchone()[0]
+            finally:
+                connection.close()
+
+        self.assertEqual(stored, header)
 
 
 class FetchTests(unittest.TestCase):

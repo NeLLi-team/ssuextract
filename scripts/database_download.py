@@ -357,6 +357,7 @@ def download_verified_archive(
                         "Archive server ignored the byte range; restarting safely from byte 0.",
                     )
                     size, digest = 0, hashlib.sha256()
+                    resumed_existing = False
                 progress_started = monotonic()
                 progress_start_size = size
                 last_progress = progress_started

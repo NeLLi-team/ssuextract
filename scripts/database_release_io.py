@@ -2,23 +2,25 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
 import tempfile
 from collections import defaultdict
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import TYPE_CHECKING
 
 from atomic_io import replace_and_fsync
 from database_contracts import (
+    IMG_LOCATION_COLUMNS,
+    PREFERRED_COMPARTMENTS,
     BuildError,
     DatabaseModel,
     FastaFormatError,
-    IMG_LOCATION_COLUMNS,
     ImgLocation,
-    PREFERRED_COMPARTMENTS,
     PreferredTaxonomy,
     ReleaseValidationError,
     SequenceRecord,
@@ -30,6 +32,11 @@ from database_sources import (
     sequence_identifier,
     validate_privacy_columns,
 )
+
+if TYPE_CHECKING:
+    import duckdb
+
+_CSV_DEFAULT_MAX_LINE_BYTES = 2_000_000
 
 
 def _duplicates(values: Iterable[str]) -> set[str]:
@@ -263,10 +270,34 @@ def write_marker_fasta(
     return target
 
 
+def _load_rows(
+    connection: duckdb.DuckDBPyConnection,
+    rows: Sequence[tuple[object, ...]],
+    staging_csv: Path,
+) -> None:
+    """Bulk-load rows into ``release_table`` in their given order.
+
+    One INSERT per row takes about 1 ms, which is hours for a release table.
+    The CSV keeps ``None`` (an unquoted empty field) distinct from the empty
+    string (a quoted empty field).
+    """
+    with staging_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, quoting=csv.QUOTE_NOTNULL, lineterminator="\n")
+        longest_row_chars = max(writer.writerow(row) for row in rows)
+    # DuckDB rejects CSV rows above its line limit; UTF-8 needs at most four
+    # bytes per character.
+    max_line_bytes = max(_CSV_DEFAULT_MAX_LINE_BYTES, 4 * longest_row_chars)
+    connection.execute(
+        "COPY release_table FROM ? (FORMAT CSV, HEADER false, DELIMITER ',', "
+        "QUOTE '\"', ESCAPE '\"', NULLSTR '', ALLOW_QUOTED_NULLS false, "
+        f"NEW_LINE '\\n', MAX_LINE_SIZE {max_line_bytes})",
+        [str(staging_csv)],
+    )
+
+
 def _write_parquet(
     path: Path,
     create_sql: str,
-    insert_sql: str,
     rows: Sequence[tuple[object, ...]],
 ) -> Path:
     try:
@@ -283,7 +314,7 @@ def _write_parquet(
             connection.execute("SET threads = 1")
             connection.execute(create_sql)
             if rows:
-                connection.executemany(insert_sql, rows)
+                _load_rows(connection, rows, Path(staging) / "rows.csv")
             connection.execute(
                 "COPY release_table TO ? (FORMAT PARQUET, COMPRESSION ZSTD)",
                 [str(temporary)],
@@ -309,7 +340,6 @@ def write_sequences_parquet(path: str | Path, records: Iterable[SequenceRecord])
     return _write_parquet(
         Path(path),
         "CREATE TABLE release_table(sequence_id VARCHAR, length BIGINT, sha256 VARCHAR, markers VARCHAR)",
-        "INSERT INTO release_table VALUES (?, ?, ?, ?)",
         rows,
     )
 
@@ -334,7 +364,6 @@ def write_source_records_parquet(path: str | Path, records: Iterable[SourceRecor
             source_record_id VARCHAR, sequence_id VARCHAR, reference_source VARCHAR,
             source_version VARCHAR, source_identifier VARCHAR, original_header VARCHAR,
             marker VARCHAR, taxon_oid VARCHAR)""",
-        "INSERT INTO release_table VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
 
@@ -366,7 +395,6 @@ def write_taxonomy_assignments_parquet(
             taxonomy VARCHAR, taxonomy_source VARCHAR, domain VARCHAR, compartment VARCHAR,
             assignment_method VARCHAR, evidence VARCHAR, centroid_name VARCHAR,
             centroid_taxonomy VARCHAR, centroid_taxonomy_source VARCHAR)""",
-        "INSERT INTO release_table VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
 
@@ -399,7 +427,6 @@ def write_preferred_taxonomy_parquet(
             assignment_method VARCHAR, cross_domain_conflict BOOLEAN,
             taxonomy_alternatives VARCHAR, centroid_names VARCHAR,
             centroid_taxonomy VARCHAR, centroid_taxonomy_source VARCHAR)""",
-        "INSERT INTO release_table VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
 
@@ -413,7 +440,6 @@ def write_img_location_parquet(path: str | Path, records: Iterable[ImgLocation])
     return _write_parquet(
         Path(path),
         "CREATE TABLE release_table(taxon_oid VARCHAR, latitude DOUBLE, longitude DOUBLE)",
-        "INSERT INTO release_table VALUES (?, ?, ?)",
         rows,
     )
 

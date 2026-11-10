@@ -190,6 +190,8 @@ def _provenance(
                     "5",
                     "-out",
                     "blast/{marker}",
+                    "-title",
+                    "SSUextract {profile} {version} {marker}",
                 ],
             }
         },

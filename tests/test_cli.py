@@ -512,6 +512,7 @@ class DatabaseConfigTests(unittest.TestCase):
                         check=True,
                         capture_output=True,
                         text=True,
+                        stdin=subprocess.DEVNULL,
                         env={
                             **os.environ,
                             "PATH": f"{executable_dir}:{os.environ['PATH']}",

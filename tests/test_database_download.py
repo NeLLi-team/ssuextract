@@ -275,6 +275,35 @@ class DatabaseDownloadTests(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), data)
         self.assertTrue(any("ignored the byte range" in message for message in messages))
 
+    def test_corrupt_full_body_after_ignored_range_is_not_downloaded_twice(
+        self,
+    ) -> None:
+        data = b"abcdefghij"
+        corrupt = b"abcdefghiX"
+        requests = []
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / "database.part"
+            destination.write_bytes(data[:4])
+
+            def opener(request, timeout):
+                requests.append(request)
+                return FakeResponse(
+                    corrupt, headers={"Content-Length": str(len(corrupt))}
+                )
+
+            with self.assertRaisesRegex(
+                downloader.DownloadIntegrityError, "SHA-256 mismatch"
+            ):
+                downloader.download_verified_archive(
+                    "https://example.org/database.tar.zst",
+                    destination,
+                    len(data),
+                    sha256(data),
+                    opener=opener,
+                )
+
+        self.assertEqual(len(requests), 1)
+
     def test_malformed_range_response_fails_without_changing_partial(self) -> None:
         data = b"abcdefghij"
         with tempfile.TemporaryDirectory() as tmp:

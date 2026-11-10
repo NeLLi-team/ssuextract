@@ -30,6 +30,7 @@ MIN_QUERY_COVERAGE = Decimal("80")
 CANDIDATE_BITSCORE_FRACTION = Decimal("0.98")
 BLAST_MAX_TARGETS = 500
 BLAST_FETCH_TARGETS = BLAST_MAX_TARGETS + 1
+_TAXONOMY_FETCH_ROWS = 100_000
 CALIBRATION_SCHEMA_VERSION = 3
 CALIBRATION_USE_CASE = "img_centroid"
 CALIBRATION_STRATUM_BASIS = "predicted_candidate_source_and_lca_domain"
@@ -297,20 +298,20 @@ def load_taxonomy_parquet(
         if thread_limit < 1:
             raise ValueError("DuckDB thread limit must be positive")
         connection.execute("SET threads = ?", [thread_limit])
-        connection.execute("CREATE TABLE wanted(sequence_id VARCHAR PRIMARY KEY)")
-        connection.executemany(
-            "INSERT INTO wanted VALUES (?)", [(subject,) for subject in sorted(subjects)]
-        )
-        rows = connection.execute(
+        # Filtering here avoids one INSERT per wanted subject, which takes
+        # about 0.3 ms each and dominated the load for large searches.
+        cursor = connection.execute(
             """
-            SELECT p.sequence_id, p.taxonomy, p.taxonomy_source, p.domain, p.compartment
-                 , p.cross_domain_conflict, p.taxonomy_alternatives
-            FROM read_parquet(?) AS p
-            INNER JOIN wanted AS w USING (sequence_id)
-            ORDER BY p.sequence_id
+            SELECT CAST(sequence_id AS VARCHAR), taxonomy, taxonomy_source, domain
+                 , compartment, cross_domain_conflict, taxonomy_alternatives
+            FROM read_parquet(?)
+            ORDER BY sequence_id
             """,
             [str(Path(path))],
-        ).fetchall()
+        )
+        rows = []
+        while batch := cursor.fetchmany(_TAXONOMY_FETCH_ROWS):
+            rows.extend(row for row in batch if row[0] in subjects)
     finally:
         connection.close()
 

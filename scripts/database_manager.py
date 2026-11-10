@@ -417,10 +417,11 @@ def validate_profile_directory(
 
     for artifact in manifest["artifacts"]:
         relative = _safe_relative_path(artifact["path"], "artifact path", ManifestError)
-        path = (directory / Path(relative)).resolve()
+        listed_path = directory / Path(relative)
+        path = listed_path.resolve()
         if not _inside(directory, path):
             raise IntegrityError(f"Artifact escapes profile directory: {relative}")
-        if not path.is_file() or path.is_symlink():
+        if not path.is_file() or listed_path.is_symlink():
             raise IntegrityError(f"Manifest artifact is not a regular file: {relative}")
         actual_size = path.stat().st_size
         if actual_size == 0:
@@ -1051,7 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
                     require_version=args.require_version,
                 )
             )
-    except DatabaseError as error:
+    except (DatabaseError, OSError) as error:
         progress.finish()
         print(f"database-manager: {error}", file=sys.stderr)
         return 2

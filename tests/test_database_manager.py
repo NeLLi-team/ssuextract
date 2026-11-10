@@ -1,6 +1,8 @@
+import contextlib
 import hashlib
 import io
 import json
+import re
 import subprocess
 import sys
 import tarfile
@@ -8,7 +10,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -208,6 +209,19 @@ class DatabaseManagerTests(unittest.TestCase):
                 manager.validate_profile_directory(directory, "curated")
         run.assert_not_called()
 
+    @mock.patch.object(manager.subprocess, "run", side_effect=blast_ok)
+    def test_symlinked_artifact_inside_profile_is_rejected(self, run) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = write_profile(Path(tmp))
+            artifact = directory / "blast" / "ssu.unusual"
+            target = directory / "blast" / "real-file"
+            artifact.rename(target)
+            artifact.symlink_to(target.name)
+
+            with self.assertRaisesRegex(manager.IntegrityError, "not a regular file"):
+                manager.validate_profile_directory(directory, "curated")
+        run.assert_not_called()
+
     def test_manifest_rejects_artifact_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp) / "curated"
@@ -226,6 +240,53 @@ class DatabaseManagerTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(manager.ManifestError, "escapes"):
                 manager.load_manifest(directory, "curated")
+
+    def test_unusable_database_root_is_reported_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = Path(tmp) / "file"
+            blocker.write_text("not a directory", encoding="utf-8")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                status = manager.main(
+                    [
+                        "install",
+                        "--root",
+                        str(blocker / "database"),
+                        "--profile",
+                        "curated",
+                    ]
+                )
+
+        self.assertEqual(status, 2)
+        self.assertIn("database-manager:", stderr.getvalue())
+
+    def test_zstd_tar_archive_is_extracted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "profile.tar.zst"
+            with tarfile.open(archive, mode="w:zst") as handle:
+                member = tarfile.TarInfo("curated/file.txt")
+                member.size = len(b"payload")
+                handle.addfile(member, io.BytesIO(b"payload"))
+
+            manager.safe_extract_tar(archive, root / "extract")
+
+            self.assertEqual(
+                (root / "extract" / "curated" / "file.txt").read_bytes(), b"payload"
+            )
+
+    def test_declared_python_range_can_read_zstd_archives(self) -> None:
+        declared_minimums = {
+            "pixi.toml": r'^python = ">=3\.(\d+),',
+            "config/environment.yml": r"^  - python >=3\.(\d+),",
+        }
+        for name, pattern in declared_minimums.items():
+            with self.subTest(file=name):
+                text = (REPO / name).read_text(encoding="utf-8")
+                match = re.search(pattern, text, flags=re.MULTILINE)
+                self.assertIsNotNone(match)
+                # tarfile reads .tar.zst archives from Python 3.14.
+                self.assertGreaterEqual(int(match.group(1)), 14)
 
     def test_tar_extraction_rejects_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
