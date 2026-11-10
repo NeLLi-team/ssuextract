@@ -25,7 +25,6 @@ from top_hit_reporting import (
     ReferenceRecord,
     load_query_sequences,
     load_reference_records,
-    reference_record,
 )
 from tree_schema import REFERENCE_FIELDS, TREE_ASSIGNMENT_FIELDS
 
@@ -111,20 +110,7 @@ def _task_key(sample: str, model: str, query: str) -> str:
     return f"q_{digest[:16]}"
 
 
-def _taxonomy_values(record: TaxonomyRecord | None) -> dict[str, str]:
-    if record is None:
-        return {
-            "reference_source": "",
-            "taxonomy": "",
-            "taxonomy_source": "",
-            "taxonomy_domain": "",
-            "compartment": "",
-            "taxonomy_assignment_method": "",
-            "taxonomy_alternatives": "",
-            "centroid_names": "",
-            "centroid_taxonomy": "",
-            "centroid_taxonomy_source": "",
-        }
+def _taxonomy_values(record: TaxonomyRecord) -> dict[str, str]:
     return {
         "reference_source": record.reference_source,
         "taxonomy": record.taxonomy,
@@ -143,7 +129,7 @@ def _reference_row(
     leaf_id: str,
     rank: int,
     hit: BlastHit,
-    taxonomy: TaxonomyRecord | None,
+    taxonomy: TaxonomyRecord,
     reference: ReferenceRecord,
 ) -> dict[str, object]:
     return {
@@ -308,8 +294,8 @@ def prepare_tree_tasks(
                 f"REF{rank:04d}",
                 rank,
                 hit,
-                taxonomy_records.get(hit.subject),
-                reference_record(hit.subject, reference_records),
+                taxonomy_records[hit.subject],
+                reference_records[hit.subject],
             )
             for rank, hit in enumerate(selected_hits, start=1)
         ]

@@ -24,7 +24,6 @@ from top_hit_reporting import (
     ReferenceRecord,
     load_query_sequences,
     load_reference_records,
-    reference_record,
     write_top_hits,
 )
 
@@ -97,17 +96,15 @@ def load_taxonomy_records(
             "centroid_taxonomy",
             "centroid_taxonomy_source",
         }
-        present_centroid_columns = centroid_columns.intersection(columns)
+        present_centroid_columns = centroid_columns & columns
         if present_centroid_columns and present_centroid_columns != centroid_columns:
             raise ValueError("Preferred taxonomy has an incomplete centroid schema")
+        # Database release 1.0.1 has no centroid columns.
         centroid_fields = (
-            ("centroid_names", "centroid_taxonomy", "centroid_taxonomy_source")
+            "centroid_names, centroid_taxonomy, centroid_taxonomy_source"
             if present_centroid_columns
-            else (
-                "'' AS centroid_names",
-                "'' AS centroid_taxonomy",
-                "'' AS centroid_taxonomy_source",
-            )
+            else "'' AS centroid_names, '' AS centroid_taxonomy, "
+            "'' AS centroid_taxonomy_source"
         )
         query = f"""
             SELECT
@@ -120,12 +117,10 @@ def load_taxonomy_records(
                 assignment_method,
                 cross_domain_conflict,
                 taxonomy_alternatives,
-                {centroid_fields[0]},
-                {centroid_fields[1]},
-                {centroid_fields[2]}
+                {centroid_fields}
             FROM read_parquet(?)
             WHERE sequence_id IN ({placeholders})
-        """
+        """  # noqa: S608  # only "?" markers and fixed column text are inserted
         rows = connection.execute(query, parameters).fetchall()
     finally:
         connection.close()
@@ -176,34 +171,30 @@ def annotate_hits(
     hits_file: str | Path,
     m8_file: str | Path,
     output_file: str | Path,
-    taxonomy_file: str | Path | None = None,
-    max_targets: int = 500,
     *,
-    query_fasta: str | Path | None = None,
-    source_records_file: str | Path | None = None,
-    top_hits_output: str | Path | None = None,
-    top_hits: int = 5,
-    marker: str = "16S",
+    taxonomy_file: str | Path,
+    source_records_file: str | Path,
+    query_fasta: str | Path,
+    top_hits_output: str | Path,
+    top_hits: int,
+    max_targets: int,
+    marker: str,
+    reference_digest: str,
     runtime_calibration: str | Path | None = None,
-    reference_digest: str = "",
 ) -> None:
     if max_targets < 1:
         raise ValueError("max_targets must be positive")
     if top_hits < 1:
         raise ValueError("top_hits must be positive")
     blast_hits = load_blast_hits(m8_file)
-    taxonomy_records: dict[str, TaxonomyRecord] = {}
-    reference_records: dict[str, ReferenceRecord] = {}
     subjects = {
         hit.subject
         for query_hits in blast_hits.values()
         for hit in query_hits
     }
-    if taxonomy_file is not None:
-        taxonomy_records = load_taxonomy_records(taxonomy_file, subjects)
-    if source_records_file is not None:
-        reference_records = load_reference_records(source_records_file, subjects)
-    query_sequences = load_query_sequences(query_fasta) if query_fasta else {}
+    taxonomy_records = load_taxonomy_records(taxonomy_file, subjects)
+    reference_records = load_reference_records(source_records_file, subjects)
+    query_sequences = load_query_sequences(query_fasta)
     calibration = load_runtime_calibration(runtime_calibration, reference_digest)
 
     with Path(hits_file).open(newline="") as hits_handle:
@@ -215,9 +206,7 @@ def annotate_hits(
         hit_rows = list(reader)
 
     missing_sequences = sorted(
-        row["name"]
-        for row in hit_rows
-        if query_fasta and row["name"] not in query_sequences
+        row["name"] for row in hit_rows if row["name"] not in query_sequences
     )
     if missing_sequences:
         raise ValueError(
@@ -227,34 +216,28 @@ def annotate_hits(
     decisions: dict[str, RuntimeTaxonomyDecision] = {}
     for row in hit_rows:
         query = row["name"]
-        query_length = (
-            len(query_sequences[query])
-            if query in query_sequences
-            else int(row["length"])
-        )
         decisions[query] = resolve_runtime_taxonomy(
             blast_hits.get(query, ()),
             taxonomy_records,
-            query_length=query_length,
+            query_length=len(query_sequences[query]),
             marker=marker,
             calibration=calibration,
             max_targets=max_targets,
         )
 
-    if top_hits_output is not None:
-        write_top_hits(
-            top_hits_output,
-            hit_rows,
-            blast_hits,
-            taxonomy_records,
-            reference_records,
-            query_sequences,
-            top_hits,
-            {
-                query: {hit.subject for hit in decision.candidate_hits}
-                for query, decision in decisions.items()
-            },
-        )
+    write_top_hits(
+        top_hits_output,
+        hit_rows,
+        blast_hits,
+        taxonomy_records,
+        reference_records,
+        query_sequences,
+        top_hits,
+        {
+            query: {hit.subject for hit in decision.candidate_hits}
+            for query, decision in decisions.items()
+        },
+    )
 
     with Path(output_file).open("w", newline="") as output_handle:
         writer = csv.DictWriter(
@@ -273,10 +256,10 @@ def annotate_hits(
                 else (query_hits[0] if query_hits else None)
             )
             selected_taxonomy = (
-                taxonomy_records.get(blast_hit.subject) if blast_hit else None
+                taxonomy_records[blast_hit.subject] if blast_hit else None
             )
             blast_reference = (
-                reference_record(blast_hit.subject, reference_records)
+                reference_records[blast_hit.subject]
                 if blast_hit
                 else ReferenceRecord("", "", ())
             )
@@ -309,7 +292,7 @@ def annotate_hits(
                     ),
                     "reference_identifiers": blast_reference.identifiers,
                     "reference_versions": blast_reference.versions,
-                    "query_sequence": query_sequences.get(row["name"], ""),
+                    "query_sequence": query_sequences[row["name"]],
                     "taxonomy_mode": "blast",
                     "blast_taxonomy": decision.taxonomy,
                     "blast_taxonomy_source": decision.taxonomy_source,
@@ -357,17 +340,7 @@ def annotate_hits(
                         selected_taxonomy.assignment_method if selected_taxonomy else ""
                     ),
                     "blast_query_coverage": (
-                        format(
-                            query_coverage(
-                                blast_hit,
-                                len(query_sequences[row["name"]])
-                                if row["name"] in query_sequences
-                                else int(row["length"]),
-                            ),
-                            ".6g",
-                        )
-                        if blast_hit
-                        else ""
+                        format(query_coverage(blast_hit), ".6g") if blast_hit else ""
                     ),
                     "assignment_candidate_count": len(decision.candidate_hits),
                     "assignment_unknown_count": decision.unknown_candidate_count,
@@ -388,12 +361,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hits", required=True)
     parser.add_argument("--m8", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--query-fasta")
-    parser.add_argument("--top-hits-output")
+    parser.add_argument("--query-fasta", required=True)
+    parser.add_argument("--top-hits-output", required=True)
     parser.add_argument(
         "--top-hits",
         type=int,
-        default=5,
+        required=True,
         help=(
             "Number of overall BLAST hits to report per query; equal-best and "
             "best-reference-source evidence is retained."
@@ -401,16 +374,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--taxonomy-db",
-        help="Preferred-taxonomy Parquet for manifest-driven databases.",
+        required=True,
+        help="Preferred-taxonomy Parquet of the database profile.",
     )
     parser.add_argument(
         "--source-records-db",
+        required=True,
         help="Source-record Parquet for public reference identifiers and versions.",
     )
     parser.add_argument(
         "--max-targets",
         type=int,
-        default=500,
+        required=True,
         help="Policy limit; BLAST must request one additional overflow target.",
     )
     parser.add_argument("--marker", required=True, choices=("16S", "18S"))
@@ -425,12 +400,12 @@ def main() -> None:
         args.hits,
         args.m8,
         args.output,
-        args.taxonomy_db,
-        args.max_targets,
-        query_fasta=args.query_fasta,
+        taxonomy_file=args.taxonomy_db,
         source_records_file=args.source_records_db,
+        query_fasta=args.query_fasta,
         top_hits_output=args.top_hits_output,
         top_hits=args.top_hits,
+        max_targets=args.max_targets,
         marker=args.marker,
         runtime_calibration=args.runtime_calibration,
         reference_digest=args.reference_digest,

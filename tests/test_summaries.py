@@ -47,12 +47,7 @@ def write_tsv(path: Path, fields: list[str], rows: list[dict[str, object]]) -> N
         writer.writerows(rows)
 
 
-def write_taxonomy_parquet(
-    path: Path,
-    rows: list[tuple[str, ...]],
-    *,
-    include_centroids: bool = False,
-) -> None:
+def write_taxonomy_parquet(path: Path, rows: list[tuple[str, ...]]) -> None:
     connection = duckdb.connect(":memory:")
     connection.execute(
         """
@@ -65,28 +60,20 @@ def write_taxonomy_parquet(
             compartment VARCHAR,
             assignment_method VARCHAR,
             cross_domain_conflict BOOLEAN,
-            taxonomy_alternatives VARCHAR
-            {centroid_columns}
+            taxonomy_alternatives VARCHAR,
+            centroid_names VARCHAR,
+            centroid_taxonomy VARCHAR,
+            centroid_taxonomy_source VARCHAR
         )
-        """.format(
-            centroid_columns=(
-                ", centroid_names VARCHAR, centroid_taxonomy VARCHAR, "
-                "centroid_taxonomy_source VARCHAR"
-                if include_centroids
-                else ""
-            )
-        )
+        """
     )
     if rows:
         normalized = [(*row, False, "") if len(row) == 7 else row for row in rows]
-        if include_centroids:
-            normalized = [
-                (*row, "", "", "") if len(row) == 9 else row for row in normalized
-            ]
+        normalized = [
+            (*row, "", "", "") if len(row) == 9 else row for row in normalized
+        ]
         connection.executemany(
-            "INSERT INTO taxonomy VALUES ("
-            + ", ".join("?" for _ in range(12 if include_centroids else 9))
-            + ")",
+            "INSERT INTO taxonomy VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             normalized,
         )
     connection.execute("COPY taxonomy TO ? (FORMAT PARQUET, COMPRESSION ZSTD)", [str(path)])
@@ -116,6 +103,51 @@ def write_source_records_parquet(
         "COPY source_records TO ? (FORMAT PARQUET, COMPRESSION ZSTD)", [str(path)]
     )
     connection.close()
+
+
+def run_annotation(
+    hits: Path,
+    m8: Path,
+    taxonomy: Path,
+    output: Path,
+    *,
+    sources: Path | None = None,
+    fasta: Path | None = None,
+    top_hits_output: Path | None = None,
+    top_hits: int = 5,
+    max_targets: int = 500,
+) -> None:
+    """Run annotate_hits with generated FASTA and source records when not given."""
+    root = hits.parent
+    if fasta is None:
+        fasta = root / "generated.fna"
+        with hits.open(newline="") as handle:
+            queries = [
+                (row["name"], int(row["length"]))
+                for row in csv.DictReader(handle, delimiter="\t")
+            ]
+        fasta.write_text("".join(f">{name}\n{'A' * size}\n" for name, size in queries))
+    if sources is None:
+        sources = root / "generated_sources.parquet"
+        subjects = sorted(
+            {line.split("\t")[1] for line in m8.read_text().splitlines() if line}
+        )
+        write_source_records_parquet(
+            sources, [(subject, "PR2", "1", f"id-{subject}") for subject in subjects]
+        )
+    annotate_hits(
+        hits,
+        m8,
+        output,
+        taxonomy_file=taxonomy,
+        source_records_file=sources,
+        query_fasta=fasta,
+        top_hits_output=top_hits_output or root / "generated.top_hits.tsv",
+        top_hits=top_hits,
+        max_targets=max_targets,
+        marker="18S",
+        reference_digest="reference-digest",
+    )
 
 
 def taxonomy_record(
@@ -149,8 +181,8 @@ class RuntimeTaxonomyTests(unittest.TestCase):
         score: float = 100.0,
         query_start: int = 1,
         query_end: int = 100,
-        query_length: int | None = 100,
-        subject_length: int | None = 100,
+        query_length: int = 100,
+        subject_length: int = 100,
         mismatches: int = 0,
         gaps: int = 0,
     ) -> BlastHit:
@@ -226,23 +258,20 @@ class RuntimeTaxonomyTests(unittest.TestCase):
         self.assertEqual(decision.taxonomy, "Unclassified")
         self.assertEqual(decision.assignment_method, "no_runtime_calibration")
 
-    def test_legacy_blast_row_cannot_prove_an_exact_match(self) -> None:
+    def test_blast_rows_require_query_and_subject_lengths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            m8 = Path(tmp) / "legacy.m8"
+            m8 = Path(tmp) / "twelve.m8"
             m8.write_text("q\tref\t100\t100\t0\t0\t1\t100\t1\t100\t0\t100\n")
-            hit = load_blast_hits(m8)["q"][0]
-        decision = resolve_runtime_taxonomy(
-            [hit],
-            {"ref": taxonomy_record("Eukaryota;Amoebozoa")},
-            query_length=100,
-            marker="18S",
-            calibration=None,
-            max_targets=500,
-        )
+            with self.assertRaisesRegex(ValueError, "expected 14 fields, found 12"):
+                load_blast_hits(m8)
 
-        self.assertEqual(decision.candidate_taxonomy, "Eukaryota;Amoebozoa")
-        self.assertEqual(decision.taxonomy, "Unclassified")
-        self.assertEqual(decision.assignment_method, "no_runtime_calibration")
+    def test_blast_rows_with_lengths_load_as_integers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            m8 = Path(tmp) / "fourteen.m8"
+            m8.write_text("q\tref\t100\t100\t0\t0\t1\t100\t1\t100\t0\t100\t100\t120\n")
+            hit = load_blast_hits(m8)["q"][0]
+
+        self.assertEqual((hit.query_length, hit.subject_length), (100, 120))
 
     def test_calibration_rank_rule_limits_the_selected_lineage(self) -> None:
         key = "18S|PR2|Eukaryota"
@@ -568,10 +597,26 @@ class AnnotationTests(unittest.TestCase):
                 ],
             )
             m8.write_text(
-                "query1\tlow\t99.0\t4\t0\t0\t1\t4\t1\t4\t1e-9\t10\n"
-                "query1\thigh;Bacteria\t90.0\t4\t0\t0\t1\t4\t1\t4\t1e-5\t20\n"
+                "query1\tlow\t99.0\t4\t0\t0\t1\t4\t1\t4\t1e-9\t10\t4\t4\n"
+                "query1\thigh;Bacteria\t90.0\t4\t0\t0\t1\t4\t1\t4\t1e-5\t20\t4\t4\n"
             )
-            annotate_hits(hits, m8, output)
+            taxonomy = root / "taxonomy.parquet"
+            write_taxonomy_parquet(
+                taxonomy,
+                [
+                    ("low", "SILVA", "Bacteria", "SILVA", "Bacteria", "", "native"),
+                    (
+                        "high;Bacteria",
+                        "SILVA",
+                        "Bacteria",
+                        "SILVA",
+                        "Bacteria",
+                        "",
+                        "native",
+                    ),
+                ],
+            )
+            run_annotation(hits, m8, taxonomy, output)
             with output.open(newline="") as handle:
                 rows = list(csv.DictReader(handle, delimiter="\t"))
 
@@ -587,7 +632,9 @@ class AnnotationTests(unittest.TestCase):
             top_hits = root / "sample.top_hits.tsv"
             write_tsv(hits, HIT_FIELDS, [])
             m8.touch()
-            annotate_hits(hits, m8, output, top_hits_output=top_hits)
+            taxonomy = root / "taxonomy.parquet"
+            write_taxonomy_parquet(taxonomy, [])
+            run_annotation(hits, m8, taxonomy, output, top_hits_output=top_hits)
 
             self.assertEqual(output.read_text().rstrip("\n").split("\t"), SUMMARY_FIELDS)
             self.assertEqual(top_hits.read_text().rstrip("\n").split("\t"), TOP_HIT_FIELDS)
@@ -618,10 +665,10 @@ class AnnotationTests(unittest.TestCase):
             write_tsv(hits, HIT_FIELDS, [row])
             fasta.write_text(">query1\nacGt\n", encoding="ascii")
             m8.write_text(
-                "query1\tSSU_img\t99\t4\t0\t0\t1\t4\t1\t4\t1e-20\t100\n"
-                "query1\tSSU_img_tie\t98\t4\t1\t0\t1\t4\t1\t4\t1e-19\t100\n"
-                "query1\tSSU_pr2\t98\t4\t1\t0\t1\t4\t1\t4\t1e-10\t90\n"
-                "query1\tSSU_third\t97\t4\t1\t0\t1\t4\t1\t4\t1e-5\t80\n",
+                "query1\tSSU_img\t99\t4\t0\t0\t1\t4\t1\t4\t1e-20\t100\t4\t4\n"
+                "query1\tSSU_img_tie\t98\t4\t1\t0\t1\t4\t1\t4\t1e-19\t100\t4\t4\n"
+                "query1\tSSU_pr2\t98\t4\t1\t0\t1\t4\t1\t4\t1e-10\t90\t4\t4\n"
+                "query1\tSSU_third\t97\t4\t1\t0\t1\t4\t1\t4\t1e-5\t80\t4\t4\n",
                 encoding="ascii",
             )
             write_taxonomy_parquet(
@@ -651,7 +698,6 @@ class AnnotationTests(unittest.TestCase):
                         "Eukaryota", "nucleus", "native", False, "", "", "", "",
                     ),
                 ],
-                include_centroids=True,
             )
             write_source_records_parquet(
                 sources,
@@ -662,13 +708,13 @@ class AnnotationTests(unittest.TestCase):
                     ("SSU_third", "PR2", "5.1.1", "AB999999.1.1800_U"),
                 ],
             )
-            annotate_hits(
+            run_annotation(
                 hits,
                 m8,
-                summary,
                 taxonomy,
-                query_fasta=fasta,
-                source_records_file=sources,
+                summary,
+                sources=sources,
+                fasta=fasta,
                 top_hits_output=top_hits,
                 top_hits=1,
             )
@@ -762,8 +808,8 @@ class AnnotationTests(unittest.TestCase):
                 ],
             )
             m8.write_text(
-                "query1	SSU_b	98.0	4	0	0	1	4	1	4	1e-9	20\n"
-                "query1	SSU_a	99.0	4	0	0	1	4	1	4	1e-9	20\n"
+                "query1\tSSU_b\t98.0\t4\t0\t0\t1\t4\t1\t4\t1e-9\t20\t4\t4\n"
+                "query1\tSSU_a\t99.0\t4\t0\t0\t1\t4\t1\t4\t1e-9\t20\t4\t4\n"
             )
             write_taxonomy_parquet(
                 taxonomy,
@@ -788,7 +834,7 @@ class AnnotationTests(unittest.TestCase):
                     ),
                 ],
             )
-            annotate_hits(hits, m8, output, taxonomy)
+            run_annotation(hits, m8, taxonomy, output)
             with output.open(newline="") as handle:
                 row = next(csv.DictReader(handle, delimiter="\t"))
 
@@ -825,12 +871,12 @@ class AnnotationTests(unittest.TestCase):
                 ],
             )
             m8.write_text(
-                "query1	missing	99.0	4	0	0	1	4	1	4	1e-9	20\n"
+                "query1\tmissing\t99.0\t4\t0\t0\t1\t4\t1\t4\t1e-9\t20\t4\t4\n"
             )
             write_taxonomy_parquet(taxonomy, [])
 
             with self.assertRaisesRegex(ValueError, "Missing taxonomy metadata"):
-                annotate_hits(hits, m8, output, taxonomy)
+                run_annotation(hits, m8, taxonomy, output)
 
     def test_selected_best_hit_reports_its_centroid_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -853,7 +899,7 @@ class AnnotationTests(unittest.TestCase):
             )
             write_tsv(hits, HIT_FIELDS, [row])
             m8.write_text(
-                "query1\tSSU_img\t99\t4\t0\t0\t1\t4\t1\t4\t0\t20\n",
+                "query1\tSSU_img\t99\t4\t0\t0\t1\t4\t1\t4\t0\t20\t4\t4\n",
                 encoding="ascii",
             )
             write_taxonomy_parquet(
@@ -874,9 +920,8 @@ class AnnotationTests(unittest.TestCase):
                         "SILVA",
                     )
                 ],
-                include_centroids=True,
             )
-            annotate_hits(hits, m8, output, taxonomy)
+            run_annotation(hits, m8, taxonomy, output)
             with output.open(newline="") as handle:
                 result = next(csv.DictReader(handle, delimiter="\t"))
 
@@ -922,10 +967,43 @@ class AnnotationTests(unittest.TestCase):
                         "SILVA",
                     )
                 ],
-                include_centroids=True,
             )
             with self.assertRaisesRegex(ValueError, "Invalid centroid_names JSON"):
                 load_taxonomy_records(taxonomy, {"SSU_img"})
+
+    def test_taxonomy_without_centroid_columns_loads_empty_centroid_fields(
+        self,
+    ) -> None:
+        """Database release 1.0.1 has no centroid columns."""
+        with tempfile.TemporaryDirectory() as tmp:
+            taxonomy = Path(tmp) / "taxonomy.parquet"
+            connection = duckdb.connect(":memory:")
+            connection.execute(
+                """
+                COPY (
+                    SELECT 'SSU_img' AS sequence_id, 'IMG' AS reference_source,
+                        'Bacteria;Pseudomonadota' AS taxonomy,
+                        'SILVA' AS taxonomy_source, 'Bacteria' AS domain,
+                        '' AS compartment,
+                        'updated_reference_cluster' AS assignment_method,
+                        false AS cross_domain_conflict,
+                        '' AS taxonomy_alternatives
+                ) TO ? (FORMAT PARQUET, COMPRESSION ZSTD)
+                """,
+                [str(taxonomy)],
+            )
+            connection.close()
+            record = load_taxonomy_records(taxonomy, {"SSU_img"})["SSU_img"]
+
+        self.assertEqual(record.taxonomy, "Bacteria;Pseudomonadota")
+        self.assertEqual(
+            (
+                record.centroid_names,
+                record.centroid_taxonomy,
+                record.centroid_taxonomy_source,
+            ),
+            ("", "", ""),
+        )
 
     def test_incomplete_centroid_schema_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -963,9 +1041,9 @@ class AnnotationTests(unittest.TestCase):
             )
             write_tsv(hits, HIT_FIELDS, [row])
             m8.write_text(
-                "query1\tSSU_a\t99\t4\t0\t0\t1\t4\t1\t4\t1e-9\t20\n"
-                "query1\tSSU_b\t99\t4\t0\t0\t1\t4\t1\t4\t1e-9\t20\n"
-                "query1\tSSU_c\t99\t4\t0\t0\t1\t4\t1\t4\t1e-9\t20\n"
+                "query1\tSSU_a\t99\t4\t0\t0\t1\t4\t1\t4\t1e-9\t20\t4\t4\n"
+                "query1\tSSU_b\t99\t4\t0\t0\t1\t4\t1\t4\t1e-9\t20\t4\t4\n"
+                "query1\tSSU_c\t99\t4\t0\t0\t1\t4\t1\t4\t1e-9\t20\t4\t4\n"
             )
             write_taxonomy_parquet(
                 taxonomy,
@@ -984,7 +1062,7 @@ class AnnotationTests(unittest.TestCase):
                     ),
                 ],
             )
-            annotate_hits(hits, m8, output, taxonomy, max_targets=2)
+            run_annotation(hits, m8, taxonomy, output, max_targets=2)
             with output.open(newline="") as handle:
                 result = next(csv.DictReader(handle, delimiter="\t"))
 
@@ -1015,8 +1093,8 @@ class AnnotationTests(unittest.TestCase):
             )
             write_tsv(hits, HIT_FIELDS, [row])
             m8.write_text(
-                "query1\tSSU_ambiguous\t100\t4\t0\t0\t1\t4\t1\t4\t0\t20\n"
-                "query1\tSSU_bacteria\t100\t4\t0\t0\t1\t4\t1\t4\t0\t20\n"
+                "query1\tSSU_ambiguous\t100\t4\t0\t0\t1\t4\t1\t4\t0\t20\t4\t4\n"
+                "query1\tSSU_bacteria\t100\t4\t0\t0\t1\t4\t1\t4\t0\t20\t4\t4\n"
             )
             alternatives = json.dumps(
                 [
@@ -1059,7 +1137,7 @@ class AnnotationTests(unittest.TestCase):
                     ),
                 ],
             )
-            annotate_hits(hits, m8, output, taxonomy)
+            run_annotation(hits, m8, taxonomy, output)
             with output.open(newline="") as handle:
                 result = next(csv.DictReader(handle, delimiter="\t"))
 
@@ -1107,7 +1185,9 @@ class FinalSummaryTests(unittest.TestCase):
                 "strand": "+",
                 "sequence_type": "simple",
                 "contig_name": "contig1",
-                "blast_sseqid": "ref;Bacteria;Patescibacteria",
+                "blast_sseqid": "ref",
+                "taxonomy": "Bacteria;Patescibacteria",
+                "taxonomy_domain": "Bacteria",
                 "blast_pident": "99.0",
                 "blast_length": "4",
                 "blast_bitscore": "20.0",
@@ -1122,7 +1202,9 @@ class FinalSummaryTests(unittest.TestCase):
                 "strand": "+",
                 "sequence_type": "simple",
                 "contig_name": "contig1",
-                "blast_sseqid": "ref;Bacteria;Patescibacteria",
+                "blast_sseqid": "ref",
+                "taxonomy": "Bacteria;Patescibacteria",
+                "taxonomy_domain": "Bacteria",
                 "blast_pident": "99.0",
                 "blast_length": "4",
                 "blast_bitscore": "20.0",
@@ -1207,7 +1289,38 @@ class FinalSummaryTests(unittest.TestCase):
         self.assertEqual(lines[0], "\tBacteriaSSU\tEukaryotaSSU")
         self.assertEqual(lines[1], "sample\t1\t1")
 
-    def test_legacy_pipe_delimiters_are_tokenized(self) -> None:
+    def test_unclassified_queries_are_counted_after_the_category_columns(self) -> None:
+        rows = []
+        for name, contig, taxonomy, domain in (
+            ("q1", "contig1", "Unclassified", "Unclassified"),
+            ("q2", "contig1", "Unclassified", "Unclassified"),
+            ("q3", "contig2", "Unclassified", "Unclassified"),
+            ("q4", "contig3", "Bacteria", "Bacteria"),
+        ):
+            row = dict.fromkeys(SUMMARY_FIELDS, "")
+            row.update(
+                name=name,
+                sample="sample",
+                model="RF00177",
+                contig_name=contig,
+                coordinates="1-4",
+                strand="+",
+                blast_sseqid=f"ref-{name}",
+                taxonomy=taxonomy,
+                taxonomy_domain=domain,
+            )
+            rows.append(row)
+        metadata = [{"sample": "sample", "model": "RF00177"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "categories.tsv"
+            write_category_summary(rows, metadata, output)
+            lines = output.read_text().splitlines()
+
+        self.assertEqual(lines, ["\tBacteriaSSU\tUnclassified", "sample\t1\t2"])
+
+    def test_unclassified_column_is_the_only_column_when_nothing_is_assigned(
+        self,
+    ) -> None:
         row = dict.fromkeys(SUMMARY_FIELDS, "")
         row.update(
             name="q1",
@@ -1216,7 +1329,9 @@ class FinalSummaryTests(unittest.TestCase):
             contig_name="contig1",
             coordinates="1-4",
             strand="+",
-            blast_sseqid="legacy|Bacteria|Patescibacteria",
+            blast_sseqid="SSU_Bacteria_Patescibacteria",
+            taxonomy="Unclassified",
+            taxonomy_domain="Unclassified",
         )
         metadata = [{"sample": "sample", "model": "RF00177"}]
         with tempfile.TemporaryDirectory() as tmp:
@@ -1224,8 +1339,28 @@ class FinalSummaryTests(unittest.TestCase):
             write_category_summary([row], metadata, output)
             lines = output.read_text().splitlines()
 
-        self.assertEqual(lines[0], "\tBacteriaSSU\tPatescibacteriaSSU")
-        self.assertEqual(lines[1], "sample\t1\t1")
+        self.assertEqual(lines, ["\tUnclassified", "sample\t1"])
+
+    def test_cross_domain_ambiguity_is_not_counted_in_any_category(self) -> None:
+        row = dict.fromkeys(SUMMARY_FIELDS, "")
+        row.update(
+            name="q1",
+            sample="sample",
+            model="RF00177",
+            contig_name="contig1",
+            coordinates="1-4",
+            strand="+",
+            blast_sseqid="SSU_Bacteria_Patescibacteria",
+            taxonomy="",
+            taxonomy_domain="ambiguous",
+        )
+        metadata = [{"sample": "sample", "model": "RF00177"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "categories.tsv"
+            write_category_summary([row], metadata, output)
+            text = output.read_text()
+
+        self.assertEqual(text, "\nsample\n")
 
     def test_detailed_rows_are_sorted_deterministically(self) -> None:
         row_a = dict.fromkeys(SUMMARY_FIELDS, "")

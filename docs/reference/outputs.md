@@ -115,6 +115,12 @@ annotation category.
 Counts use the selected query assignment. A supported tree call can contribute
 when the original marker's BLAST search has no subject.
 
+The `Unclassified` column follows the category columns. It counts the contigs
+with at least one extracted query whose selected `taxonomy` is `Unclassified`,
+including queries without an eligible BLAST hit. It appears when at least one
+sample has such a contig. A query with cross-domain ambiguity
+(`taxonomy_domain=ambiguous`, empty `taxonomy`) is not counted in any column.
+
 Samples without accepted hits remain in `cmsearch_summary.tab`. Their detailed
 summary contains a header and no data rows; per-model hit tables also contain
 headers only.
@@ -148,5 +154,4 @@ distinguish identical contig names in separate inputs.
 
 Runtime M8 output has 14 tab-separated columns: the 12 standard BLAST columns,
 then `qlen` and `slen`. Scripts that require exactly 12 columns must account for
-these two length fields. The annotation reader also accepts 12-column files,
-but missing subject length cannot support an exact query assignment.
+these two length fields. The annotation reader requires all 14 columns.

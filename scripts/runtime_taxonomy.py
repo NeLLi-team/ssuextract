@@ -32,8 +32,8 @@ class BlastHit:
     subject_end: int
     evalue: float
     bit_score: float
-    query_length: int | None = None
-    subject_length: int | None = None
+    query_length: int
+    subject_length: int
 
 
 @dataclass(frozen=True)
@@ -125,17 +125,17 @@ def _validate_hit(hit: BlastHit, location: str) -> None:
         raise ValueError(f"BLAST coordinates must be positive at {location}")
     if hit.evalue < 0.0 or hit.bit_score < 0.0:
         raise ValueError(f"BLAST scores must be non-negative at {location}")
-    if hit.query_length is not None:
-        if hit.query_length < 1 or max(hit.query_start, hit.query_end) > hit.query_length:
-            raise ValueError(f"BLAST query coordinates exceed qlen at {location}")
-    if hit.subject_length is not None:
-        if hit.subject_length < 1 or max(hit.subject_start, hit.subject_end) > hit.subject_length:
-            raise ValueError(f"BLAST subject coordinates exceed slen at {location}")
+    if hit.query_length < 1 or max(hit.query_start, hit.query_end) > hit.query_length:
+        raise ValueError(f"BLAST query coordinates exceed qlen at {location}")
+    if (
+        hit.subject_length < 1
+        or max(hit.subject_start, hit.subject_end) > hit.subject_length
+    ):
+        raise ValueError(f"BLAST subject coordinates exceed slen at {location}")
 
 
 def load_blast_hits(m8_file: str | Path) -> dict[str, list[BlastHit]]:
-    """Read BLAST 12-column or ``std qlen slen`` output."""
-
+    """Read BLAST ``std qlen slen`` output."""
     hits_by_query: dict[str, list[BlastHit]] = {}
     with Path(m8_file).open() as handle:
         for line_number, raw_line in enumerate(handle, start=1):
@@ -144,9 +144,9 @@ def load_blast_hits(m8_file: str | Path) -> dict[str, list[BlastHit]]:
                 continue
             fields = line.split("\t")
             location = f"{m8_file}:{line_number}"
-            if len(fields) not in {12, 14}:
+            if len(fields) != 14:
                 raise ValueError(
-                    f"Malformed BLAST m8 row at {location}: expected 12 or 14 "
+                    f"Malformed BLAST m8 row at {location}: expected 14 "
                     f"fields, found {len(fields)}"
                 )
             query = fields[0]
@@ -164,16 +164,8 @@ def load_blast_hits(m8_file: str | Path) -> dict[str, list[BlastHit]]:
                 subject_end=_integer(fields[9], "subject end", location),
                 evalue=_finite_float(fields[10], "E-value", location),
                 bit_score=_finite_float(fields[11], "bit score", location),
-                query_length=(
-                    _integer(fields[12], "query length", location)
-                    if len(fields) == 14
-                    else None
-                ),
-                subject_length=(
-                    _integer(fields[13], "subject length", location)
-                    if len(fields) == 14
-                    else None
-                ),
+                query_length=_integer(fields[12], "query length", location),
+                subject_length=_integer(fields[13], "subject length", location),
             )
             _validate_hit(hit, location)
             hits_by_query.setdefault(query, []).append(hit)
@@ -185,16 +177,14 @@ def load_blast_hits(m8_file: str | Path) -> dict[str, list[BlastHit]]:
     return hits_by_query
 
 
-def query_coverage(hit: BlastHit, fallback_query_length: int) -> float:
-    query_length = hit.query_length or fallback_query_length
-    if query_length < 1:
-        raise ValueError("Query length must be positive")
+def query_coverage(hit: BlastHit) -> float:
+    """Return the fraction of the query covered by the BLAST interval."""
     covered = abs(hit.query_end - hit.query_start) + 1
-    if covered > query_length:
+    if covered > hit.query_length:
         raise ValueError(
             f"BLAST query span exceeds query length for subject {hit.subject}"
         )
-    coverage = covered / query_length
+    coverage = covered / hit.query_length
     if not math.isfinite(coverage) or not 0.0 <= coverage <= 1.0:
         raise ValueError(f"Invalid BLAST query coverage for subject {hit.subject}")
     return coverage
@@ -439,8 +429,6 @@ def _is_exact_native(
         or record.cross_domain_conflict
     ):
         return False
-    if hit.query_length is None or hit.subject_length is None:
-        return False
     return (
         hit.percent_identity == 100.0
         and hit.mismatches == 0
@@ -479,23 +467,19 @@ def resolve_runtime_taxonomy(
     unique: dict[str, BlastHit] = {}
     for hit in sorted(hits, key=_hit_key):
         _validate_hit(hit, f"subject {hit.subject}")
-        if hit.query_length is not None and hit.query_length != query_length:
+        if hit.query_length != query_length:
             raise ValueError(
                 f"BLAST qlen differs from the query sequence for subject {hit.subject}"
             )
-        query_coverage(hit, query_length)
+        query_coverage(hit)
         unique.setdefault(hit.subject, hit)
     ranked = list(unique.values())
     policy_hits = ranked[:max_targets]
     eligible_hits = [
-        hit
-        for hit in ranked
-        if query_coverage(hit, query_length) >= MINIMUM_QUERY_COVERAGE
+        hit for hit in ranked if query_coverage(hit) >= MINIMUM_QUERY_COVERAGE
     ]
     policy_eligible_hits = [
-        hit
-        for hit in policy_hits
-        if query_coverage(hit, query_length) >= MINIMUM_QUERY_COVERAGE
+        hit for hit in policy_hits if query_coverage(hit) >= MINIMUM_QUERY_COVERAGE
     ]
     if not policy_eligible_hits:
         return _unclassified(

@@ -53,8 +53,7 @@ An exact native assignment requires every candidate to have the same native
 SILVA or PR2 lineage, 100% identity over the complete query and subject, and no
 mismatches or gaps. A PR2 species call also requires all nine taxonomy ranks.
 The reference must have a native assignment method; a derived IMG label cannot
-use this exception. A legacy 12-column BLAST file lacks subject length and
-cannot prove the exact-match condition.
+use this exception.
 
 Nonexact query calls require schema-3 runtime calibration for the selected
 profile and search policy. A missing calibration leaves the query unclassified.
@@ -110,7 +109,10 @@ neighbor LCA. Centroid taxonomy remains evidence and cannot add ranks.
 All references tied at the neighbor distance boundary contribute. An ambiguous
 reference within that boundary retains its alternatives. The final tree call
 is the shared prefix of the neighbor LCA and the supported BLAST query call on
-the selected marker. Conflicting domains produce ambiguity. Missing named tree
+the selected marker. A tree call is therefore at most as specific as that BLAST
+route call. Without runtime calibration in the database profile, only exact
+native matches carry a route call, so tree mode keeps `Unclassified` for every
+nonexact query. Conflicting domains produce ambiguity. Missing named tree
 evidence leaves the supported BLAST call in place. Branch distance and SH-aLRT
 support are reported as evidence; they do not supply an independent taxonomic
 confidence threshold.

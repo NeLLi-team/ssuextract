@@ -33,6 +33,8 @@ CATEGORY_MAPPING = {
     "Eukaryota": "EukaryotaSSU",
 }
 
+UNCLASSIFIED_CATEGORY = "Unclassified"
+
 COMPARTMENT_MAPPING = {
     "mitochondrion": "MitochondriaSSU",
     "plastid": "PlastidSSU",
@@ -267,11 +269,7 @@ def write_category_summary(
         taxonomy = row.get("taxonomy", "")
         taxonomy_domain = row.get("taxonomy_domain", "")
         compartment = row.get("compartment", "")
-        tokens = (
-            re.split(r"[-_;]", taxonomy)
-            if taxonomy
-            else re.split(r"[-_;|]", row["blast_sseqid"])
-        )
+        tokens = re.split(r"[-_;]", taxonomy)
         if taxonomy_domain:
             tokens.append(taxonomy_domain)
         row_categories: set[str] = set()
@@ -282,6 +280,8 @@ def write_category_summary(
         compartment_category = COMPARTMENT_MAPPING.get(compartment)
         if compartment_category:
             row_categories.add(compartment_category)
+        if taxonomy == UNCLASSIFIED_CATEGORY:
+            row_categories.add(UNCLASSIFIED_CATEGORY)
         categories_by_contig.setdefault(key, set()).update(row_categories)
 
     for (sample, _contig), categories in categories_by_contig.items():
@@ -290,7 +290,7 @@ def write_category_summary(
 
     categories = [
         category
-        for category in CATEGORY_MAPPING.values()
+        for category in [*CATEGORY_MAPPING.values(), UNCLASSIFIED_CATEGORY]
         if any(sample_counts[category] for sample_counts in counts.values())
     ]
     with Path(output_file).open("w", newline="") as handle:

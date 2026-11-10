@@ -126,13 +126,6 @@ def load_query_sequences(fasta_file: str | Path) -> dict[str, str]:
     return sequences
 
 
-def reference_record(
-    subject: str,
-    references: dict[str, ReferenceRecord],
-) -> ReferenceRecord:
-    return references.get(subject, ReferenceRecord(subject, "", ()))
-
-
 def _top_hit_taxonomy(record: TaxonomyRecord | None) -> str:
     if record is None:
         return ""
@@ -143,7 +136,7 @@ def select_reported_hits(
     hits: list[BlastHit],
     references: dict[str, ReferenceRecord],
     top_hits: int,
-    assignment_candidates: set[str] | None = None,
+    assignment_candidates: set[str],
 ) -> list[tuple[int, BlastHit, str]]:
     reason_order = (
         "overall_top_n",
@@ -156,7 +149,7 @@ def select_reported_hits(
     reasons: dict[str, set[str]] = {}
     for hit in hits[:top_hits]:
         reasons.setdefault(hit.subject, set()).add("overall_top_n")
-    for subject in assignment_candidates or ():
+    for subject in assignment_candidates:
         reasons.setdefault(subject, set()).add("assignment_candidate")
     if hits:
         best_score = hits[0].bit_score
@@ -166,11 +159,7 @@ def select_reported_hits(
             reasons.setdefault(hit.subject, set()).add("equal_best_assignment")
     for source in ("IMG", "PR2", "SILVA"):
         best = next(
-            (
-                hit
-                for hit in hits
-                if source in reference_record(hit.subject, references).sources
-            ),
+            (hit for hit in hits if source in references[hit.subject].sources),
             None,
         )
         if best is not None:
@@ -196,7 +185,7 @@ def write_top_hits(
     reference_records: dict[str, ReferenceRecord],
     query_sequences: dict[str, str],
     top_hits: int,
-    assignment_candidates: dict[str, set[str]] | None = None,
+    assignment_candidates: dict[str, set[str]],
 ) -> None:
     with Path(output_file).open("w", newline="") as output_handle:
         writer = csv.DictWriter(
@@ -208,16 +197,16 @@ def write_top_hits(
         writer.writeheader()
         for row in hit_rows:
             query = row["name"]
-            query_sequence = query_sequences.get(query, "")
+            query_sequence = query_sequences[query]
             reported_hits = select_reported_hits(
                 blast_hits.get(query, []),
                 reference_records,
                 top_hits,
-                (assignment_candidates or {}).get(query),
+                assignment_candidates[query],
             )
             for rank, hit, selection_reason in reported_hits:
-                taxonomy = taxonomy_records.get(hit.subject)
-                reference = reference_record(hit.subject, reference_records)
+                taxonomy = taxonomy_records[hit.subject]
+                reference = reference_records[hit.subject]
                 writer.writerow(
                     {
                         "name": query,
@@ -260,9 +249,7 @@ def write_top_hits(
                         "blast_send": hit.subject_end,
                         "blast_evalue": format(hit.evalue, "g"),
                         "blast_bitscore": format(hit.bit_score, "g"),
-                        "query_length": str(
-                            len(query_sequence) if query_sequence else row["length"]
-                        ),
+                        "query_length": str(len(query_sequence)),
                         "query_sequence": query_sequence,
                     }
                 )
