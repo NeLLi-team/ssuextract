@@ -568,8 +568,8 @@ class AnnotationTests(unittest.TestCase):
                 ],
             )
             m8.write_text(
-                "query1\tlow\t90.0\t4\t0\t0\t1\t4\t1\t4\t1e-5\t10\n"
-                "query1\thigh;Bacteria\t99.0\t4\t0\t0\t1\t4\t1\t4\t1e-9\t20\n"
+                "query1\tlow\t99.0\t4\t0\t0\t1\t4\t1\t4\t1e-9\t10\n"
+                "query1\thigh;Bacteria\t90.0\t4\t0\t0\t1\t4\t1\t4\t1e-5\t20\n"
             )
             annotate_hits(hits, m8, output)
             with output.open(newline="") as handle:
@@ -737,7 +737,7 @@ class AnnotationTests(unittest.TestCase):
         self.assertEqual(record.versions, "PR2:5.1.1|SILVA:138.2")
         self.assertEqual(record.sources, ("PR2", "SILVA"))
 
-    def test_equal_bitscore_taxonomy_is_lowest_common_ancestor(self) -> None:
+    def test_equal_bitscore_candidates_report_lca_without_calibration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             hits = root / "sample.hits.tsv"
@@ -942,7 +942,7 @@ class AnnotationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "incomplete centroid schema"):
                 load_taxonomy_records(taxonomy, {"SSU_img"})
 
-    def test_truncated_equal_best_set_backs_taxonomy_off_to_domain(self) -> None:
+    def test_truncated_candidate_set_abstains(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             hits = root / "sample.hits.tsv"

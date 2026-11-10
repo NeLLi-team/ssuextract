@@ -329,6 +329,7 @@ python3 - \
     "${test_dir}/results/cmsearch_summary.tab" <<'PY'
 import csv
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -393,6 +394,10 @@ for directory in tree_directories:
     missing = required - names
     if missing:
         raise SystemExit(f"tree directory {directory} lacks {sorted(missing)}")
+    tool_versions = (directory / "tool_versions.txt").read_text()
+    for tool in ("INFERNAL", "IQ-TREE"):
+        if not re.search(rf"{tool} (version )?\d+\.\d+", tool_versions):
+            raise SystemExit(f"{directory} records no {tool} version")
     qc = json.loads((directory / "alignment_qc.json").read_text())
     if qc["sequence_count"] != 4 or qc["retained_columns"] <= 0:
         raise SystemExit(f"invalid tree alignment QC in {directory}")

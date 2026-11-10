@@ -9,7 +9,7 @@ import duckdb
 from Bio import SeqIO
 
 if TYPE_CHECKING:
-    from annotate_hits import BlastHit, TaxonomyRecord
+    from runtime_taxonomy import BlastHit, TaxonomyRecord
 
 
 TOP_HIT_FIELDS = [

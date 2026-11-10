@@ -10,7 +10,11 @@ from unittest.mock import patch
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
-from annotate_hits import BlastHit
+from runtime_taxonomy import (  # noqa: E402  # needs the scripts path set above
+    BlastHit,
+    TaxonomyRecord,
+    merged_taxonomy_alternatives,
+)
 from tree_phylogeny import classify_tree, trim_alignment
 from tree_reference_selection import (
     build_alignment_input,
@@ -485,6 +489,70 @@ class TreePhylogenyTests(unittest.TestCase):
         )
         self.assertEqual(neighbor_rows[0]["tree_lineage_basis"], "ambiguous")
         self.assertEqual(neighbor_rows[0]["used_for_assignment"], "true")
+
+    def test_route_and_neighbor_alternatives_with_empty_fields_merge(self) -> None:
+        lineage = "Bacteria;Pseudomonadota;Gammaproteobacteria"
+        record = TaxonomyRecord(
+            reference_source="SILVA",
+            taxonomy=lineage,
+            taxonomy_source="SILVA",
+            domain="Bacteria",
+            compartment="",
+            assignment_method="native",
+            cross_domain_conflict=False,
+            taxonomy_alternatives="",
+            centroid_names="",
+            centroid_taxonomy="",
+            centroid_taxonomy_source="",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            references = root / "references.tsv"
+            rows = [
+                reference_row(
+                    f"REF{rank:04d}",
+                    f"silva_{rank}",
+                    rank,
+                    taxonomy=lineage,
+                    domain="Bacteria",
+                )
+                | {"taxonomy_source": "SILVA", "compartment": ""}
+                for rank in range(1, 4)
+            ]
+            with references.open("w", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle, fieldnames=REFERENCE_FIELDS, delimiter="\t"
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+            task = root / "task.json"
+            task.write_text(
+                json.dumps(
+                    task_payload(lineage)
+                    | {
+                        "tree_route_blast_taxonomy_source": "SILVA",
+                        "tree_route_blast_compartment": "",
+                        "tree_route_blast_taxonomy_alternatives": (
+                            merged_taxonomy_alternatives([record])
+                        ),
+                    }
+                )
+            )
+            tree = root / "tree.nwk"
+            tree.write_text("(QUERY:0.01,REF0001:0.01,REF0002:0.02,REF0003:0.03);\n")
+            assignment = classify_tree(
+                tree_file=tree,
+                references_file=references,
+                task_file=task,
+                assignment_output=root / "assignment.tsv",
+                neighbors_output=root / "neighbors.tsv",
+                assignment_neighbors=3,
+            )
+
+        self.assertEqual(
+            json.loads(assignment["tree_taxonomy_alternatives"]),
+            json.loads(merged_taxonomy_alternatives([record])),
+        )
 
 
 if __name__ == "__main__":

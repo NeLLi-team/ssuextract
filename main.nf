@@ -383,9 +383,6 @@ process PREPARE_TREE_TASKS {
         emit: tasks
     path("${sample_id}_${model_id}.skipped.tree_assignment.tsv"), emit: skipped
 
-    when:
-    params.tree_classification
-
     script:
     marker_model_arguments = tree_model_ids
         .collect { tree_marker, tree_model ->
@@ -527,7 +524,7 @@ process TREE_CLASSIFY {
         --assignment-neighbors "${params.tree_assignment_neighbors}" \
         --inference-model GTR+F+R4
 
-    cmalign -h 2>&1 | sed -n '1p' > "${query_key}/tool_versions.txt"
+    cmalign -h 2>&1 | sed -n '2p' > "${query_key}/tool_versions.txt"
     iqtree3 --version >> "${query_key}/tool_versions.txt"
     """
 }
@@ -968,10 +965,12 @@ def helpMessage() {
       pixi run ssuextract -q data/example --modeldir resources/models
       nextflow run main.nf --query data/example --modeldir resources/models
 
-    Mandatory arguments:
+    Input arguments:
       --query [path]              FASTA file or directory of .fna, .fa, or .fasta files
+                                  (default: data/example)
       -q [path]                   Same input through the Pixi wrapper
       --modeldir [path]           Directory containing covariance models (.cm)
+                                  (default: resources/models)
 
     Optional arguments:
       --outdir [path]             Output directory (default: results/[input_name])
@@ -988,6 +987,9 @@ def helpMessage() {
       --database_path [path]      BLAST database directory (default: resources/database)
       --database_profile [name]   Database profile: curated or img (default: curated)
       --model_marker_map [path]   JSON mapping models to 16S rRNA gene or 18S rRNA gene markers
+      --max_cpus [int]            Maximum CPUs for one task (default: 16)
+      --max_memory [size]         Maximum memory for one task (default: 128.GB)
+      --max_time [duration]       Maximum wall time for one task (default: 240.h)
       --version                   Print the SSUextract version
       --help                      Print this help message
     """.stripIndent()

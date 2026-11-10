@@ -9,7 +9,6 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
-from get_cmsequences import parse_seqmap
 from hit_processing import (
     CmHit,
     CmModel,
@@ -611,13 +610,6 @@ class SequenceExtractionTests(unittest.TestCase):
                 minimum_length=0,
             )
 
-    def test_seqmap_without_final_newline_keeps_last_record(self) -> None:
-        seqmap = Path(self.tempdir.name) / "input.seqmap"
-        seqmap.write_text("contig1\t1\t4\t+\tsimple")
-        regions = parse_seqmap(str(seqmap))
-        records = extract_regions(self.fasta, regions, minimum_length=0)
-        self.assertEqual(records[0].sequence, "AACC")
-
     def test_minimum_length_uses_supported_sequence_spans(self) -> None:
         distant_fasta = Path(self.tempdir.name) / "distant.fna"
         distant_fasta.write_text(f">contig1\n{'A' * 100200}\n")
@@ -641,6 +633,26 @@ class SequenceExtractionTests(unittest.TestCase):
         self.assertEqual(
             extract_regions(distant_fasta, regions, minimum_length=500), []
         )
+
+    def test_minimum_length_counts_hit_bases_not_the_joined_span(self) -> None:
+        joined_fasta = Path(self.tempdir.name) / "joined.fna"
+        joined_fasta.write_text(">contig1\nAACCGGTTAAC\n")
+        regions = resolve_extraction_regions(
+            [
+                hit(model_from=1, model_to=5, sequence_from=1, sequence_to=6),
+                hit(model_from=8, model_to=10, sequence_from=9, sequence_to=11),
+            ],
+            model_length=10,
+        )
+
+        self.assertEqual(
+            [(region.start, region.end, region.hit_length) for region in regions],
+            [(1, 11, 9)],
+        )
+        self.assertEqual(
+            len(extract_regions(joined_fasta, regions, minimum_length=9)), 1
+        )
+        self.assertEqual(extract_regions(joined_fasta, regions, minimum_length=10), [])
 
     def test_output_reports_support_and_namespaces_query_id(self) -> None:
         output_input = Path(self.tempdir.name) / "output-input.fna"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_dir=$(git rev-parse --show-toplevel)
+repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 test_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssuextract-no-hit.XXXXXX")
 cleanup() {
     status=$?

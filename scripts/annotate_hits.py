@@ -12,7 +12,6 @@ import duckdb
 
 from hit_processing import HIT_FIELDS
 from runtime_taxonomy import (
-    BlastHit,
     RuntimeTaxonomyDecision,
     TaxonomyRecord,
     load_blast_hits,
@@ -337,16 +336,12 @@ def annotate_hits(
                     "taxonomy_alternatives": decision.taxonomy_alternatives,
                     "blast_tied_subjects": len(equal_best) if equal_best else "",
                     "blast_ties_truncated": (
-                        str(len(equal_best) > max_targets).lower()
-                        if equal_best
-                        else ""
+                        str(len(equal_best) > max_targets).lower() if equal_best else ""
                     ),
-                    "hit_length": row.get("hit_length", row["length"]),
-                    "model_coverage": row.get("model_coverage", ""),
-                    "fragment_count": row.get("fragment_count", ""),
-                    "component_coordinates": row.get(
-                        "component_coordinates", row["coordinates"]
-                    ),
+                    "hit_length": row["hit_length"],
+                    "model_coverage": row["model_coverage"],
+                    "fragment_count": row["fragment_count"],
+                    "component_coordinates": row["component_coordinates"],
                     "blast_candidate_taxonomy": decision.candidate_taxonomy,
                     "reference_taxonomy": (
                         selected_taxonomy.taxonomy
@@ -385,7 +380,10 @@ def annotate_hits(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Add the highest-bit-score BLAST hit to an SSUextract hit table."
+        description=(
+            "Assign taxonomy to an SSUextract hit table from its BLAST candidates "
+            "and write the ranked reference evidence."
+        )
     )
     parser.add_argument("--hits", required=True)
     parser.add_argument("--m8", required=True)

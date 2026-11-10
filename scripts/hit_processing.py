@@ -343,11 +343,15 @@ def resolve_competing_model_hits(hits: Iterable[CmHit]) -> list[CmHit]:
     if len(set(included)) != len(included):
         raise ValueError("Duplicate included cmsearch hit")
 
-    accepted: list[CmHit] = []
+    # Hits overlap only on one subject and strand, so compare within that group.
+    accepted_by_locus: dict[tuple[str, str], list[CmHit]] = {}
     for candidate in sorted(
         included,
         key=lambda hit: (hit.e_value, -hit.bit_score, *_hit_output_order(hit)),
     ):
+        accepted = accepted_by_locus.setdefault(
+            (candidate.subject, candidate.strand), []
+        )
         unresolved_overlaps = [
             winner
             for winner in accepted
@@ -390,7 +394,10 @@ def resolve_competing_model_hits(hits: Iterable[CmHit]) -> list[CmHit]:
                 f"on strand {candidate.strand}: {', '.join(models)}"
             )
 
-    return sorted(accepted, key=_hit_output_order)
+    return sorted(
+        (hit for accepted in accepted_by_locus.values() for hit in accepted),
+        key=_hit_output_order,
+    )
 
 
 def write_accepted_hits(hits: Iterable[CmHit], output: str | Path) -> None:

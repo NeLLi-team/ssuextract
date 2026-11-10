@@ -168,8 +168,7 @@ def _merged_alternatives(
     }
     encoded_values = [str(task.get("tree_route_blast_taxonomy_alternatives", ""))]
     if not encoded_values[0] and (route["taxonomy"] or route["domain"]):
-        normalized = {key: value for key, value in route.items() if value}
-        alternatives[json.dumps(normalized, sort_keys=True)] = normalized
+        alternatives[json.dumps(route, sort_keys=True)] = route
     for neighbor in basis:
         row = neighbor[3]
         encoded = str(row.get("taxonomy_alternatives", ""))
@@ -184,7 +183,6 @@ def _merged_alternatives(
                     row.get("taxonomy_assignment_method", "")
                 ),
             }
-            normalized = {key: value for key, value in normalized.items() if value}
             alternatives[json.dumps(normalized, sort_keys=True)] = normalized
     for encoded in encoded_values:
         if not encoded:

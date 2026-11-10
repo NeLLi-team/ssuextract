@@ -54,12 +54,12 @@ def keyed_rows(
         raise ValueError(f"{source} is missing fields: {', '.join(missing_fields)}")
 
     keyed = {}
-    for line_number, row in enumerate(rows, start=2):
+    for row in rows:
         key = tuple(row[field] for field in KEY_FIELDS)
         if any(not value for value in key):
-            raise ValueError(f"{source}:{line_number} has an empty example key")
+            raise ValueError(f"{source} has an empty example key: {key}")
         if key in keyed:
-            raise ValueError(f"{source}:{line_number} repeats example key {key}")
+            raise ValueError(f"{source} repeats example key {key}")
         keyed[key] = row
     return keyed
 
