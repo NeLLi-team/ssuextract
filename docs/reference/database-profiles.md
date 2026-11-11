@@ -15,8 +15,9 @@ pipeline run.
 ## Installation and update checks
 
 `pixi run setup` lists each profile with the version and compressed download
-size from `config/database_catalog.json`. After the profile is ready, the
-selected path and profile are stored as `database_path` and `database_profile`
+size from `config/database_catalog.json`. Installation uses the latest verified
+release rather than the menu version. After the profile is ready, the selected
+path and profile are stored as `database_path` and `database_profile`
 in `config/local.config`. Commands read only these `key=value` lines and write
 the file only when its content changes. `pixi run setup` accepts only
 `--database_profile`, `--database_path`, `--update`, and `-h` or `--help`; any
@@ -34,6 +35,15 @@ error to standard error and sets the exit status:
 | 3 | The profile directory or its `manifest.json` is absent. |
 | 4 | A manifest artifact is missing, empty, or differs in size or SHA-256 digest. |
 | 2 | Any other failure, such as an invalid manifest, an artifact that is a symbolic link, a missing `blastdbcmd`, or a BLAST index check failure. |
+
+By default, validation checks artifact SHA-256 digests and BLAST indexes.
+`validate --quick` checks the manifest and artifact presence and sizes without
+hashing artifacts or invoking `blastdbcmd`. Runs use `--quick`; setup uses the
+full check. Both modes use the exit statuses above for the checks they perform.
+The manifest requires `taxonomy_database.preferred` and
+`taxonomy_database.source_records`; both paths must name listed artifacts.
+Same-size changes to runtime artifacts fail Nextflow's checksum check after
+the readiness check; they do not trigger wrapper replacement during a run.
 
 `pixi run setup`, `pixi run ssuextract`, and `pixi run example` show the error
 and install an absent profile (status 3). They replace a damaged profile
@@ -70,14 +80,27 @@ Interactive terminals redraw a width-bounded progress line with written bytes,
 transfer rate, and estimated time remaining. Non-interactive logs include the
 start, completion, and intermediate progress every 10 seconds.
 
-`pixi run ssuextract` and `pixi run example` check Zenodo before starting
-Nextflow. The check has a five-second total timeout. Interactive runs offer to
+`pixi run ssuextract` and `pixi run example` reuse successful update checks for
+24 hours per database root, profile, and catalog contents. `check-update --cached`
+reads a fresh result from `.<profile>.update-check.json` under the database root
+only when the catalog fingerprint matches. A successful discovery stores its
+check time, catalog fingerprint, and result there; cache write errors are
+nonfatal. Unavailable results are not cached, so the next run retries the check.
+`Checking Zenodo for database updates...` is printed to standard error only
+when a fresh discovery is requested.
+`SSUEXTRACT_SKIP_UPDATE_CHECK=1` skips this check in runs. Setup always requests
+a fresh check and refreshes the cache after a successful discovery, including
+after a first installation.
+The Zenodo check has a five-second total timeout. Interactive runs offer to
 install an available release. Non-interactive runs and runs with an explicit
 `--database_path` report the update and continue with the installed profile. A
 valid installed profile remains usable when the check times out, Zenodo is
 unavailable, or the remote release contract fails validation. Only
 `pixi run setup --update` treats an unavailable check as a failure and exits
 with a nonzero status.
+
+The setup update command printed during a run saves its named profile and path
+in `config/local.config` after validation.
 
 ## Runtime files
 

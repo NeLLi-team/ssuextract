@@ -1,7 +1,7 @@
 # Install and select database profiles
 
-Run the interactive installer to view both profiles, their versions, and their
-download sizes:
+Run the interactive installer to view both profiles, their bundled catalog
+versions, and their download sizes:
 
 ```bash
 pixi run setup
@@ -33,10 +33,10 @@ pixi run setup --database_profile curated
 pixi run setup --database_profile img
 ```
 
-The installer downloads the archive listed in `config/database_catalog.json`,
-checks Zenodo for the latest database release, and verifies the release and
-archive checksums before installation. The bundled catalog is used if Zenodo
-cannot be reached during a first installation.
+The menu shows versions from `config/database_catalog.json`. Installation uses
+the latest verified Zenodo release and checks the archive checksum before
+installation. The bundled catalog is used if Zenodo cannot be reached during
+a first installation.
 
 The terminal progress bar updates in place and fits the detected terminal
 width. Non-interactive logs report the start, completion, and intermediate
@@ -45,13 +45,16 @@ progress every 10 seconds.
 Setup stops after five consecutive transient download failures. If the retained
 bytes fail verification or the server rejects their byte range, setup makes one
 clean restart for that condition. Run the same setup command again after a
-stopped transfer. The next run requests the remaining bytes and verifies the
-complete archive size and SHA-256 digest before extracting it.
+stopped transfer on the same host. Partial downloads are kept per host. The
+next run requests the remaining bytes and verifies the complete archive size
+and SHA-256 digest before extracting it.
 
 ## Installation and replacement
 
-Every command that needs a profile validates it first and prints the validation
-error. The command then acts on the kind of failure:
+Setup checks every artifact's size and SHA-256 digest and validates the BLAST
+indexes. Runs check the manifest and artifact sizes before starting Nextflow,
+which checks runtime artifact hashes. Commands print a validation error and
+act on the kind of failure:
 
 | Profile state | Action |
 | --- | --- |
@@ -59,14 +62,30 @@ error. The command then acts on the kind of failure:
 | An artifact is missing, empty, or has the wrong size or SHA-256 digest | Replaces the profile with a fresh download, keeping the old profile until the new one validates. Under an explicit `--database_path`, prints the error and exits with a nonzero status. |
 | Any other failure, such as a missing `blastdbcmd`, an invalid manifest, or a BLAST index check failure | Prints the error and exits with a nonzero status without a download. |
 
+A content change that preserves artifact size reaches Nextflow's runtime
+checksum check, which stops the run. Run setup for full validation.
+
 After an interrupted replacement, the next install restores the previous
 profile. It keeps that profile when it validates.
 
 ## Update an installed profile
 
-Pipeline runs print the installed database version and check Zenodo for the
-latest release. An interactive run asks before starting Nextflow when an update
-is available:
+Pipeline runs print the installed database version and reuse successful release
+checks for 24 hours per database root, profile, and catalog contents. The check
+time, catalog fingerprint, and result are cached next to the profile under the
+database root. An unavailable check is retried on the next run. The message
+`Checking Zenodo for database updates...` appears only for a fresh request.
+An unwritable cache does not stop a run. Set `SSUEXTRACT_SKIP_UPDATE_CHECK=1`
+to skip the update check in runs, including examples:
+
+```bash
+SSUEXTRACT_SKIP_UPDATE_CHECK=1 pixi run example --database_profile img
+```
+
+Setup always checks Zenodo and refreshes the cache after a successful discovery,
+with or without `--update`.
+
+An interactive run asks before starting Nextflow when an update is available:
 
 ```text
 Database update available for img: v1.0.1 -> v1.0.2.
@@ -75,7 +94,8 @@ Update database now? [y/N]:
 
 Enter `y` to download, validate, and install the release. Any other response
 keeps the installed profile for that run. Non-interactive runs print the update
-command and continue with the installed profile.
+command and continue with the installed profile. The printed setup command
+also saves the profile it names as the default for later runs.
 
 If the update fails, the installed profile remains in place and Nextflow does
 not start. Rerun the command to resume the download or repeat the release check.

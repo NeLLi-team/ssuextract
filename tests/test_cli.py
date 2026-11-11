@@ -70,6 +70,7 @@ def read_config_failure(path: Path, reader: str) -> subprocess.CompletedProcess:
 
 FAKE_MANAGER = """#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$CALLS"
+if [[ "$1" == *validate_example_output.py ]]; then exit 0; fi
 case "$2" in
   validate)
     if [[ -e "$INSTALLED" ]]; then exit 0; fi
@@ -173,6 +174,35 @@ def write_config(path: Path, database_path: str, profile: str) -> subprocess.Com
 
 
 class DatabaseConfigTests(unittest.TestCase):
+    def test_array_expansions_are_guarded_for_bash32_nounset(self) -> None:
+        source = CLI.read_text(encoding="utf-8")
+        guarded = r'\$\{([A-Za-z_]\w*)\[@\]\+"\$\{\1\[@\]\}"\}'
+        unguarded = re.findall(r'"\$\{\w+\[@\]\}"', re.sub(guarded, "", source))
+        self.assertEqual(unguarded, [], "unsafe empty-array expansions under bash 3.2")
+
+    def test_setup_handles_empty_validation_and_update_arrays_under_nounset(
+        self,
+    ) -> None:
+        for installed in (False, True):
+            with (
+                self.subTest(installed=installed),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                sandbox = Sandbox(Path(tmp), validate_status=3, installed=installed)
+                completed = sandbox.run("set -u; setup_database --database_profile img")
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                calls = sandbox.manager_calls()
+                self.assertTrue(any(" validate " in call for call in calls))
+                self.assertTrue(any(" check-update " in call for call in calls))
+
+    def test_workflow_single_paths_disable_glob_expansion(self) -> None:
+        source = (REPO / "main.nf").read_text(encoding="utf-8")
+        calls = re.findall(r"\bfile\(([^\n]*)\)", source)
+        self.assertTrue(calls)
+        for arguments in calls:
+            with self.subTest(arguments=arguments):
+                self.assertRegex(arguments, r"\bglob:\s*false\b")
+
     def test_pipeline_cli_remains_directly_executable(self) -> None:
         self.assertTrue(CLI.stat().st_mode & stat.S_IXUSR)
 
@@ -268,7 +298,9 @@ class DatabaseConfigTests(unittest.TestCase):
                 'CAPTURED_ARGUMENTS="$5"; '
                 'resolve_database_profile() { printf "curated\\n"; }; '
                 'resolve_database_path() { printf "/database\\n"; }; '
-                'run_pipeline() { printf "%s\\n" "$@" '
+                "run_pipeline() { RUN_DATABASE_PATH=/database; "
+                "RUN_DATABASE_PROFILE=curated; "
+                'printf "%s\\n" "$@" '
                 '> "$CAPTURED_ARGUMENTS"; }; '
                 "run_smoke"
             )
@@ -751,7 +783,7 @@ class DatabaseConfigTests(unittest.TestCase):
             "Database profile (1-2) [default: 2 (img)]: ", result.stderr
         )
 
-    def test_run_update_notice_is_written_to_stderr(self) -> None:
+    def test_cached_update_does_not_claim_a_zenodo_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fake_python = Path(tmp) / "fake-python"
             fake_python.write_text(
@@ -765,7 +797,7 @@ class DatabaseConfigTests(unittest.TestCase):
             fake_python.chmod(0o755)
             command = (
                 'source "$1"; PYTHON="$2"; '
-                'check_database_update /database curated'
+                "check_database_update /database curated 0 0 0 --cached"
             )
             result = subprocess.run(
                 ["bash", "-c", command, "bash", str(CLI), str(fake_python)],
@@ -774,50 +806,30 @@ class DatabaseConfigTests(unittest.TestCase):
                 text=True,
             )
         self.assertEqual(result.stdout, "")
-        self.assertIn("Checking Zenodo for database updates", result.stderr)
+        self.assertNotIn("Checking Zenodo for database updates", result.stderr)
         self.assertIn("Database profile curated is current at v1.0.0", result.stderr)
 
     def test_run_update_prompt_installs_before_pipeline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            temporary = Path(tmp)
-            fake_python = temporary / "fake-python"
-            captured = temporary / "install-arguments.txt"
-            fake_python.write_text(
-                "#!/usr/bin/env bash\n"
-                "case \"$2\" in\n"
-                "  version) echo 1.0.2 ;;\n"
-                "  check-update) printf 'update_available\\t1.0.1\\t1.0.2\\t-\\n' ;;\n"
-                "  install) printf '%s\\n' \"$*\" > \"$CAPTURED_INSTALL\" ;;\n"
-                "  validate) exit 0 ;;\n"
-                "  *) exit 99 ;;\n"
-                "esac\n"
+            sandbox = Sandbox(
+                Path(tmp),
+                installed=True,
+                update_status="update_available\t1.0.1\t1.0.2\t-",
             )
-            fake_python.chmod(0o755)
-            command = (
-                'source "$1"; PYTHON="$2"; '
-                'can_prompt_for_database_update() { return 0; }; '
-                'check_database_update /database img 1'
+            result = sandbox.run(
+                "can_prompt_for_database_update() { return 0; }; "
+                'read() { if [[ "$*" == "-r answer" ]]; then answer=y; '
+                'else builtin read "$@"; fi; }; '
+                "run_pipeline --database_profile img --query /q"
             )
-            result = subprocess.run(
-                ["bash", "-c", command, "bash", str(CLI), str(fake_python)],
-                input="y\n",
-                check=True,
-                capture_output=True,
-                text=True,
-                env={**os.environ, "CAPTURED_INSTALL": str(captured)},
-            )
-            captured_arguments = captured.read_text().strip()
-        self.assertEqual(
-            captured_arguments,
-            f"{DATABASE_MANAGER} install --root /database --profile img --latest "
-            "--require-version 1.0.2 --force",
+            calls = sandbox.manager_calls()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        install_index = next(i for i, call in enumerate(calls) if " install " in call)
+        nextflow_index = next(
+            i for i, call in enumerate(calls) if call.startswith("NEXTFLOW ")
         )
-        self.assertIn(
-            "Database update available for img: v1.0.1 -> v1.0.2",
-            result.stderr,
-        )
-        self.assertIn("Update database now? [y/N]:", result.stderr)
-        self.assertIn("Database profile img v1.0.2 ready at /database", result.stderr)
+        self.assertLess(install_index, nextflow_index)
+        self.assertIn("--require-version 1.0.2 --force", calls[install_index])
 
     def test_run_update_prompt_decline_keeps_installed_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -885,33 +897,27 @@ class DatabaseConfigTests(unittest.TestCase):
 
     def test_failed_run_update_stops_before_pipeline_with_old_profile_intact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            fake_python = Path(tmp) / "fake-python"
-            fake_python.write_text(
-                "#!/usr/bin/env bash\n"
-                "case \"$2\" in\n"
-                "  version) echo 1.0.1 ;;\n"
-                "  check-update) printf 'update_available\\t1.0.1\\t1.0.2\\t-\\n' ;;\n"
-                "  install) exit 2 ;;\n"
-                "  *) exit 99 ;;\n"
-                "esac\n"
+            root = Path(tmp)
+            sandbox = Sandbox(
+                root, installed=True, update_status="update_available\t1.0.1\t1.0.2\t-"
             )
-            fake_python.chmod(0o755)
-            command = (
-                'source "$1"; PYTHON="$2"; '
-                'can_prompt_for_database_update() { return 0; }; '
-                'check_database_update /database img 1'
+            installed = root / "installed"
+            installed.write_text("old profile")
+            sandbox.python.write_text(
+                FAKE_MANAGER.replace('install) touch "$INSTALLED"', "install) exit 2")
             )
-            result = subprocess.run(
-                ["bash", "-c", command, "bash", str(CLI), str(fake_python)],
-                input="y\n",
-                capture_output=True,
-                text=True,
+            result = sandbox.run(
+                "can_prompt_for_database_update() { return 0; }; "
+                'read() { if [[ "$*" == "-r answer" ]]; then answer=y; '
+                'else builtin read "$@"; fi; }; '
+                "run_pipeline --database_profile img --query /q || exit $?"
             )
+            self.assertEqual(installed.read_text(), "old profile")
+            calls = sandbox.manager_calls()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(
-            "Database update failed; profile img remains installed and the pipeline was not started.",
-            result.stderr,
-        )
+        self.assertFalse(any(call.startswith("NEXTFLOW ") for call in calls))
+        self.assertTrue(any(" install " in call for call in calls))
+        self.assertIn("Database update failed", result.stderr)
 
     def test_setup_update_forces_shared_update_install_path(self) -> None:
         command = (
@@ -1155,7 +1161,7 @@ class SetupArgumentTests(unittest.TestCase):
         self.assertNotEqual(forced.returncode, 0)
         self.assertTrue(any("check-update" in call for call in forced_calls))
         self.assertEqual(plain.returncode, 0, plain.stderr)
-        self.assertFalse(any("check-update" in call for call in plain_calls))
+        self.assertTrue(any("check-update" in call for call in plain_calls))
 
     def test_failed_config_write_stops_setup_and_keeps_the_saved_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1176,6 +1182,103 @@ class SetupArgumentTests(unittest.TestCase):
 
 
 class RunArgumentTests(unittest.TestCase):
+    def test_runs_use_quick_validation_and_cached_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), installed=True)
+            result = sandbox.run("run_pipeline --query /q")
+            calls = sandbox.manager_calls()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        validation = next(call for call in calls if " validate " in call)
+        update = next(call for call in calls if " check-update " in call)
+        self.assertIn("--quick", validation)
+        self.assertIn("--cached", update)
+
+    def test_setup_always_uses_full_validation_and_fresh_update_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), installed=True)
+            sandbox.env["SSUEXTRACT_SKIP_UPDATE_CHECK"] = "1"
+            result = sandbox.run("setup_database --database_profile img")
+            calls = sandbox.manager_calls()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(
+            "--quick", next(call for call in calls if " validate " in call)
+        )
+        self.assertNotIn(
+            "--cached", next(call for call in calls if " check-update " in call)
+        )
+
+    def test_skip_update_check_keeps_run_and_example_ready_checks(self) -> None:
+        for command in ("run_pipeline --query /q", "run_smoke"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as tmp:
+                sandbox = Sandbox(Path(tmp), installed=True)
+                sandbox.env["SSUEXTRACT_SKIP_UPDATE_CHECK"] = "1"
+                result = sandbox.run(command)
+                calls = sandbox.manager_calls()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(any(" validate " in call for call in calls))
+                self.assertFalse(any(" check-update " in call for call in calls))
+                self.assertTrue(any(call.startswith("NEXTFLOW ") for call in calls))
+
+    def test_example_stops_after_failed_preparation_or_version_lookup(self) -> None:
+        for failed_step in ("mktemp", "cp", "version"):
+            with (
+                self.subTest(failed_step=failed_step),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                root = Path(tmp)
+                sandbox = Sandbox(root, installed=True)
+                stage = root / "stage"
+                stage.mkdir()
+                sandbox.env["SMOKE_STAGE"] = str(stage)
+                prefix = ""
+                if failed_step == "mktemp":
+                    prefix = 'mktemp() { printf "%s\\n" "$SMOKE_STAGE"; return 71; }; '
+                elif failed_step == "cp":
+                    prefix = "cp() { return 71; }; "
+                else:
+                    sandbox.python.write_text(
+                        FAKE_MANAGER.replace(
+                            "version) echo 1.0.1",
+                            'version) if grep -q "^NEXTFLOW " "$CALLS"; '
+                            "then exit 71; fi; echo 1.0.1",
+                        )
+                    )
+                result = sandbox.run(
+                    prefix + "run_smoke --database_profile img || exit $?"
+                )
+                calls = sandbox.manager_calls()
+                self.assertEqual(result.returncode, 71, result.stderr)
+                self.assertFalse(
+                    any("validate_example_output.py" in call for call in calls)
+                )
+                if failed_step != "version":
+                    self.assertFalse(
+                        any(call.startswith("NEXTFLOW ") for call in calls)
+                    )
+
+    def test_example_resolves_unsaved_path_once_for_run_and_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sandbox = Sandbox(Path(tmp), installed=True)
+            result = sandbox.run(
+                'resolve_database_path() { printf "PATH_SELECTION\\n" >> "$CALLS"; '
+                'printf "/selected database\\n"; }; run_smoke --database_profile img'
+            )
+            calls = sandbox.manager_calls()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls.count("PATH_SELECTION"), 1)
+        self.assertTrue(
+            any(
+                "NEXTFLOW " in call and "--database_path /selected database" in call
+                for call in calls
+            )
+        )
+        versions = [call for call in calls if " version " in call]
+        self.assertEqual(len(versions), 2)
+        self.assertTrue(
+            all("--root /selected database --profile img" in call for call in versions)
+        )
+        self.assertIn("--profile img --database-version 1.0.1", calls[-1])
+
     def test_database_options_without_a_value_fail_with_status_two(self) -> None:
         cases = (
             ("--database_profile",),

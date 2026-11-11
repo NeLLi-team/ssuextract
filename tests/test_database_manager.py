@@ -50,14 +50,19 @@ def write_profile(
             "artifacts": [
                 {
                     "path": artifact_path,
-                    "bytes": len(artifact_data) if artifact_bytes is None else artifact_bytes,
+                    "bytes": len(artifact_data)
+                    if artifact_bytes is None
+                    else artifact_bytes,
                     "sha256": sha256(artifact_data)
                     if artifact_sha256 is None
                     else artifact_sha256,
                 }
             ],
             "blast_databases": {marker: {"prefix": "blast/ssu"}},
-            "taxonomy_database": {"preferred": artifact_path},
+            "taxonomy_database": {
+                "preferred": artifact_path,
+                "source_records": artifact_path,
+            },
         },
     )
     return directory
@@ -160,22 +165,239 @@ def tar_bytes(files: dict[str, bytes]) -> bytes:
 
 
 class DatabaseManagerTests(unittest.TestCase):
+    def test_quick_validation_checks_sizes_without_hashing_or_blast(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = write_profile(root, artifact_sha256="0" * 64)
+            with (
+                mock.patch.object(manager, "_sha256") as digest,
+                mock.patch.object(manager.subprocess, "run") as blast,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                status = manager.main(
+                    ["validate", "--root", str(root), "--profile", "curated", "--quick"]
+                )
+            self.assertEqual(status, 0)
+            digest.assert_not_called()
+            blast.assert_not_called()
+            for content in (b"wrong size", None):
+                with self.subTest(content=content):
+                    artifact = directory / "blast/ssu.unusual"
+                    if content is None:
+                        artifact.unlink()
+                    else:
+                        artifact.write_bytes(content)
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        status = manager.main(
+                            [
+                                "validate",
+                                "--root",
+                                str(root),
+                                "--profile",
+                                "curated",
+                                "--quick",
+                            ]
+                        )
+                    self.assertEqual(status, 4)
+
+    def test_manifest_requires_runtime_taxonomy_artifact_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = write_profile(Path(tmp))
+            manifest_path = directory / manager.MANIFEST_NAME
+            original = json.loads(manifest_path.read_text())
+            for key in ("preferred", "source_records"):
+                for value in (None, "../outside", "unlisted.parquet"):
+                    with self.subTest(key=key, value=value):
+                        manifest = json.loads(json.dumps(original))
+                        if value is None:
+                            del manifest["taxonomy_database"][key]
+                        else:
+                            manifest["taxonomy_database"][key] = value
+                        write_json(manifest_path, manifest)
+                        with self.assertRaises(manager.ManifestError):
+                            manager.load_manifest(directory)
+
+    def test_tar_extraction_reads_members_in_one_streaming_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "profile.tar.gz"
+            archive.write_bytes(
+                tar_bytes({"profile/first": b"one", "profile/second": b"two"})
+            )
+            real_open = manager.tarfile.open
+            with (
+                mock.patch.object(manager.tarfile, "open", wraps=real_open) as opened,
+                mock.patch.object(
+                    manager.tarfile.TarFile,
+                    "getmembers",
+                    side_effect=AssertionError("second pass"),
+                ),
+            ):
+                manager.safe_extract_tar(archive, root / "extract")
+            self.assertEqual(opened.call_args.kwargs["mode"], "r|*")
+            self.assertEqual((root / "extract/profile/first").read_bytes(), b"one")
+            self.assertEqual((root / "extract/profile/second").read_bytes(), b"two")
+
+    @mock.patch.object(manager, "discover_latest_catalog")
+    def test_cached_update_check_reuses_result_until_24_hours(self, discover) -> None:
+        discover.return_value = {"profiles": {"curated": {"version": "1.1.0"}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_profile(root, version="1.0.0")
+            with mock.patch.object(manager.time, "time", return_value=100_000):
+                first = manager.check_profile_update(root, "curated", use_cache=True)
+            cache = root / ".curated.update-check.json"
+            self.assertEqual(json.loads(cache.read_text())["checked_at"], 100_000)
+            with mock.patch.object(manager.time, "time", return_value=186_399):
+                self.assertEqual(
+                    manager.check_profile_update(root, "curated", use_cache=True), first
+                )
+            self.assertEqual(discover.call_count, 1)
+            with mock.patch.object(manager.time, "time", return_value=186_400):
+                manager.check_profile_update(root, "curated", use_cache=True)
+            self.assertEqual(discover.call_count, 2)
+            self.assertEqual(json.loads(cache.read_text())["checked_at"], 186_400)
+            manager.check_profile_update(root, "curated")
+            self.assertEqual(discover.call_count, 3)
+
+    @mock.patch.object(manager, "discover_latest_catalog")
+    def test_update_cache_is_scoped_to_root_and_profile_after_installation(
+        self, discover
+    ) -> None:
+        discover.return_value = {
+            "profiles": {"curated": {"version": "1.1.0"}, "img": {"version": "1.1.0"}}
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for database_root, profile, version in (
+                (root, "curated", "1.0.0"),
+                (root, "img", "1.0.0"),
+                (root / "other", "curated", "1.0.0"),
+                (root, "curated", "1.1.0"),
+            ):
+                write_profile(database_root, profile=profile, version=version)
+                result = manager.check_profile_update(
+                    database_root, profile, use_cache=True
+                )
+                self.assertEqual(result["installed"], version)
+            self.assertEqual(discover.call_count, 3)
+            self.assertEqual(result["status"], "current")
+
+    @mock.patch.object(
+        manager,
+        "discover_latest_catalog",
+        side_effect=manager.ReleaseDiscoveryError("offline"),
+    )
+    def test_unavailable_update_result_is_not_cached(self, discover) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_profile(root, version="1.0.0")
+            for _ in range(2):
+                result = manager.check_profile_update(root, "curated", use_cache=True)
+                self.assertEqual(result["status"], "unavailable")
+            self.assertEqual(discover.call_count, 2)
+            self.assertFalse((root / ".curated.update-check.json").exists())
+
+    @mock.patch.object(manager, "discover_latest_catalog")
+    def test_update_cache_checks_catalog_contents(self, discover) -> None:
+        discover.side_effect = [
+            {"profiles": {"curated": {"version": version}}}
+            for version in ("1.0.0", "1.1.0", "1.2.0")
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_profile(root, version="1.0.0")
+            first_catalog = root / "catalog.json"
+            write_published_catalog(first_catalog)
+            second_catalog = root / "other-catalog.json"
+            catalog = json.loads(first_catalog.read_text(encoding="utf-8"))
+            catalog["profiles"]["curated"]["version"] = "1.1.0"
+            write_json(second_catalog, catalog)
+            for path, expected in (
+                (first_catalog, "1.0.0"),
+                (second_catalog, "1.1.0"),
+            ):
+                with self.subTest(catalog=path):
+                    result = manager.check_profile_update(
+                        root, "curated", catalog_path=path, use_cache=True
+                    )
+                    self.assertEqual(result["latest"], expected)
+            catalog["profiles"]["curated"]["version"] = "1.2.0"
+            write_json(second_catalog, catalog)
+            result = manager.check_profile_update(
+                root, "curated", catalog_path=second_catalog, use_cache=True
+            )
+            self.assertEqual(result["latest"], "1.2.0")
+            self.assertEqual(discover.call_count, 3)
+
+    @mock.patch.object(manager, "discover_latest_catalog")
+    def test_update_query_notice_is_emitted_only_for_discovery(self, discover) -> None:
+        discover.return_value = {"profiles": {"curated": {"version": "1.0.0"}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_profile(root, version="1.0.0")
+            for flags, queries in (([], 1), (["--cached"], 0), ([], 1)):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    status = manager.main(
+                        [
+                            "check-update",
+                            "--root",
+                            str(root),
+                            "--profile",
+                            "curated",
+                            "--format",
+                            "tsv",
+                            *flags,
+                        ]
+                    )
+                self.assertEqual(status, 0)
+                self.assertEqual(stdout.getvalue(), "current\t1.0.0\t1.0.0\t-\n")
+                self.assertEqual(
+                    stderr.getvalue().count("Checking Zenodo for database updates..."),
+                    queries,
+                )
+            self.assertEqual(discover.call_count, 2)
+
+    @mock.patch.object(manager, "discover_latest_catalog")
+    def test_bad_or_unwritable_update_cache_does_not_fail_check(self, discover) -> None:
+        discover.return_value = {"profiles": {"curated": {"version": "1.0.0"}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_profile(root, version="1.0.0")
+            cache = root / ".curated.update-check.json"
+            for content in ("{", "[]", '{"checked_at":"bad","result":{}}'):
+                cache.write_text(content)
+                self.assertEqual(
+                    manager.check_profile_update(root, "curated", use_cache=True)[
+                        "status"
+                    ],
+                    "current",
+                )
+            with mock.patch.object(
+                manager.tempfile,
+                "NamedTemporaryFile",
+                side_effect=PermissionError("read only"),
+            ):
+                self.assertEqual(
+                    manager.check_profile_update(root, "curated")["status"], "current"
+                )
+
     def test_repository_catalog_has_coherent_release_state(self) -> None:
         catalog = manager.load_catalog(REPO / "config" / "database_catalog.json")
         self.assertEqual(set(catalog["profiles"]), {"curated", "img"})
         self.assertEqual(catalog["zenodo"]["concept_record_id"], "21367798")
-        states = []
         for profile in ("curated", "img"):
             archive = catalog["profiles"][profile]["archive"]
-            states.append(archive["url"] is not None)
-            if archive["url"] is not None:
-                self.assertRegex(
-                    archive["url"],
-                    rf"^https://zenodo\.org/records/[0-9]+/files/"
-                    rf"ssuextract-db-{profile}-v[0-9]+\.[0-9]+\.[0-9]+"
-                    r"\.tar\.zst\?download=1$",
-                )
-        self.assertIn(states, ([False, False], [True, True]))
+            self.assertRegex(
+                archive["url"],
+                rf"^https://zenodo\.org/records/[0-9]+/files/"
+                rf"ssuextract-db-{profile}-v[0-9]+\.[0-9]+\.[0-9]+"
+                r"\.tar\.zst\?download=1$",
+            )
 
     def test_tutorial_profile_versions_and_sizes_match_catalog(self) -> None:
         catalog = manager.load_catalog(REPO / "config" / "database_catalog.json")
@@ -746,7 +968,10 @@ class DatabaseManagerTests(unittest.TestCase):
                     }
                 ],
                 "blast_databases": {"16S": {"prefix": "blast/ssu"}},
-                "taxonomy_database": {"preferred": "blast/ssu.fake"},
+                "taxonomy_database": {
+                    "preferred": "blast/ssu.fake",
+                    "source_records": "blast/ssu.fake",
+                },
             }
             archive = tar_bytes(
                 {
@@ -806,7 +1031,10 @@ class DatabaseManagerTests(unittest.TestCase):
                     }
                 ],
                 "blast_databases": {"16S": {"prefix": "blast/ssu"}},
-                "taxonomy_database": {"preferred": "blast/ssu.fake"},
+                "taxonomy_database": {
+                    "preferred": "blast/ssu.fake",
+                    "source_records": "blast/ssu.fake",
+                },
             }
             archive = tar_bytes(
                 {
@@ -867,7 +1095,10 @@ class DatabaseManagerTests(unittest.TestCase):
                     }
                 ],
                 "blast_databases": {"16S": {"prefix": "blast/ssu"}},
-                "taxonomy_database": {"preferred": "blast/ssu.fake"},
+                "taxonomy_database": {
+                    "preferred": "blast/ssu.fake",
+                    "source_records": "blast/ssu.fake",
+                },
             }
             archive = tar_bytes(
                 {
@@ -975,7 +1206,10 @@ class DatabaseManagerTests(unittest.TestCase):
                     }
                 ],
                 "blast_databases": {"16S": {"prefix": "blast/ssu"}},
-                "taxonomy_database": {"preferred": "blast/ssu.fake"},
+                "taxonomy_database": {
+                    "preferred": "blast/ssu.fake",
+                    "source_records": "blast/ssu.fake",
+                },
             }
             archive = tar_bytes(
                 {
@@ -1048,7 +1282,10 @@ class DatabaseManagerTests(unittest.TestCase):
                     }
                 ],
                 "blast_databases": {"16S": {"prefix": "blast/ssu"}},
-                "taxonomy_database": {"preferred": "blast/ssu.fake"},
+                "taxonomy_database": {
+                    "preferred": "blast/ssu.fake",
+                    "source_records": "blast/ssu.fake",
+                },
             }
             archive = tar_bytes(
                 {
@@ -1096,29 +1333,6 @@ class DatabaseManagerTests(unittest.TestCase):
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "old installation")
             self.assertEqual([path.name for path in root.iterdir()], ["curated"])
 
-    def test_unpublished_catalog_profile_fails_clearly(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            catalog = root / "catalog.json"
-            write_json(
-                catalog,
-                {
-                    "schema_version": 1,
-                    "default_profile": "curated",
-                    "profiles": {
-                        "curated": {
-                            "version": "1.0.0",
-                            "archive": {"url": None, "bytes": None, "sha256": None},
-                        }
-                    },
-                },
-            )
-            with self.assertRaisesRegex(manager.InstallError, "no published archive URL"):
-                manager.install_profile(
-                    root / "databases",
-                    "curated",
-                    catalog_path=catalog,
-                )
 
 
 if __name__ == "__main__":

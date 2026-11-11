@@ -20,6 +20,9 @@ DB_NOT_INSTALLED=3
 DB_DAMAGED=4
 # Set to 1 by ensure_database when it installed or replaced the profile.
 DATABASE_INSTALLED=0
+# The selection used by the last successful run, also used by the example validator.
+RUN_DATABASE_PATH=""
+RUN_DATABASE_PROFILE=""
 
 main() {
     local command="${1:-run}"
@@ -305,9 +308,11 @@ resolve_database_path() {
 database_ready() {
     local db_dir="$1"
     local profile="$2"
+    shift 2
     "${PYTHON}" "${DATABASE_MANAGER}" validate \
         --root "${db_dir}" \
         --profile "${profile}" \
+        "$@" \
         >/dev/null
 }
 
@@ -332,7 +337,7 @@ install_database() {
     if [[ "${replace}" -eq 1 ]]; then
         install_args+=(--force)
     fi
-    "${install_args[@]}"
+    ${install_args[@]+"${install_args[@]}"}
 }
 
 report_database_ready() {
@@ -350,10 +355,11 @@ ensure_database() {
     local db_dir="$1"
     local profile="$2"
     local explicit_path="${3:-0}"
+    local validation_args=("${@:4}")
     local status=0
 
     DATABASE_INSTALLED=0
-    database_ready "${db_dir}" "${profile}" || status=$?
+    database_ready "${db_dir}" "${profile}" ${validation_args[@]+"${validation_args[@]}"} || status=$?
     case "${status}" in
         0) ;;
         "${DB_NOT_INSTALLED}")
@@ -378,7 +384,8 @@ ensure_database() {
         *) return 1 ;;
     esac
 
-    if [[ "${DATABASE_INSTALLED}" -eq 1 ]] && ! database_ready "${db_dir}" "${profile}"; then
+    if [[ "${DATABASE_INSTALLED}" -eq 1 ]] && \
+        ! database_ready "${db_dir}" "${profile}" ${validation_args[@]+"${validation_args[@]}"}; then
         printf 'Installed database profile failed validation: %s/%s\n' \
             "${db_dir}" "${profile}" >&2
         return 1
@@ -392,6 +399,7 @@ check_database_update() {
     local allow_prompt="${3:-0}"
     local force_update="${4:-0}"
     local include_database_path="${5:-0}"
+    local update_args=("${@:6}")
     local result=""
     local status=""
     local installed=""
@@ -399,11 +407,10 @@ check_database_update() {
     local reason=""
     local answer=""
 
-    printf 'Checking Zenodo for database updates...\n' >&2
     result=$("${PYTHON}" "${DATABASE_MANAGER}" check-update \
         --root "${db_dir}" \
         --profile "${profile}" \
-        --format tsv)
+        --format tsv ${update_args[@]+"${update_args[@]}"}) || return 1
     IFS=$'\t' read -r status installed latest reason <<< "${result}"
     case "${status}" in
         update_available)
@@ -548,9 +555,6 @@ setup_database() {
     if setup_requests_update "$@"; then
         force_update=1
     fi
-    if [[ "${DATABASE_INSTALLED}" -eq 1 && "${force_update}" -eq 0 ]]; then
-        return 0
-    fi
     check_database_update "${db_dir}" "${profile}" 1 "${force_update}"
 }
 
@@ -590,9 +594,7 @@ run_pipeline() {
                 ;;
         esac
     done
-    if [[ "${#normalized_args[@]}" -gt 0 ]]; then
-        set -- "${normalized_args[@]}"
-    fi
+    set -- ${normalized_args[@]+"${normalized_args[@]}"}
 
     if [[ "$#" -eq 1 && "$1" == "--version" ]]; then
         "${PYTHON}" "${PROJECT_DIR}/scripts/check_version.py"
@@ -611,14 +613,18 @@ run_pipeline() {
         allow_update_prompt=0
         include_database_path=1
     fi
-    ensure_database "${db_dir}" "${profile}" "${include_database_path}" || return
+    ensure_database "${db_dir}" "${profile}" "${include_database_path}" --quick || return
     if ! cli_has_database_path "$@" && ! cli_has_database_profile "$@"; then
         write_database_config "${db_dir}" "${profile}" || return
     fi
-    if ! check_database_update \
-        "${db_dir}" "${profile}" "${allow_update_prompt}" 0 "${include_database_path}"; then
-        return 1
+    if [[ "${SSUEXTRACT_SKIP_UPDATE_CHECK:-0}" != 1 ]]; then
+        if ! check_database_update \
+            "${db_dir}" "${profile}" "${allow_update_prompt}" 0 "${include_database_path}" --cached; then
+            return 1
+        fi
     fi
+    RUN_DATABASE_PATH="${db_dir}"
+    RUN_DATABASE_PROFILE="${profile}"
 
     if cli_has_database_path "$@" && cli_has_database_profile "$@"; then
         run_nextflow run "${PROJECT_DIR}/main.nf" "$@"
@@ -632,7 +638,7 @@ run_pipeline() {
     if ! cli_has_database_profile "$@"; then
         nextflow_args+=(--database_profile "${profile}")
     fi
-    "${nextflow_args[@]}" "$@"
+    ${nextflow_args[@]+"${nextflow_args[@]}"} "$@"
 }
 
 run_smoke() {
@@ -646,21 +652,20 @@ run_smoke() {
         return
     fi
     validate_database_options "$@" || return
-    smoke_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssuextract-smoke.XXXXXX")
+    smoke_dir=$(mktemp -d "${TMPDIR:-/tmp}/ssuextract-smoke.XXXXXX") || return
     trap "rm -rf '${smoke_dir}'" EXIT
-    cp "${SMOKE_FASTAS[@]}" "${smoke_dir}/"
+    cp ${SMOKE_FASTAS[@]+"${SMOKE_FASTAS[@]}"} "${smoke_dir}/" || return
     smoke_args=(
         --query "${smoke_dir}"
         --outdir "${PROJECT_DIR}/results/smoke"
         --threads_per_job "${EXAMPLE_THREADS_PER_JOB}"
     )
-    # run_pipeline resolves the selection, readies the database, and saves the
-    # selection; resolving afterwards reads the same values without a second prompt.
-    run_pipeline "${smoke_args[@]}" "$@" || return
-    profile=$(resolve_database_profile "$@") || return
-    db_dir=$(resolve_database_path "$@") || return
+    # Reuse the selection resolved by run_pipeline, including unsaved overrides.
+    run_pipeline ${smoke_args[@]+"${smoke_args[@]}"} "$@" || return
+    profile="${RUN_DATABASE_PROFILE}"
+    db_dir="${RUN_DATABASE_PATH}"
     database_version=$("${PYTHON}" "${DATABASE_MANAGER}" version \
-        --root "${db_dir}" --profile "${profile}")
+        --root "${db_dir}" --profile "${profile}") || return
     "${PYTHON}" "${EXAMPLE_VALIDATOR}" \
         --summary "${PROJECT_DIR}/results/smoke/cmsearch_summary.tsv" \
         --expectations "${EXAMPLE_EXPECTATIONS}" \

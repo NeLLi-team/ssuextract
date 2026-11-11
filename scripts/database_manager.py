@@ -283,10 +283,11 @@ def load_catalog(path: str | Path = DEFAULT_CATALOG) -> dict:
         archive = _require_object(
             entry.get("archive"), f"catalog profile {profile!r} archive", CatalogError
         )
-        values = (archive.get("url"), archive.get("bytes"), archive.get("sha256"))
-        if values == (None, None, None):
-            continue
-        url, size, digest = values
+        url, size, digest = (
+            archive.get("url"),
+            archive.get("bytes"),
+            archive.get("sha256"),
+        )
         if not isinstance(url, str) or urlparse(url).scheme != "https" or not urlparse(url).netloc:
             raise CatalogError(f"catalog profile {profile!r} archive URL must use HTTPS")
         _require_size(size, f"catalog profile {profile!r} archive bytes", CatalogError)
@@ -346,16 +347,17 @@ def load_manifest(profile_directory: str | Path, expected_profile: str | None = 
     taxonomy_database = _require_object(
         manifest.get("taxonomy_database"), "manifest taxonomy_database", ManifestError
     )
-    preferred_taxonomy = _safe_relative_path(
-        taxonomy_database.get("preferred"),
-        "preferred taxonomy database",
-        ManifestError,
-    )
-    if preferred_taxonomy not in artifact_paths:
-        raise ManifestError(
-            f"Preferred taxonomy database is not a manifest-listed artifact: "
-            f"{preferred_taxonomy}"
+    for key in ("preferred", "source_records"):
+        taxonomy_path = _safe_relative_path(
+            taxonomy_database.get(key),
+            f"taxonomy_database.{key}",
+            ManifestError,
         )
+        if taxonomy_path not in artifact_paths:
+            raise ManifestError(
+                f"taxonomy_database.{key} is not a manifest-listed artifact: "
+                f"{taxonomy_path}"
+            )
     return manifest
 
 
@@ -386,6 +388,8 @@ def validate_profile_directory(
     profile_directory: str | Path,
     expected_profile: str | None = None,
     blastdbcmd: str = "blastdbcmd",
+    *,
+    quick: bool = False,
 ) -> dict:
     directory = Path(profile_directory).resolve()
     if not directory.is_dir():
@@ -415,6 +419,8 @@ def validate_profile_directory(
             raise ArtifactDamagedError(
                 f"Artifact size mismatch for {relative}: expected {artifact['bytes']}, found {actual_size}"
             )
+        if quick:
+            continue
         actual_digest = _sha256(path)
         if actual_digest != artifact["sha256"]:
             raise ArtifactDamagedError(
@@ -422,6 +428,8 @@ def validate_profile_directory(
                 f"found {actual_digest}"
             )
 
+    if quick:
+        return manifest
     for database in manifest["blast_databases"].values():
         relative = _safe_relative_path(database["prefix"], "BLAST prefix", ManifestError)
         prefix = (directory / Path(relative)).resolve()
@@ -432,10 +440,16 @@ def validate_profile_directory(
 
 
 def validate_profile(
-    root: str | Path, profile: str, blastdbcmd: str = "blastdbcmd"
+    root: str | Path,
+    profile: str,
+    blastdbcmd: str = "blastdbcmd",
+    *,
+    quick: bool = False,
 ) -> dict:
     _require_identifier(profile, "profile", ManifestError)
-    return validate_profile_directory(Path(root) / profile, profile, blastdbcmd)
+    return validate_profile_directory(
+        Path(root) / profile, profile, blastdbcmd, quick=quick
+    )
 
 
 def installed_version(root: str | Path, profile: str) -> str:
@@ -444,38 +458,108 @@ def installed_version(root: str | Path, profile: str) -> str:
     return manifest["version"]
 
 
+def _update_status(installed: str, latest: str) -> str:
+    return {-1: "update_available", 0: "current", 1: "installed_newer"}[
+        compare_versions(installed, latest)
+    ]
+
+
+def _read_update_cache(
+    path: Path, installed: str, now: float, catalog_sha256: str
+) -> dict[str, str] | None:
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8"))
+        checked_at = cache["checked_at"]
+        result = cache["result"]
+        if (
+            cache["catalog_sha256"] == catalog_sha256
+            and isinstance(checked_at, (int, float))
+            and 0 <= now - checked_at < 24 * 60 * 60
+            and isinstance(result, dict)
+            and set(result) == {"status", "installed", "latest", "reason"}
+            and all(isinstance(value, str) for value in result.values())
+            and result["status"] in {"current", "installed_newer", "update_available"}
+        ):
+            result["installed"] = installed
+            result["status"] = _update_status(installed, result["latest"])
+            return result
+    except (OSError, ValueError, KeyError, TypeError, ReleaseDiscoveryError):
+        return None
+    return None
+
+
+def _write_update_cache(
+    path: Path, result: dict[str, str], checked_at: float, catalog_sha256: str
+) -> None:
+    staged: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f"{path.name}.",
+            delete=False,
+        ) as handle:
+            staged = Path(handle.name)
+            json.dump(
+                {
+                    "checked_at": checked_at,
+                    "catalog_sha256": catalog_sha256,
+                    "result": result,
+                },
+                handle,
+            )
+        staged.replace(path)
+    except OSError:
+        # Read-only database roots remain usable for runs and setup checks.
+        pass
+    finally:
+        if staged is not None:
+            with contextlib.suppress(OSError):
+                staged.unlink(missing_ok=True)
+
+
 def check_profile_update(
     root: str | Path,
     profile: str,
     catalog_path: str | Path = DEFAULT_CATALOG,
     timeout: float = 5.0,
     opener: Callable[..., BinaryIO] = urllib.request.urlopen,
+    *,
+    use_cache: bool = False,
 ) -> dict[str, str]:
     installed = installed_version(root, profile)
+    cache_path = Path(root) / f".{profile}.update-check.json"
+    checked_at = time.time()
     catalog = load_catalog(catalog_path)
+    catalog_sha256 = hashlib.sha256(
+        json.dumps(catalog, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    if use_cache:
+        cached = _read_update_cache(cache_path, installed, checked_at, catalog_sha256)
+        if cached is not None:
+            return cached
+    print("Checking Zenodo for database updates...", file=sys.stderr)
     try:
         latest_catalog = discover_latest_catalog(catalog, timeout=timeout, opener=opener)
         latest = latest_catalog["profiles"][profile]["version"]
-        comparison = compare_versions(installed, latest)
+        status = _update_status(installed, latest)
     except (KeyError, ReleaseDiscoveryError) as error:
-        return {
+        result = {
             "status": "unavailable",
             "installed": installed,
             "latest": "",
             "reason": " ".join(str(error).split()),
         }
-    if comparison < 0:
-        status = "update_available"
-    elif comparison > 0:
-        status = "installed_newer"
     else:
-        status = "current"
-    return {
-        "status": status,
-        "installed": installed,
-        "latest": latest,
-        "reason": "",
-    }
+        result = {
+            "status": status,
+            "installed": installed,
+            "latest": latest,
+            "reason": "",
+        }
+        _write_update_cache(cache_path, result, checked_at, catalog_sha256)
+    return result
 
 
 def download_archive(
@@ -546,8 +630,8 @@ def safe_extract_tar(archive: str | Path, destination: str | Path) -> None:
     destination_path = Path(destination).resolve()
     destination_path.mkdir(parents=True, exist_ok=True)
     try:
-        with tarfile.open(archive, mode="r:*") as handle:
-            for member in handle.getmembers():
+        with tarfile.open(archive, mode="r|*") as handle:
+            for member in handle:
                 relative = _safe_relative_path(member.name, "archive member", InstallError)
                 target = (destination_path / Path(relative)).resolve()
                 if not _inside(destination_path, target):
@@ -677,11 +761,6 @@ def _install_profile_locked(
     except KeyError as error:
         raise CatalogError(f"Unknown database profile {profile!r}") from error
     archive = entry["archive"]
-    if archive["url"] is None:
-        raise InstallError(
-            f"Profile {profile!r} has no published archive URL yet; install cannot proceed"
-        )
-
     root_path = Path(root).resolve()
     root_path.mkdir(parents=True, exist_ok=True)
     target = root_path / profile
@@ -864,6 +943,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     validate.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     validate.add_argument("--profile", required=True)
     validate.add_argument("--blastdbcmd", default="blastdbcmd")
+    validate.add_argument(
+        "--quick", action="store_true", help="check manifest and artifact sizes only"
+    )
 
     version = subparsers.add_parser("version", help="print an installed profile version")
     version.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -877,6 +959,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     update.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     update.add_argument("--timeout", type=float, default=5.0)
     update.add_argument("--format", choices=("human", "tsv"), default="human")
+    update.add_argument(
+        "--cached",
+        action="store_true",
+        help="reuse update checks younger than 24 hours",
+    )
 
     install = subparsers.add_parser("install", help="download and validate a profile installation")
     install.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -959,7 +1046,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
         elif args.command == "validate":
-            validate_profile(args.root, args.profile, args.blastdbcmd)
+            validate_profile(args.root, args.profile, args.blastdbcmd, quick=args.quick)
             print((args.root / args.profile).resolve())
         elif args.command == "version":
             print(installed_version(args.root, args.profile))
@@ -969,6 +1056,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.profile,
                 catalog_path=args.catalog,
                 timeout=args.timeout,
+                use_cache=args.cached,
             )
             _print_update_result(result, args.profile, args.format)
         else:

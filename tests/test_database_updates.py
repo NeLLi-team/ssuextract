@@ -214,9 +214,11 @@ class DatabaseUpdateTests(unittest.TestCase):
     def test_release_manifest_md5_mismatch_is_rejected(self) -> None:
         catalog, responses = release_fixture()
         manifest_url = next(url for url in responses if "db-release" in url)
-        responses[manifest_url] += b"corrupt"
+        responses[manifest_url] = b"!" + responses[manifest_url][1:]
 
-        with self.assertRaisesRegex(updates.ReleaseDiscoveryError, "size does not match"):
+        with self.assertRaisesRegex(
+            updates.ReleaseDiscoveryError, "MD5 does not match"
+        ):
             updates.discover_latest_catalog(
                 catalog, timeout=2, opener=MappingOpener(responses)
             )
@@ -231,9 +233,22 @@ class DatabaseUpdateTests(unittest.TestCase):
         bad_sums = responses[checksum_url].replace(b"a", b"b", 1)
         responses[checksum_url] = bad_sums
         checksum_file["checksum"] = f"md5:{md5(bad_sums)}"
+        manifest_file = next(
+            entry for entry in latest["files"] if "db-release" in entry["key"]
+        )
+        manifest_url = manifest_file["links"]["self"]
+        manifest = json.loads(responses[manifest_url])
+        manifest["checksums"]["sha256"] = hashlib.sha256(bad_sums).hexdigest()
+        manifest_data = json_bytes(manifest)
+        responses[manifest_url] = manifest_data
+        manifest_file["checksum"] = f"md5:{md5(manifest_data)}"
+        manifest_file["size"] = len(manifest_data)
         responses[latest_url] = json_bytes(latest)
 
-        with self.assertRaisesRegex(updates.ReleaseDiscoveryError, "release manifest"):
+        with self.assertRaisesRegex(
+            updates.ReleaseDiscoveryError,
+            "SHA256SUMS disagrees with the 'curated' archive manifest",
+        ):
             updates.discover_latest_catalog(
                 catalog, timeout=2, opener=MappingOpener(responses)
             )
