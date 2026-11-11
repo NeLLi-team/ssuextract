@@ -29,14 +29,9 @@ jobs:
       - run: >-
           git diff --exit-code --
           docs/assets/figures/pipeline-architecture.svg
-          docs/assets/figures/pipeline-architecture.png
           docs/assets/figures/example-performance.svg
-          docs/assets/figures/example-performance.png
           docs/assets/figures/database-taxonomy-resolution.svg
-          docs/assets/figures/database-taxonomy-resolution.png
           docs/assets/figures/database-taxonomy-lineages.svg
-          docs/assets/figures/database-taxonomy-lineages.png
-          docs/assets/figures/img-ssu-locations.svg
           docs/assets/figures/img-ssu-locations.png
           docs/assets/figures/img-ssu-locations.html
           docs/data/database_composition.tsv

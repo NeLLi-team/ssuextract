@@ -73,5 +73,70 @@ class TaxonomyRankRowsTests(unittest.TestCase):
         )
 
 
+class CompositionRowsTests(unittest.TestCase):
+    def test_coordinate_counts_include_taxa_without_a_location_row(self) -> None:
+        """Count each IMG taxon, including incomplete and absent locations."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = {
+                name: root / f"{name}.parquet"
+                for name in (
+                    "sequences",
+                    "source_records",
+                    "preferred_taxonomy",
+                    "img_location",
+                )
+            }
+            with duckdb.connect(":memory:") as connection:
+                connection.execute(
+                    "COPY (SELECT '16S' AS markers) TO ? (FORMAT PARQUET)",
+                    [str(paths["sequences"])],
+                )
+                connection.execute(
+                    """COPY (SELECT * FROM (VALUES
+                           ('IMG', '16S', '1'), ('IMG', '18S', '1'),
+                           ('IMG', '16S', '2'), ('IMG', '16S', '3'),
+                           ('SILVA', '16S', '4')
+                       ) AS sources(reference_source, marker, taxon_oid))
+                       TO ? (FORMAT PARQUET)""",
+                    [str(paths["source_records"])],
+                )
+                connection.execute(
+                    """COPY (SELECT 'Bacteria' AS domain,
+                           false AS cross_domain_conflict)
+                       TO ? (FORMAT PARQUET)""",
+                    [str(paths["preferred_taxonomy"])],
+                )
+                connection.execute(
+                    """COPY (SELECT * FROM (VALUES
+                           ('1', 12.0, 34.0), ('2', NULL, 10.0)
+                       ) AS locations(taxon_oid, latitude, longitude))
+                       TO ? (FORMAT PARQUET)""",
+                    [str(paths["img_location"])],
+                )
+                qa = {
+                    "counts": {"sequences": 1},
+                    "img_location": {
+                        "rows": 2,
+                        "latitude_rows": 1,
+                        "longitude_rows": 2,
+                    },
+                }
+
+                rows = composition.composition_rows(
+                    connection, "img", "1.0.2", paths, qa
+                )
+
+        coordinate_counts = {
+            row["category"]: row["count"]
+            for row in rows
+            if row["dimension"] == "img_taxon_coordinates"
+        }
+        self.assertEqual(
+            coordinate_counts, {"Located": 1, "Coordinates unavailable": 2}
+        )
+        self.assertEqual(sum(coordinate_counts.values()), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

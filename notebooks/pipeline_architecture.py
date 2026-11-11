@@ -312,17 +312,14 @@ def main() -> None:
     figure = build()
     metadata = {"Date": None, "Creator": "SSUextract"}
     svg = output / "pipeline-architecture.svg"
-    png = output / "pipeline-architecture.png"
     figure.savefig(svg, bbox_inches="tight", facecolor=WHITE, metadata=metadata)
     svg_text = svg.read_text(encoding="utf-8")
     svg.write_text(
         "\n".join(line.rstrip() for line in svg_text.splitlines()) + "\n",
         encoding="utf-8",
     )
-    figure.savefig(png, bbox_inches="tight", facecolor=WHITE, dpi=200, metadata=metadata)
     plt.close(figure)
     svg.chmod(0o644)
-    png.chmod(0o644)
 
 
 if __name__ == "__main__":

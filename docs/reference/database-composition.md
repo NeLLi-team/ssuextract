@@ -79,11 +79,16 @@ other source metadata fields are excluded.
 | --- | ---: |
 | IMG Taxon OIDs | 32,521 |
 | IMG Taxon OIDs with coordinates | 30,349 |
+| IMG Taxon OIDs without complete coordinates | 2,172 |
 | Distinct coordinate pairs | 4,856 |
 | Source records linked to coordinates | 931,810 of 997,180 |
 | Coordinate pairs with 16S rRNA gene and 18S rRNA gene records | 3,445 |
 | Coordinate pairs with only 16S rRNA gene records | 1,336 |
 | Coordinate pairs with only 18S rRNA gene records | 75 |
+
+The coordinate counts include all IMG taxa in the source records. One taxon
+has no row in the location table and is counted among those without complete
+coordinates.
 
 [![World map of available IMG sampling coordinates, grouped by rRNA gene marker membership](../assets/figures/img-ssu-locations.png)](../assets/figures/img-ssu-locations.html){ .docs-figure }
 

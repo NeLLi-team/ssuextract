@@ -282,9 +282,15 @@ def composition_rows(
             if observed[key] != location[key]:
                 raise CompositionError(f"IMG location QA count mismatch for {key}")
         complete = observed["complete_rows"]
+        taxa = scalar(
+            connection,
+            """SELECT count(DISTINCT taxon_oid)
+               FROM read_parquet(?) WHERE reference_source = 'IMG'""",
+            [source_path],
+        )
         for category, count in (
             ("Located", complete),
-            ("Coordinates unavailable", location["rows"] - complete),
+            ("Coordinates unavailable", taxa - complete),
         ):
             rows.append(
                 {

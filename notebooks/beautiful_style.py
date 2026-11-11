@@ -38,7 +38,7 @@ def set_beautiful_style(
             "figure.facecolor": TUFTE_COLORS["light_bg"],
             "axes.facecolor": TUFTE_COLORS["light_bg"],
             "font.family": "sans-serif",
-            "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+            "font.sans-serif": ["DejaVu Sans"],
             "text.color": TUFTE_COLORS["light_text"],
             "axes.labelcolor": TUFTE_COLORS["light_secondary"],
             "axes.labelsize": sizes["label"],
