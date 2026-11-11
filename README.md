@@ -23,11 +23,15 @@ of the query and 100 reference sequences:
 pixi run ssuextract -q data/my_dataset --outdir results/my_dataset --tree_classification
 ```
 
-The default run checks query coverage and near-best BLAST
-subjects. Nonexact query assignments require profile-specific runtime
-calibration. Reference taxonomy remains visible when the query has no supported
-assignment. Tree evidence can reduce the assigned rank; it cannot exceed the
-supported BLAST rank. See [taxonomy selection](docs/explanation/taxonomy.md).
+By default, SSUextract assigns taxonomy from the BLAST subjects that cover at
+least 80% of the query and have a bit score of at least 98% of the best such
+subject. A query that matches a reference exactly over its full length gets
+that reference's taxonomy. Any other query gets a taxonomy only when the
+database profile contains a runtime calibration. The released profiles
+(database v1.0.2) contain none, so those queries are reported as
+`Unclassified`. The output keeps the taxonomy of the best reference in either
+case. Tree classification can make a call less specific, never more specific
+than the BLAST call. See [taxonomy selection](docs/explanation/taxonomy.md).
 
 `-q` is the short form of `--query` in the Pixi wrapper. Both accept one `.fna`,
 `.fa`, or `.fasta` file or a directory of those files. A single file named
@@ -35,12 +39,12 @@ supported BLAST rank. See [taxonomy selection](docs/explanation/taxonomy.md).
 
 `pixi run setup` lists the `curated` and `img` profiles with their database
 versions and download sizes. Select a profile by number or name. That selection
-becomes the default for later pipeline runs. Interactive runs check Zenodo and
-offer to install a newer release before Nextflow starts. During a download, one
-terminal line shows written bytes, transfer rate, and estimated time remaining.
-Rerun the same setup command after an interrupted transfer; it continues from
-the retained partial archive and verifies the completed archive before
-extraction.
+becomes the default for later pipeline runs. A run checks Zenodo for a newer
+release at most once a day and, in a terminal, offers to install it before
+Nextflow starts. During a download, one terminal line shows written bytes,
+transfer rate, and estimated time remaining. Rerun the same setup command on
+the same host after an interrupted transfer; it continues from the retained
+partial archive and verifies the completed archive before extraction.
 
 Documentation: [tutorial](https://nelli-team.github.io/ssuextract/tutorials/first-run/),
 [parameters](https://nelli-team.github.io/ssuextract/reference/cli/),

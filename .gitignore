@@ -15,6 +15,7 @@ resources/database
 config/local.config
 
 # Local agent/session state
+.claude/
 .memd/
 memory.md
 tasks/

@@ -38,7 +38,6 @@ ssuextract/
 │   ├── extract_img_cluster_centroids.py # Centroid FASTA for the IMG search
 │   ├── img_chunked_search.py     # Restartable, chunked centroid BLAST search
 │   ├── img_search_provenance.py  # Search completion contract
-│   ├── search_img_marker.sh      # Single-job centroid search for one marker
 │   ├── classify_img_clusters.py  # Conservative IMG cluster classification
 │   ├── img_classification_data.py # Classification records and input loading
 │   ├── classify_img_marker.sh    # Production centroid-classification contract

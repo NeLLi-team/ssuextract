@@ -1,19 +1,59 @@
 # Changelog
 
-## [Unreleased]
+## [1.3.0] - 2026-11-10
 
 ### Added
 
 - Add an `Unclassified` column to `cmsearch_summary.tab`. It counts the contigs
   with at least one query whose selected taxonomy is `Unclassified`.
 - Add `pixi run setup --help`.
+- Add `SSUEXTRACT_SKIP_UPDATE_CHECK=1` to skip the database update check in
+  runs.
+
+### Changed
+
+- Remove the columns `blast_tied_subjects` and `blast_ties_truncated` from
+  `cmsearch_summary.tsv`; later columns move two positions to the left.
+  `assignment_candidate_count` and `assignment_candidates_truncated` carry the
+  supported counts.
+- Write every boolean value in the output tables as `true` or `false`, and
+  write `blast_pident` in the same form in both tables.
+- Attach the `equal_best_assignment` reason to the subjects tied with the best
+  subject that passes the coverage rule.
+- Resolve relative paths given on the command line against the launch
+  directory. The built-in model, database, and marker-map defaults are
+  absolute paths inside the project.
+- Stop writing a per-run DAG report. The trace, timeline, and execution report
+  remain.
+- Reuse the annotation BLAST result for the detected marker in tree mode when
+  both steps fetch the same number of subjects.
+- Request 8 GB and 2 hours for the two tree processes.
+- Check the manifest and artifact sizes before a run and leave checksums to
+  Nextflow; `pixi run setup` keeps the full check. Runs ask Zenodo for a newer
+  release at most once in 24 hours.
+- Stream the final tables. Peak memory for 50,000 rows fell from 597 MB to
+  108 MB with identical output.
+- Pass `nextflow lint` and run under the strict syntax parser
+  (`NXF_SYNTAX_PARSER=v2`). `process.resourceLimits` applies `--max_cpus`,
+  `--max_memory`, and `--max_time`.
+- Require the `qlen` and `slen` columns in BLAST input and the taxonomy and
+  source-record tables in `annotate_hits.py`.
+- `database_manager.py validate` exits with status 3 for a profile that is not
+  installed and 4 for a damaged artifact.
+- `pixi run dryrun` uses the saved database selection.
+- Compare competing model hits only within one contig and strand. The step
+  took 8.6 s for 16,000 hits and now takes 0.03 s, with identical output.
+- Declare Python 3.14 as the minimum version. Database archives are `.tar.zst`
+  files, which `tarfile` reads from Python 3.14.
+- Measure the performance page again with this version and database v1.0.2.
 
 ### Fixed
 
-- Record the Infernal version in each per-query `tool_versions.txt`. The file
-  held the `cmalign` banner line and no version.
-- List each taxonomy alternative once in `tree_taxonomy_alternatives`. Bacterial
-  and archaeal alternatives appeared twice in tree mode.
+- Record the Infernal version in each per-query `tool_versions.txt`.
+- List each taxonomy alternative once in `tree_taxonomy_alternatives`.
+- Stop before any process starts when two input files have the same stem.
+- Stop with an error that names the subject when a taxonomy string is
+  malformed, and when two extracted regions would get the same name.
 - Show the validation error when a database profile is not ready. A missing
   profile is installed. A profile with a missing or changed artifact is
   replaced, but never under an explicit `--database_path`. Every other
@@ -23,41 +63,39 @@
 - Reject unknown `setup` arguments, a database option without a value, and a
   profile name outside the catalog with exit status 2 before any change.
 - Save `config/local.config` only after the database is ready and only when
-  its content changes.
+  its content changes. Resolve the database selection once in
+  `pixi run example`.
 - Exit with a nonzero status when `setup --update` cannot reach the release
   record.
 - Expand `~` at the database path prompt and save an absolute path.
-- Reject a manifest artifact that is a symbolic link, including a link to a
-  file inside the profile.
+- Require `taxonomy_database.source_records` in the profile manifest, as the
+  pipeline does.
+- Reject a manifest artifact that is a symbolic link.
 - Download an archive once when the server ignores the byte range and the full
   response fails its checksum.
 - Report an unusable database root as a `database-manager` error instead of a
   Python traceback.
-- Declare Python 3.14 as the minimum version. Database archives are `.tar.zst`
-  files, which `tarfile` reads from Python 3.14.
-- Validate the inputs of `img_chunked_search.py prepare --force` before any
-  deletion, and delete only a chunk directory that holds an earlier plan.
-- Record the `-title` argument in the `makeblastdb` command template of the
-  database provenance.
+- Report 2,172 IMG taxa without complete coordinates in the database
+  composition data; one taxon without a location row was not counted.
 
-### Changed
+### Database build tooling
 
-- Pass `nextflow lint` and run under the strict syntax parser
-  (`NXF_SYNTAX_PARSER=v2`). `process.resourceLimits` applies `--max_cpus`,
-  `--max_memory`, and `--max_time`.
-- Write the per-run DAG report as `.html`; it needs no Graphviz.
-- Require the `qlen` and `slen` columns in BLAST input and the taxonomy and
-  source-record tables in `annotate_hits.py`.
-- `database_manager.py validate` exits with status 3 for a profile that is not
-  installed and 4 for a damaged artifact.
-- `pixi run dryrun` uses the saved database selection.
-- Compare competing model hits only within one contig and strand. The step
-  took 8.6 s for 16,000 hits and now takes 0.03 s, with identical output.
-- Load database release tables in bulk. In a comparison on five tables of
-  20,000 rows, the write time fell from 122 s to 0.7 s and the Parquet files
-  were byte-identical. Values of a type other than the column type are now
-  rejected instead of cast.
-- Read the reference taxonomy table for IMG classification in one pass.
+- Load release tables in bulk; five tables of 20,000 rows took 122 s and now
+  take 0.7 s with byte-identical Parquet files. Read BLAST results for IMG
+  classification one query at a time (peak memory for 500,000 hits fell from
+  393 MB to 16 MB).
+- Extract and search centroids only for clusters with an IMG member. The
+  assignment table gains a `marker` column and every outcome record carries an
+  `evidence_id`, so classification must run again before the next build.
+- Fail a build on a lineage with an empty rank inside it, on an unknown or
+  modified git state of tracked files, on an existing output, and on an IMG
+  assignment whose marker does not match. Record the number of source records
+  skipped by each filter in the provenance.
+- `calibrate_taxonomy.py` exits with a nonzero status when calibration is not
+  complete.
+- `img_chunked_search.py prepare --force` validates its inputs first and
+  deletes only a chunk directory that holds an earlier plan.
+- Record the `-title` argument in the `makeblastdb` command template.
 
 ### Removed
 
@@ -65,13 +103,19 @@
   the `--querydir` migration message, the two old `config/local.config`
   formats, and 12-column BLAST input.
 - Remove `database_manager.py resolve` with `--markers` and
-  `--marker-override`.
+  `--marker-override`, and the six unused `--*-glob` options of
+  `finalize_summaries.py`.
+- Remove the single-job IMG search (`scripts/search_img_marker.sh` and search
+  provenance schema 1), the `--assignments-jsonl` output,
+  `build_database_release.py build-prepared`, the command-line entry of
+  `assemble_database_profile.py`, and `calibrate_taxonomy.py
+  --reuse-existing-blast`.
 - Remove the Nextflow profiles `debug`, `conda`, `local`, `slurm`, and `test`
   with `config/environment.yml`.
 - Remove the Pixi tasks `download-db`, `dag`, `run-verbose`, and `report` and
   the `dev` environment.
-- Remove `scripts/get_cmsequences.py`, `docs/requirements.txt`, and
-  `docs/releases/1.1.0.md`. Nothing used them.
+- Remove `scripts/get_cmsequences.py`, `docs/requirements.txt`,
+  `docs/releases/1.1.0.md`, and five figure files that no page used.
 
 ## [1.2.2] - 2026-09-04
 
