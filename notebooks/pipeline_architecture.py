@@ -1,318 +1,397 @@
-"""Render the SSUextract pipeline diagram as SVG and PNG.
+"""Render the SSUextract pipeline diagram as SVG.
 
-The layer-band layout and orthogonal routing follow the visual pattern used by
-``fmschulz/memd`` in ``docs/figures/architecture.py``.
+The diagram reads top to bottom: what the user supplies on the left, the
+numbered pipeline steps in the middle, and the files each step writes on the
+right. Marks are grey. The one accent colour marks the optional tree step,
+which also has dashed lines and an "optional" label.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
-
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch
 
 plt.rcParams["svg.hashsalt"] = "ssuextract-docs"
 
-
-INDIGO = "#3949AB"
-INDIGO_SOFT = "#E8EAF6"
-TEAL = "#00695C"
-TEAL_SOFT = "#E0F2F1"
-ORANGE = "#BF360C"
-ORANGE_SOFT = "#FFF3E0"
-SLATE = "#37474F"
-SLATE_SOFT = "#ECEFF1"
-GRID = "#CFD8DC"
-TEXT = "#212121"
+INK = "#1F2328"
+MUTED = "#57606A"
+LINE = "#8C959F"
+CARD = "#F3F4F6"
+CARD_EDGE = "#D0D7DE"
+BADGE = "#32383F"
+ACCENT = "#D55E00"
 WHITE = "#FFFFFF"
+SANS = "DejaVu Sans"
+MONO = "DejaVu Sans Mono"
+DASHES = (0, (4, 3))
+
+# The axes fill the figure and use inches, so one data unit is one inch.
+FIGURE_WIDTH_IN = 8.9
+FIGURE_HEIGHT_IN = 6.25
+INPUT_X = 0.1
+INPUT_WIDTH = 1.85
+STEP_X = 2.4
+STEP_WIDTH = 4.1
+OUTPUT_X = 6.9
+CARD_HEIGHT = 0.78
+HEADER_Y = 6.03
+FIRST_ROW_CENTER = 5.45
+ROW_PITCH = 0.98
+BADGE_OFFSET = 0.33
+TEXT_OFFSET = 0.66
 
 
 @dataclass(frozen=True)
-class Box:
-    x: float
-    y: float
-    width: float
-    height: float
+class Stroke:
+    """Colour and dash pattern of a line or a border."""
+
+    color: str
+    linestyle: str | tuple[int, tuple[int, int]] = "-"
+
+
+@dataclass(frozen=True)
+class Output:
+    """One file a step writes, with a short description."""
+
+    filename: str
+    caption: str
+
+
+@dataclass(frozen=True)
+class Step:
+    """One pipeline step: its badge, title, description and outputs."""
+
+    badge: str
     title: str
-    body: str
-    edge: str
-    fill: str
-    mono: bool = False
-
-    @property
-    def cx(self) -> float:
-        return self.x + self.width / 2
-
-    @property
-    def cy(self) -> float:
-        return self.y + self.height / 2
+    description: str
+    outputs: tuple[Output, ...] = ()
+    is_optional: bool = False
 
 
-def draw_band(ax, y: float, height: float, label: str) -> None:
-    ax.add_patch(
-        FancyBboxPatch(
-            (0.4, y),
-            13.2,
-            height,
-            boxstyle="round,pad=0.02,rounding_size=0.22",
-            linewidth=1.0,
-            edgecolor=GRID,
-            facecolor="#FAFAFA",
-            zorder=1,
+@dataclass(frozen=True)
+class Source:
+    """Something the user supplies, and the row of the step that reads it."""
+
+    title: str
+    detail: str
+    row: int
+    detail_font: str = SANS
+    is_optional: bool = False
+
+
+FLOW = Stroke(LINE)
+BORDER = Stroke(CARD_EDGE)
+OPTIONAL = Stroke(ACCENT, DASHES)
+
+STEPS = (
+    Step(
+        "1",
+        "Detect rRNA genes",
+        "Infernal searches each assembly with the 16S\n"
+        "and 18S rRNA gene models (RF00177, RF01960).",
+    ),
+    Step(
+        "2",
+        "Resolve overlaps",
+        "Where both models hit one locus, the hit with\nthe lower E-value is kept.",
+    ),
+    Step(
+        "3",
+        "Extract genes",
+        "Each kept hit is cut out on its strand. Partial\n"
+        "hits in model order are joined.",
+        (Output("extracted/*.fna", "gene sequences"),),
+    ),
+    Step(
+        "4",
+        "Search references",
+        "BLAST compares each gene with the 16S or 18S\nindex of the database profile.",
+        (Output("blast_top_hits.tsv", "ranked reference hits"),),
+    ),
+    Step(
+        "5",
+        "Assign taxonomy",
+        "A gene identical to a reference gets its taxonomy.\n"
+        "Other genes need a calibrated database profile.",
+        (
+            Output("cmsearch_summary.tsv", "one row per gene"),
+            Output("cmsearch_summary.tab", "contig counts per sample"),
+        ),
+    ),
+    Step(
+        "+",
+        "Tree classification",
+        "Builds a tree of the gene and 100 references. The\n"
+        "nearest neighbors must also support the call.",
+        (Output("tree_nearest_neighbors.tsv", "references by tree distance"),),
+        is_optional=True,
+    ),
+)
+SOURCES = (
+    Source("Assemblies", ".fna, .fa or .fasta files", row=0),
+    Source("Database profile", "curated or img", row=3),
+    Source(
+        "Optional flag",
+        "--tree_classification",
+        row=5,
+        detail_font=MONO,
+        is_optional=True,
+    ),
+)
+
+
+def build() -> Figure:
+    """Draw the pipeline diagram and return the figure."""
+    fig = plt.figure(figsize=(FIGURE_WIDTH_IN, FIGURE_HEIGHT_IN), dpi=150)
+    ax = fig.add_axes((0, 0, 1, 1))
+    ax.set_xlim(0, FIGURE_WIDTH_IN)
+    ax.set_ylim(0, FIGURE_HEIGHT_IN)
+    ax.axis("off")
+    fig.patch.set_facecolor(WHITE)
+
+    _draw_headers(ax)
+    for row, step in enumerate(STEPS):
+        _draw_step(ax, step, _row_center(row))
+    _draw_step_links(ax)
+    for source in SOURCES:
+        _draw_source(ax, source)
+    return fig
+
+
+def _row_center(row: int) -> float:
+    return FIRST_ROW_CENTER - row * ROW_PITCH
+
+
+def _draw_headers(ax: Axes) -> None:
+    for x, label in (
+        (INPUT_X, "INPUT"),
+        (STEP_X, "PIPELINE STEPS"),
+        (OUTPUT_X, "OUTPUT FILES"),
+    ):
+        ax.text(
+            x,
+            HEADER_Y,
+            label,
+            ha="left",
+            va="center",
+            color=MUTED,
+            family=SANS,
+            fontsize=8,
+            fontweight="bold",
         )
+
+
+def _draw_step(ax: Axes, step: Step, center_y: float) -> None:
+    _draw_card(
+        ax,
+        STEP_X,
+        center_y,
+        STEP_WIDTH,
+        WHITE if step.is_optional else CARD,
+        OPTIONAL if step.is_optional else BORDER,
     )
+    _draw_badge(ax, step, center_y)
+    text_x = STEP_X + TEXT_OFFSET
     ax.text(
-        0.5,
-        y + height + 0.04,
-        label,
+        text_x,
+        center_y + 0.2,
+        step.title,
         ha="left",
-        va="bottom",
-        color=SLATE,
-        family="DejaVu Sans",
-        fontsize=9.5,
+        va="center",
+        color=INK,
+        family=SANS,
+        fontsize=11.5,
         fontweight="bold",
     )
+    ax.text(
+        text_x,
+        center_y - 0.13,
+        step.description,
+        ha="left",
+        va="center",
+        color=MUTED,
+        family=SANS,
+        fontsize=8.8,
+        linespacing=1.3,
+    )
+    if step.is_optional:
+        ax.text(
+            STEP_X + STEP_WIDTH - 0.16,
+            center_y + 0.2,
+            "OPTIONAL",
+            ha="right",
+            va="center",
+            color=MUTED,
+            family=SANS,
+            fontsize=8,
+            fontweight="bold",
+        )
+    _draw_outputs(ax, step, center_y)
 
 
-def draw_box(ax, box: Box) -> None:
+def _draw_card(
+    ax: Axes,
+    x: float,
+    center_y: float,
+    width: float,
+    facecolor: str,
+    stroke: Stroke,
+) -> None:
     ax.add_patch(
         FancyBboxPatch(
-            (box.x, box.y),
-            box.width,
-            box.height,
-            boxstyle="round,pad=0.02,rounding_size=0.16",
-            linewidth=1.4,
-            edgecolor=box.edge,
-            facecolor=box.fill,
+            (x, center_y - CARD_HEIGHT / 2),
+            width,
+            CARD_HEIGHT,
+            boxstyle="round,pad=0,rounding_size=0.1",
+            linewidth=1.1,
+            edgecolor=stroke.color,
+            facecolor=facecolor,
+            linestyle=stroke.linestyle,
             zorder=2,
         )
     )
+
+
+def _draw_badge(ax: Axes, step: Step, center_y: float) -> None:
+    badge_x = STEP_X + BADGE_OFFSET
+    ax.add_patch(
+        Circle(
+            (badge_x, center_y),
+            0.17,
+            facecolor=WHITE if step.is_optional else BADGE,
+            edgecolor=ACCENT if step.is_optional else BADGE,
+            linewidth=1.2,
+            zorder=3,
+        )
+    )
     ax.text(
-        box.cx,
-        box.y + box.height - 0.20,
-        box.title,
+        badge_x,
+        center_y - 0.005,
+        step.badge,
         ha="center",
-        va="top",
-        color=box.edge,
-        family="DejaVu Sans",
+        va="center",
+        color=ACCENT if step.is_optional else WHITE,
+        family=SANS,
+        fontsize=10,
+        fontweight="bold",
+        zorder=4,
+    )
+
+
+def _draw_outputs(ax: Axes, step: Step, center_y: float) -> None:
+    if not step.outputs:
+        return
+    _draw_arrow(
+        ax,
+        (STEP_X + STEP_WIDTH, center_y),
+        (OUTPUT_X - 0.08, center_y),
+        OPTIONAL if step.is_optional else FLOW,
+    )
+    block_height = 0.4
+    top = center_y + block_height * (len(step.outputs) - 1) / 2
+    for index, output in enumerate(step.outputs):
+        y = top - index * block_height
+        ax.text(
+            OUTPUT_X,
+            y + 0.075,
+            output.filename,
+            ha="left",
+            va="center",
+            color=INK,
+            family=MONO,
+            fontsize=8.6,
+        )
+        ax.text(
+            OUTPUT_X,
+            y - 0.085,
+            output.caption,
+            ha="left",
+            va="center",
+            color=MUTED,
+            family=SANS,
+            fontsize=8.2,
+        )
+
+
+def _draw_step_links(ax: Axes) -> None:
+    badge_x = STEP_X + BADGE_OFFSET
+    for (upper_row, _), (lower_row, lower) in pairwise(enumerate(STEPS)):
+        _draw_arrow(
+            ax,
+            (badge_x, _row_center(upper_row) - CARD_HEIGHT / 2),
+            (badge_x, _row_center(lower_row) + CARD_HEIGHT / 2),
+            OPTIONAL if lower.is_optional else FLOW,
+        )
+
+
+def _draw_source(ax: Axes, source: Source) -> None:
+    center_y = _row_center(source.row)
+    stroke = OPTIONAL if source.is_optional else FLOW
+    _draw_card(ax, INPUT_X, center_y, INPUT_WIDTH, WHITE, stroke)
+    ax.text(
+        INPUT_X + 0.16,
+        center_y + 0.14,
+        source.title,
+        ha="left",
+        va="center",
+        color=INK,
+        family=SANS,
         fontsize=10.5,
         fontweight="bold",
     )
     ax.text(
-        box.cx,
-        box.y + box.height * 0.39,
-        box.body,
-        ha="center",
+        INPUT_X + 0.16,
+        center_y - 0.15,
+        source.detail,
+        ha="left",
         va="center",
-        color=TEXT,
-        family="DejaVu Sans Mono" if box.mono else "DejaVu Sans",
-        fontsize=8.2 if box.mono else 8.7,
+        color=MUTED,
+        family=source.detail_font,
+        fontsize=8.4,
     )
+    _draw_arrow(ax, (INPUT_X + INPUT_WIDTH, center_y), (STEP_X, center_y), stroke)
 
 
-def line(
-    ax,
+def _draw_arrow(
+    ax: Axes,
     start: tuple[float, float],
     end: tuple[float, float],
-    color: str,
-    linestyle: str = "-",
-) -> None:
-    ax.plot(
-        [start[0], end[0]],
-        [start[1], end[1]],
-        color=color,
-        linewidth=1.25,
-        linestyle=linestyle,
-        zorder=3,
-    )
-
-
-def arrow(
-    ax,
-    start: tuple[float, float],
-    end: tuple[float, float],
-    color: str,
-    linestyle: str = "-",
+    stroke: Stroke,
 ) -> None:
     ax.add_patch(
         FancyArrowPatch(
             start,
             end,
             arrowstyle="-|>",
-            mutation_scale=11,
-            linewidth=1.25,
-            color=color,
-            linestyle=linestyle,
-            shrinkA=2,
-            shrinkB=2,
-            zorder=4,
+            mutation_scale=10,
+            linewidth=1.2,
+            color=stroke.color,
+            linestyle=stroke.linestyle,
+            shrinkA=1.5,
+            shrinkB=1.5,
+            zorder=3,
         )
     )
 
 
-def build() -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(11.0, 9.0), dpi=150)
-    ax.set_xlim(0, 14)
-    ax.set_ylim(0, 11.5)
-    ax.set_aspect("equal")
-    ax.axis("off")
-    fig.patch.set_facecolor(WHITE)
-
-    bands = {
-        "input": (9.05, 1.25, "Inputs"),
-        "detect": (6.75, 1.85, "Detection and extraction"),
-        "search": (4.55, 1.75, "Marker-specific search"),
-        "taxonomy": (2.75, 1.35, "Taxonomy selection"),
-        "output": (0.15, 2.15, "Results"),
-    }
-    for y, height, label in bands.values():
-        draw_band(ax, y, height, label)
-
-    inputs = [
-        Box(1.1, 9.20, 3.35, 0.95, "Assembly FASTA", ".fna  ·  .fa  ·  .fasta", INDIGO, INDIGO_SOFT, True),
-        Box(5.30, 9.20, 3.35, 0.95, "Covariance models", "RF00177  ·  RF01960", INDIGO, INDIGO_SOFT, True),
-        Box(9.50, 9.20, 3.35, 0.95, "Database profile", "curated  or  img", INDIGO, INDIGO_SOFT, True),
-    ]
-    detection = [
-        Box(1.05, 6.95, 3.55, 1.45, "Infernal search", "cmsearch per\nassembly and model", TEAL, TEAL_SOFT),
-        Box(
-            5.23,
-            6.95,
-            3.55,
-            1.45,
-            "Model competition",
-            "CL00111 same-strand overlap\nE-value → bit score",
-            TEAL,
-            TEAL_SOFT,
-        ),
-        Box(
-            9.40,
-            6.95,
-            3.55,
-            1.45,
-            "Interval extraction",
-            "local fragments · strand\nhit length · model coverage\nextracted/*.fna",
-            TEAL,
-            TEAL_SOFT,
-        ),
-    ]
-    searches = [
-        Box(2.05, 4.75, 4.15, 1.35, "RF00177", "16S rRNA gene\nBLAST index", TEAL, TEAL_SOFT),
-        Box(7.80, 4.75, 4.15, 1.35, "RF01960", "18S rRNA gene\nBLAST index", TEAL, TEAL_SOFT),
-    ]
-    taxonomy = [
-        Box(
-            1.20,
-            2.92,
-            5.20,
-            1.00,
-            "BLAST taxonomy",
-            "80% coverage · 98% score band · calibrated ranks",
-            ORANGE,
-            ORANGE_SOFT,
-        ),
-        Box(
-            7.10,
-            2.92,
-            5.70,
-            1.00,
-            "Tree neighbors (optional)",
-            "cmalign · trim · IQ-TREE 3 · BLAST rank limit",
-            ORANGE,
-            ORANGE_SOFT,
-        ),
-    ]
-    outputs = [
-        Box(0.80, 0.38, 3.75, 1.65, "Per-hit taxonomy", "cmsearch_summary.tsv", SLATE, SLATE_SOFT, True),
-        Box(5.12, 0.38, 3.75, 1.65, "Reference evidence", "blast_top_hits.tsv\ntree_nearest_neighbors.tsv", SLATE, SLATE_SOFT, True),
-        Box(9.45, 0.38, 3.75, 1.65, "Category counts", "cmsearch_summary.tab", SLATE, SLATE_SOFT, True),
-    ]
-
-    for box in [*inputs, *detection, *searches, *taxonomy, *outputs]:
-        draw_box(ax, box)
-
-    sequence_rail = 8.95
-    for source in inputs[:2]:
-        line(ax, (source.cx, source.y), (source.cx, sequence_rail), TEAL)
-    line(ax, (inputs[0].cx, sequence_rail), (inputs[1].cx, sequence_rail), TEAL)
-    arrow(ax, (detection[0].cx, sequence_rail), (detection[0].cx, detection[0].y + detection[0].height), TEAL)
-
-    arrow(ax, (detection[0].x + detection[0].width, detection[0].cy), (detection[1].x, detection[1].cy), TEAL)
-    arrow(ax, (detection[1].x + detection[1].width, detection[1].cy), (detection[2].x, detection[2].cy), TEAL)
-
-    search_rail = 6.52
-    line(ax, (detection[2].cx, detection[2].y), (detection[2].cx, search_rail), TEAL)
-    sequence_entries = [box.cx - 0.55 for box in searches]
-    line(ax, (sequence_entries[0], search_rail), (detection[2].cx, search_rail), TEAL)
-    for box in searches:
-        entry_x = box.cx - 0.55
-        arrow(ax, (entry_x, search_rail), (entry_x, box.y + box.height), TEAL)
-
-    database_x = 13.25
-    database_rail = 6.28
-    reference_style = "--"
-    line(ax, (inputs[2].cx, inputs[2].y), (database_x, inputs[2].y), ORANGE, reference_style)
-    line(ax, (database_x, inputs[2].y), (database_x, database_rail), ORANGE, reference_style)
-    database_entries = [box.cx + 0.55 for box in searches]
-    line(ax, (database_entries[0], database_rail), (database_x, database_rail), ORANGE, reference_style)
-    for box in searches:
-        entry_x = box.cx + 0.55
-        arrow(
-            ax,
-            (entry_x, database_rail),
-            (entry_x, box.y + box.height),
-            ORANGE,
-            reference_style,
-        )
-
-    taxonomy_rail = 4.32
-    for box in searches:
-        line(ax, (box.cx, box.y), (box.cx, taxonomy_rail), TEAL)
-    line(ax, (searches[0].cx, taxonomy_rail), (searches[1].cx, taxonomy_rail), TEAL)
-    for box in taxonomy:
-        arrow(ax, (box.cx, taxonomy_rail), (box.cx, box.y + box.height), TEAL)
-
-    output_rail = 2.52
-    for box in taxonomy:
-        line(ax, (box.cx, box.y), (box.cx, output_rail), TEAL)
-    line(ax, (outputs[0].cx, output_rail), (outputs[2].cx, output_rail), TEAL)
-    for box in outputs:
-        arrow(ax, (box.cx, output_rail), (box.cx, box.y + box.height), TEAL)
-
-    ax.text(
-        0.4,
-        11.30,
-        "SSUextract: marker-specific small-subunit rRNA extraction",
-        ha="left",
-        va="top",
-        color=TEXT,
-        family="DejaVu Sans",
-        fontsize=12,
-        fontweight="bold",
-    )
-    legend_y = 10.88
-    ax.plot([0.4, 0.85], [legend_y, legend_y], color=TEAL, linewidth=2.4)
-    ax.text(0.95, legend_y, "sequence flow", va="center", color=TEAL, fontsize=9, fontweight="bold")
-    ax.plot(
-        [2.65, 3.10],
-        [legend_y, legend_y],
-        color=ORANGE,
-        linewidth=2.4,
-        linestyle=reference_style,
-    )
-    ax.text(3.20, legend_y, "database profile", va="center", color=ORANGE, fontsize=9, fontweight="bold")
-
-    return fig
-
-
-def main() -> None:
+def main() -> int:
+    """Write the diagram to docs/assets/figures/pipeline-architecture.svg."""
     output = Path(__file__).resolve().parents[1] / "docs" / "assets" / "figures"
     figure = build()
-    metadata = {"Date": None, "Creator": "SSUextract"}
     svg = output / "pipeline-architecture.svg"
-    figure.savefig(svg, bbox_inches="tight", facecolor=WHITE, metadata=metadata)
+    figure.savefig(
+        svg,
+        bbox_inches="tight",
+        pad_inches=0.08,
+        facecolor=WHITE,
+        metadata={"Date": None, "Creator": "SSUextract"},
+    )
     svg_text = svg.read_text(encoding="utf-8")
     svg.write_text(
         "\n".join(line.rstrip() for line in svg_text.splitlines()) + "\n",
@@ -320,7 +399,8 @@ def main() -> None:
     )
     plt.close(figure)
     svg.chmod(0o644)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
