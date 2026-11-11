@@ -1,13 +1,14 @@
 import csv
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import chdir
 from dataclasses import replace
 from pathlib import Path
 
 import duckdb
-
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
@@ -17,11 +18,12 @@ from annotate_hits import (
     annotate_hits,
     load_taxonomy_records,
 )
-from finalize_summaries import (
+from finalize_summaries import (  # noqa: E402  # scripts path is configured above
+    _load_rows,
+    _sort_rows,
+    _summary_sort_key,
+    _top_hit_sort_key,
     apply_tree_assignments,
-    load_metadata,
-    load_summary_rows,
-    load_top_hit_rows,
     merge_m8_files,
     write_category_summary,
     write_detailed_summary,
@@ -37,7 +39,10 @@ from runtime_taxonomy import (
     resolve_runtime_taxonomy,
 )
 from top_hit_reporting import TOP_HIT_FIELDS, load_reference_records
-from tree_schema import TREE_ASSIGNMENT_FIELDS
+from tree_schema import (  # noqa: E402  # scripts path is configured above
+    TREE_ASSIGNMENT_FIELDS,
+    TREE_NEIGHBOR_FIELDS,
+)
 
 
 def write_tsv(path: Path, fields: list[str], rows: list[dict[str, object]]) -> None:
@@ -173,6 +178,31 @@ def taxonomy_record(
 
 
 class RuntimeTaxonomyTests(unittest.TestCase):
+    def test_malformed_candidate_taxonomy_names_the_subject(self) -> None:
+        with self.assertRaisesRegex(ValueError, "subject.*broken"):
+            resolve_runtime_taxonomy(
+                [self.hit("broken")],
+                {"broken": taxonomy_record(";Amoebozoa")},
+                query_length=100,
+                marker="18S",
+                calibration=None,
+                max_targets=500,
+            )
+
+    def test_empty_and_unclassified_candidate_taxonomy_remain_valid(self) -> None:
+        for taxonomy in ("", "Unclassified"):
+            with self.subTest(taxonomy=taxonomy):
+                decision = resolve_runtime_taxonomy(
+                    [self.hit("unknown")],
+                    {"unknown": taxonomy_record(taxonomy, domain="Unclassified")},
+                    query_length=100,
+                    marker="18S",
+                    calibration=None,
+                    max_targets=500,
+                )
+                self.assertEqual(decision.taxonomy, "Unclassified")
+                self.assertEqual(decision.unknown_candidate_count, 1)
+
     @staticmethod
     def hit(
         subject: str,
@@ -573,6 +603,144 @@ class RuntimeTaxonomyTests(unittest.TestCase):
 
 
 class AnnotationTests(unittest.TestCase):
+    def test_no_eligible_subject_keeps_top_ranked_summary_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            hits = root / "sample.hits.tsv"
+            m8 = root / "sample.m8"
+            taxonomy = root / "taxonomy.parquet"
+            output = root / "sample.summary.tsv"
+            write_tsv(
+                hits,
+                HIT_FIELDS,
+                [
+                    {
+                        "name": "query1",
+                        "sample": "sample",
+                        "model": "RF01960",
+                        "length": 100,
+                        "coordinates": "1-100",
+                        "is_assembled": "false",
+                    }
+                ],
+            )
+            m8.write_text(
+                "query1\tshort\t100\t50\t0\t0\t1\t50\t1\t50\t0\t200\t100\t50\n",
+                encoding="utf-8",
+            )
+            write_taxonomy_parquet(
+                taxonomy,
+                [
+                    (
+                        "short",
+                        "PR2",
+                        "Eukaryota;Amoebozoa",
+                        "PR2",
+                        "Eukaryota",
+                        "",
+                        "native",
+                    )
+                ],
+            )
+            run_annotation(hits, m8, taxonomy, output)
+            with output.open(newline="", encoding="utf-8") as handle:
+                summary = next(csv.DictReader(handle, delimiter="\t"))
+            with (root / "generated.top_hits.tsv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                ranked = next(csv.DictReader(handle, delimiter="\t"))
+
+        self.assertEqual(summary["blast_sseqid"], "short")
+        self.assertEqual(summary["blast_pident"], "100")
+        self.assertEqual(summary["blast_length"], "50")
+        self.assertEqual(summary["blast_bitscore"], "200")
+        self.assertEqual(summary["blast_query_coverage"], "0.5")
+        self.assertEqual(summary["reference_identifiers"], "PR2:id-short")
+        self.assertEqual(summary["reference_versions"], "PR2:1")
+        self.assertEqual(summary["reference_taxonomy"], "Eukaryota;Amoebozoa")
+        self.assertEqual(summary["taxonomy"], "Unclassified")
+        self.assertEqual(ranked["blast_sseqid"], "short")
+        self.assertNotIn("equal_best_assignment", ranked["selection_reason"])
+
+    def test_assignment_evidence_uses_best_eligible_hits_and_numeric_format(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            hits = root / "sample.hits.tsv"
+            m8 = root / "sample.m8"
+            taxonomy = root / "taxonomy.parquet"
+            output = root / "sample.summary.tsv"
+            write_tsv(
+                hits,
+                HIT_FIELDS,
+                [
+                    {
+                        "name": "query1",
+                        "sample": "sample",
+                        "model": "RF01960",
+                        "length": 100,
+                        "coordinates": "1-100",
+                        "strand": "+",
+                        "sequence_type": "simple",
+                        "contig_name": "contig1",
+                        "is_assembled": "False",
+                    }
+                ],
+            )
+            m8.write_text(
+                "query1\tshort-high\t100\t50\t0\t0\t1\t50\t1\t50\t0\t200\t100\t50\n"
+                "query1\teligible-a\t99.1234\t100\t1\t0\t1\t100\t1\t100\t0\t100\t100\t100\n"
+                "query1\teligible-b\t99.1234\t100\t1\t0\t1\t100\t1\t100\t0\t100\t100\t100\n"
+                "query1\tshort-tied\t100\t50\t0\t0\t1\t50\t1\t50\t0\t100\t100\t50\n",
+                encoding="utf-8",
+            )
+            write_taxonomy_parquet(
+                taxonomy,
+                [
+                    (
+                        subject,
+                        "PR2",
+                        "Eukaryota;Amoebozoa",
+                        "PR2",
+                        "Eukaryota",
+                        "",
+                        "native",
+                    )
+                    for subject in (
+                        "short-high",
+                        "eligible-a",
+                        "eligible-b",
+                        "short-tied",
+                    )
+                ],
+            )
+            run_annotation(hits, m8, taxonomy, output)
+            with output.open(newline="", encoding="utf-8") as handle:
+                summary = next(csv.DictReader(handle, delimiter="\t"))
+            with (root / "generated.top_hits.tsv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                ranked = {
+                    row["blast_sseqid"]: row
+                    for row in csv.DictReader(handle, delimiter="\t")
+                }
+
+        self.assertNotIn("blast_tied_subjects", summary)
+        self.assertNotIn("blast_ties_truncated", summary)
+        self.assertEqual(summary["blast_sseqid"], "eligible-a")
+        self.assertEqual(summary["blast_pident"], "99.1234")
+        self.assertEqual(summary["blast_pident"], ranked["eligible-a"]["blast_pident"])
+        self.assertEqual(summary["is_assembled"], "false")
+        self.assertIn("equal_best_assignment", ranked["eligible-a"]["selection_reason"])
+        self.assertIn("equal_best_assignment", ranked["eligible-b"]["selection_reason"])
+        self.assertNotIn(
+            "equal_best_assignment", ranked["short-high"]["selection_reason"]
+        )
+        self.assertNotIn(
+            "equal_best_assignment", ranked["short-tied"]["selection_reason"]
+        )
+
     def test_best_bitscore_is_selected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -844,7 +1012,7 @@ class AnnotationTests(unittest.TestCase):
         self.assertEqual(row["taxonomy_source"], "")
         self.assertEqual(row["taxonomy_domain"], "Unclassified")
         self.assertEqual(row["taxonomy_assignment_method"], "no_runtime_calibration")
-        self.assertEqual(row["blast_tied_subjects"], "2")
+        self.assertEqual(row["assignment_candidate_count"], "2")
 
     def test_manifest_database_requires_taxonomy_for_every_subject(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1070,7 +1238,7 @@ class AnnotationTests(unittest.TestCase):
         self.assertEqual(result["blast_candidate_taxonomy"], "Eukaryota;TSAR")
         self.assertEqual(result["compartment"], "")
         self.assertEqual(result["taxonomy_assignment_method"], "candidate_set_truncated")
-        self.assertEqual(result["blast_ties_truncated"], "true")
+        self.assertEqual(result["assignment_candidates_truncated"], "true")
 
     def test_cross_domain_subject_ambiguity_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1156,6 +1324,230 @@ class AnnotationTests(unittest.TestCase):
 
 
 class FinalSummaryTests(unittest.TestCase):
+    def test_sort_scratch_is_in_task_directory_and_removed_on_exit(self) -> None:
+        row = dict.fromkeys(SUMMARY_FIELDS, "")
+        row.update(
+            sample="a", model="RF1", contig_name="c1", coordinates="1-4", strand="+"
+        )
+        for finish in ("exhaust", "close", "error"):
+            with (
+                self.subTest(finish=finish),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                with chdir(root):
+                    rows = _sort_rows([row], _summary_sort_key)
+                    self.assertEqual(next(rows), row)
+                    scratch = list(root.glob("ssuextract-sort-*/rows.sqlite"))
+                    try:
+                        self.assertEqual(
+                            len(scratch), 1, "sort database is outside task directory"
+                        )
+                    finally:
+                        if finish == "exhaust":
+                            self.assertEqual(list(rows), [])
+                        elif finish == "error":
+                            with self.assertRaisesRegex(ValueError, "stop sorting"):
+                                rows.throw(ValueError("stop sorting"))
+                        else:
+                            rows.close()
+                    self.assertEqual(list(root.iterdir()), [])
+
+    def test_summary_output_path_is_literal_for_category_counts(self) -> None:
+        row = dict.fromkeys(SUMMARY_FIELDS, "")
+        row.update(
+            name="q1",
+            sample="sample",
+            model="RF1",
+            contig_name="c1",
+            coordinates="1-4",
+            strand="+",
+            taxonomy="Bacteria",
+            taxonomy_domain="Bacteria",
+        )
+        for name in ("summary[1].tsv", "summary*.tsv", "summary?.tsv"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                write_tsv(root / "input.summary.tsv", SUMMARY_FIELDS, [row])
+                write_tsv(
+                    root / "input.meta.tsv",
+                    META_FIELDS,
+                    [{"sample": "sample", "model": "RF1"}],
+                )
+                write_tsv(
+                    root / "summary2.tsv", SUMMARY_FIELDS, [{**row, "sample": "decoy"}]
+                )
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(REPO / "scripts/finalize_summaries.py"),
+                        "--summary-output",
+                        name,
+                        "--category-output",
+                        "categories.tab",
+                        "--merged-m8-output",
+                        "merged.m8",
+                        "--top-hits-output",
+                        "top.tsv",
+                        "--tree-neighbor-output",
+                        "neighbors.tsv",
+                    ],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(
+                    (root / "categories.tab").read_text(encoding="utf-8"),
+                    "\tBacteriaSSU\nsample\t1\n",
+                )
+
+    def test_final_tables_match_bytes_for_unsorted_multifile_inputs(self) -> None:
+        first = dict.fromkeys(SUMMARY_FIELDS, "")
+        first.update(
+            name="q1",
+            sample="a",
+            model="RF1",
+            contig_name="c1",
+            coordinates="2-10",
+            strand="+",
+            taxonomy="Bacteria",
+            query_sequence="A" * 2000,
+        )
+        second = {
+            **first,
+            "name": "q2",
+            "coordinates": "10-20",
+            "taxonomy": "Unclassified",
+        }
+        equal_key = {**first, "name": "q3", "query_sequence": "C" * 2000}
+        top_first = dict.fromkeys(TOP_HIT_FIELDS, "")
+        top_first.update(
+            name="q1",
+            sample="a",
+            model="RF1",
+            hit_rank="2",
+            blast_sseqid="s2",
+            query_sequence="A" * 2000,
+        )
+        top_second = {**top_first, "hit_rank": "10", "blast_sseqid": "s10"}
+        neighbor_first = dict.fromkeys(TREE_NEIGHBOR_FIELDS, "")
+        neighbor_first.update(
+            name="q1",
+            sample="a",
+            model="RF1",
+            tree_neighbor_rank="2",
+            leaf_id="REF2",
+            used_for_assignment="true",
+        )
+        neighbor_second = {
+            **neighbor_first,
+            "tree_neighbor_rank": "10",
+            "leaf_id": "REF10",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_tsv(root / "a.summary.tsv", SUMMARY_FIELDS, [second, first])
+            write_tsv(root / "z.summary.tsv", SUMMARY_FIELDS, [equal_key])
+            write_tsv(root / "a.top_hits.tsv", TOP_HIT_FIELDS, [top_second])
+            write_tsv(root / "z.top_hits.tsv", TOP_HIT_FIELDS, [top_first])
+            write_tsv(
+                root / "a.tree_neighbors.tsv", TREE_NEIGHBOR_FIELDS, [neighbor_second]
+            )
+            write_tsv(
+                root / "z.tree_neighbors.tsv", TREE_NEIGHBOR_FIELDS, [neighbor_first]
+            )
+            write_tsv(
+                root / "a.meta.tsv",
+                META_FIELDS,
+                [{"sample": "a", "model": "RF1"}, {"sample": "empty", "model": "RF1"}],
+            )
+            (root / "z.m8").write_text("z\n", encoding="utf-8")
+            (root / "a.m8").write_text("a\n", encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO / "scripts/finalize_summaries.py"),
+                    "--summary-output",
+                    "summary.tsv",
+                    "--category-output",
+                    "categories.tab",
+                    "--merged-m8-output",
+                    "merged.m8",
+                    "--top-hits-output",
+                    "top.tsv",
+                    "--tree-neighbor-output",
+                    "neighbors.tsv",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            write_tsv(
+                root / "expected-summary.tsv",
+                SUMMARY_FIELDS,
+                [first, equal_key, second],
+            )
+            write_tsv(
+                root / "expected-top.tsv", TOP_HIT_FIELDS, [top_first, top_second]
+            )
+            write_tsv(
+                root / "expected-neighbors.tsv",
+                TREE_NEIGHBOR_FIELDS,
+                [neighbor_first, neighbor_second],
+            )
+            self.assertEqual(
+                (root / "summary.tsv").read_bytes(),
+                (root / "expected-summary.tsv").read_bytes().replace(b"\r\n", b"\n"),
+            )
+            self.assertEqual(
+                (root / "top.tsv").read_bytes(),
+                (root / "expected-top.tsv").read_bytes().replace(b"\r\n", b"\n"),
+            )
+            self.assertEqual(
+                (root / "neighbors.tsv").read_bytes(),
+                (root / "expected-neighbors.tsv").read_bytes().replace(b"\r\n", b"\n"),
+            )
+            self.assertEqual(
+                (root / "categories.tab").read_bytes(),
+                b"\tBacteriaSSU\tUnclassified\na\t1\t1\nempty\t0\t0\n",
+            )
+            self.assertEqual((root / "merged.m8").read_bytes(), b"a\nz\n")
+
+    def test_finalizer_rejects_unused_glob_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(REPO / "scripts/finalize_summaries.py"),
+                    "--summary-output",
+                    "summary.tsv",
+                    "--category-output",
+                    "categories.tab",
+                    "--merged-m8-output",
+                    "merged.m8",
+                    "--top-hits-output",
+                    "top.tsv",
+                    "--tree-neighbor-output",
+                    "neighbors.tsv",
+                    "--summary-glob=unused",
+                    "--metadata-glob=unused",
+                    "--m8-glob=unused",
+                    "--top-hits-glob=unused",
+                    "--tree-assignment-glob=unused",
+                    "--tree-neighbor-glob=unused",
+                ],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("unrecognized arguments", completed.stderr)
+
     def test_no_hit_sample_is_present_in_category_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1166,8 +1558,12 @@ class FinalSummaryTests(unittest.TestCase):
             write_tsv(metadata, META_FIELDS, [{"sample": "sample", "model": "RFTEST"}])
             write_tsv(summary, SUMMARY_FIELDS, [])
 
-            metadata_rows = load_metadata(str(root / "*.meta.tsv"))
-            summary_rows = load_summary_rows(str(root / "*.summary.tsv"))
+            metadata_rows = _load_rows(
+                str(root / "*.meta.tsv"), META_FIELDS, "metadata"
+            )
+            summary_rows = _load_rows(
+                str(root / "*.summary.tsv"), SUMMARY_FIELDS, "summary"
+            )
             write_detailed_summary(summary_rows, detailed_output)
             write_category_summary(summary_rows, metadata_rows, category_output)
 
@@ -1375,7 +1771,12 @@ class FinalSummaryTests(unittest.TestCase):
             root = Path(tmp)
             write_tsv(root / "z.summary.tsv", SUMMARY_FIELDS, [row_a])
             write_tsv(root / "a.summary.tsv", SUMMARY_FIELDS, [row_b])
-            rows = load_summary_rows(str(root / "*.summary.tsv"))
+            rows = list(
+                _sort_rows(
+                    _load_rows(str(root / "*.summary.tsv"), SUMMARY_FIELDS, "summary"),
+                    _summary_sort_key,
+                )
+            )
 
         self.assertEqual([row["sample"] for row in rows], ["a", "b"])
 
@@ -1393,7 +1794,7 @@ class FinalSummaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             summary = Path(tmp) / "sample.summary.tsv"
             write_tsv(summary, SUMMARY_FIELDS, [row])
-            rows = load_summary_rows(str(summary))
+            rows = list(_load_rows(str(summary), SUMMARY_FIELDS, "summary"))
 
         self.assertEqual(rows[0]["query_sequence"], sequence)
 
@@ -1422,7 +1823,10 @@ class FinalSummaryTests(unittest.TestCase):
             root = Path(tmp)
             write_tsv(root / "z.top_hits.tsv", TOP_HIT_FIELDS, [row_a])
             write_tsv(root / "a.top_hits.tsv", TOP_HIT_FIELDS, [row_b])
-            rows = load_top_hit_rows(str(root / "*.top_hits.tsv"))
+            rows = _sort_rows(
+                _load_rows(str(root / "*.top_hits.tsv"), TOP_HIT_FIELDS, "top-hit"),
+                _top_hit_sort_key,
+            )
             output = root / "blast_top_hits.tsv"
             write_top_hit_summary(rows, output)
             with output.open(newline="") as handle:
@@ -1465,7 +1869,7 @@ class FinalSummaryTests(unittest.TestCase):
             tree_assignment_method="tree_nearest_named_lca",
             tree_basis_neighbors="5",
         )
-        merged = apply_tree_assignments([row], [assignment], "tree")[0]
+        merged = next(apply_tree_assignments([row], [assignment], "tree"))
         self.assertEqual(merged["taxonomy_mode"], "tree")
         self.assertEqual(
             merged["taxonomy"],
@@ -1513,7 +1917,7 @@ class FinalSummaryTests(unittest.TestCase):
             tree_basis_neighbors="0",
         )
 
-        merged = apply_tree_assignments([row], [assignment], "tree")[0]
+        merged = next(apply_tree_assignments([row], [assignment], "tree"))
 
         self.assertEqual(merged["taxonomy_mode"], "blast")
         self.assertEqual(merged["taxonomy"], "Eukaryota;Amoebozoa")
@@ -1568,7 +1972,7 @@ class FinalSummaryTests(unittest.TestCase):
             tree_basis_neighbors="0",
         )
 
-        merged = apply_tree_assignments([row], [assignment], "tree")[0]
+        merged = next(apply_tree_assignments([row], [assignment], "tree"))
 
         self.assertEqual(merged["taxonomy_mode"], "blast")
         self.assertEqual(merged["taxonomy"], "Unclassified")
@@ -1630,7 +2034,7 @@ class FinalSummaryTests(unittest.TestCase):
             tree_basis_neighbors="0",
         )
 
-        merged = apply_tree_assignments([row], [assignment], "tree")[0]
+        merged = next(apply_tree_assignments([row], [assignment], "tree"))
 
         self.assertEqual(merged["taxonomy_mode"], "blast")
         self.assertEqual(merged["taxonomy"], "")

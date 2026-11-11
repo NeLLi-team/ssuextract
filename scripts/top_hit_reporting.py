@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 import duckdb
 from Bio import SeqIO
 
+from runtime_taxonomy import MINIMUM_QUERY_COVERAGE, query_coverage
+
 if TYPE_CHECKING:
     from runtime_taxonomy import BlastHit, TaxonomyRecord
 
@@ -151,12 +153,14 @@ def select_reported_hits(
         reasons.setdefault(hit.subject, set()).add("overall_top_n")
     for subject in assignment_candidates:
         reasons.setdefault(subject, set()).add("assignment_candidate")
-    if hits:
-        best_score = hits[0].bit_score
-        for hit in hits:
-            if hit.bit_score != best_score:
-                break
-            reasons.setdefault(hit.subject, set()).add("equal_best_assignment")
+    eligible_hits = [
+        hit for hit in hits if query_coverage(hit) >= MINIMUM_QUERY_COVERAGE
+    ]
+    if eligible_hits:
+        best_score = eligible_hits[0].bit_score
+        for hit in eligible_hits:
+            if hit.bit_score == best_score:
+                reasons.setdefault(hit.subject, set()).add("equal_best_assignment")
     for source in ("IMG", "PR2", "SILVA"):
         best = next(
             (hit for hit in hits if source in references[hit.subject].sources),

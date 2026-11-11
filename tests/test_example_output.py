@@ -36,9 +36,6 @@ class ExampleOutputTests(unittest.TestCase):
             if row["profile"] == profile
             and row["database_version"] == DATABASE_VERSION
         ]
-        for row in rows:
-            for field in validator.CENTROID_FIELDS:
-                row.setdefault(field, "")
         return rows
 
     def write_summary(self, path: Path, rows: list[dict[str, str]]) -> None:
@@ -81,26 +78,6 @@ class ExampleOutputTests(unittest.TestCase):
                         validator.validate_example(
                             summary,
                             EXPECTATIONS,
-                            profile,
-                            DATABASE_VERSION,
-                        ),
-                        {"RF00177": 9, "RF01960": 1},
-                    )
-
-    def test_validator_accepts_centroid_contracts(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            for profile in ("curated", "img"):
-                with self.subTest(profile=profile):
-                    rows = self.expected_rows(profile)
-                    expectations = root / f"{profile}-expectations.tsv"
-                    summary = root / f"{profile}-summary.tsv"
-                    self.write_expectations(expectations, rows)
-                    self.write_summary(summary, rows)
-                    self.assertEqual(
-                        validator.validate_example(
-                            summary,
-                            expectations,
                             profile,
                             DATABASE_VERSION,
                         ),
@@ -265,7 +242,7 @@ class ExampleOutputTests(unittest.TestCase):
 
     def test_tutorial_cut_fields_match_the_summary_schema(self) -> None:
         summary_fields = SUMMARY_FIELDS
-        one_based_columns = (2, 3, 5, 14, 15, 23, 24, 25, 26)
+        one_based_columns = (2, 3, 5, 14, 15, 21, 22, 23, 24)
         self.assertEqual(
             [summary_fields[index - 1] for index in one_based_columns],
             [
@@ -281,15 +258,15 @@ class ExampleOutputTests(unittest.TestCase):
             ],
         )
         self.assertIn(
-            "cut -f2,3,5,14,15,23-26 results/smoke/cmsearch_summary.tsv",
+            "cut -f2,3,5,14,15,21-24 results/smoke/cmsearch_summary.tsv",
             TUTORIAL.read_text(),
         )
         self.assertEqual(
-            summary_fields[25:28],
+            summary_fields[23:26],
             ["reference_identifiers", "reference_versions", "query_sequence"],
         )
         self.assertEqual(
-            summary_fields[28 : 28 + len(SUMMARY_TREE_FIELDS)], SUMMARY_TREE_FIELDS
+            summary_fields[26 : 26 + len(SUMMARY_TREE_FIELDS)], SUMMARY_TREE_FIELDS
         )
 
     def test_ranked_hit_documentation_matches_the_output_schema(self) -> None:

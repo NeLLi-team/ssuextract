@@ -59,7 +59,6 @@ class RankRule:
 
 @dataclass(frozen=True)
 class RuntimeCalibration:
-    reference_search_contract_sha256: str
     max_targets: int
     rank_caps: dict[str, int]
     rank_rules: dict[str, tuple[RankRule, ...]]
@@ -200,13 +199,15 @@ def _canonical_source_set(records: Sequence[TaxonomyRecord]) -> str:
     return "+".join(sorted(sources))
 
 
-def _record_lineage(record: TaxonomyRecord) -> tuple[str, ...]:
+def _record_lineage(record: TaxonomyRecord, subject: str) -> tuple[str, ...]:
     value = record.taxonomy
     if value and value != "Unclassified":
         try:
             return taxonomy_path(value)
-        except ValueError:
-            return ()
+        except ValueError as error:
+            raise ValueError(
+                f"Malformed taxonomy for subject {subject!r}: {value!r}"
+            ) from error
     if record.domain and record.domain not in {"ambiguous", "Unclassified"}:
         return (record.domain,)
     return ()
@@ -384,7 +385,6 @@ def load_runtime_calibration(
         rank_rules[key] = tuple(parsed)
 
     return RuntimeCalibration(
-        reference_search_contract_sha256=reference_digest,
         max_targets=calibrated_max_targets,
         rank_caps=rank_caps,
         rank_rules=rank_rules,
@@ -508,16 +508,20 @@ def resolve_runtime_taxonomy(
     ]
     alternatives = merged_taxonomy_alternatives(candidate_records)
     known = [
-        (hit, taxonomy_records[hit.subject], _record_lineage(taxonomy_records[hit.subject]))
+        (
+            hit,
+            taxonomy_records[hit.subject],
+            _record_lineage(taxonomy_records[hit.subject], hit.subject),
+        )
         for hit in candidate_hits
         if hit.subject in taxonomy_records
-        and _record_lineage(taxonomy_records[hit.subject])
+        and _record_lineage(taxonomy_records[hit.subject], hit.subject)
     ]
     known_lineages = [lineage for _hit, _record, lineage in known]
     unknown_candidate_count = sum(
         hit.subject not in taxonomy_records
         or (
-            not _record_lineage(taxonomy_records[hit.subject])
+            not _record_lineage(taxonomy_records[hit.subject], hit.subject)
             and not taxonomy_records[hit.subject].cross_domain_conflict
             and taxonomy_records[hit.subject].domain != "ambiguous"
         )

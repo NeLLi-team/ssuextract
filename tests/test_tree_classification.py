@@ -252,6 +252,58 @@ class TreeRoutingTests(unittest.TestCase):
 
 
 class TreePhylogenyTests(unittest.TestCase):
+    def test_malformed_taxonomy_names_the_reference_subject_or_route_query(
+        self,
+    ) -> None:
+        for malformed_reference in (True, False):
+            with (
+                self.subTest(malformed_reference=malformed_reference),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                references = root / "references.tsv"
+                with references.open("w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(
+                        handle, fieldnames=REFERENCE_FIELDS, delimiter="\t"
+                    )
+                    writer.writeheader()
+                    writer.writerow(
+                        reference_row(
+                            "REF0001",
+                            "broken-subject",
+                            1,
+                            taxonomy=";Amoebozoa"
+                            if malformed_reference
+                            else "Eukaryota;Amoebozoa",
+                        )
+                    )
+                task = root / "task.json"
+                task.write_text(
+                    json.dumps(
+                        task_payload(
+                            "Eukaryota;Amoebozoa"
+                            if malformed_reference
+                            else ";Amoebozoa"
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+                tree = root / "tree.nwk"
+                tree.write_text("(QUERY:0.1,REF0001:0.1);\n", encoding="utf-8")
+                context = (
+                    "taxonomy for subject.*broken-subject"
+                    if malformed_reference
+                    else "route taxonomy for query.*query1"
+                )
+                with self.assertRaisesRegex(ValueError, context):
+                    classify_tree(
+                        tree_file=tree,
+                        references_file=references,
+                        task_file=task,
+                        assignment_output=root / "assignment.tsv",
+                        neighbors_output=root / "neighbors.tsv",
+                    )
+
     def test_mild_gap_trimming_retains_shared_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

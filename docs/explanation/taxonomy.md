@@ -85,6 +85,10 @@ define a general species boundary based on whole genomes.
 `blast_top_hits.tsv` retains assignment candidates as individual evidence rows.
 A shorter match outside the coverage rule can retain a deep native reference
 lineage in that table, but it cannot supply the selected query taxonomy.
+`equal_best_assignment` identifies subjects that pass the coverage rule and tie
+with the best eligible bit score. A malformed nonempty lineage stops taxonomy
+assignment with an error that names the subject. Empty and `Unclassified`
+lineages remain valid unknown evidence.
 
 The top-hit table retains the best subject from each available reference source
 among the fetched candidates, including subjects outside the requested overall

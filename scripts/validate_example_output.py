@@ -29,7 +29,6 @@ CENTROID_FIELDS = (
     "centroid_taxonomy_source",
 )
 EXPECTED_MODEL_COUNTS = Counter({"RF00177": 9, "RF01960": 1})
-CENTROID_CONTRACT_VERSION = (1, 0, 2)
 
 
 def read_tsv(path: Path) -> list[dict[str, str]]:
@@ -64,22 +63,12 @@ def keyed_rows(
     return keyed
 
 
-def semantic_version(value: str) -> tuple[int, int, int]:
-    fields = value.split(".")
-    if len(fields) != 3 or any(not field.isdigit() for field in fields):
-        raise ValueError(f"database version must use semantic x.y.z form: {value!r}")
-    return tuple(int(field) for field in fields)
-
-
 def validate_centroid_contract(
     rows: list[dict[str, str]],
     profile: str,
     database_version: str,
     source: Path,
 ) -> None:
-    if semantic_version(database_version) < CENTROID_CONTRACT_VERSION:
-        return
-
     # These checks describe the database references, not the query calls.
     rows = [
         {
@@ -177,10 +166,6 @@ def validate_example(
             f"{supported}. Update SSUextract before running this example with "
             "a different database release"
         )
-    for row in expected_rows:
-        for field in CENTROID_FIELDS:
-            row.setdefault(field, "")
-
     expected = keyed_rows(
         expected_rows,
         (*KEY_FIELDS, *ANNOTATION_FIELDS),

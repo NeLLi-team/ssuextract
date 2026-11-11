@@ -33,7 +33,7 @@ META_FIELDS = ["sample", "model"]
 
 ACCEPTED_HIT_FIELDS = [
     "subject",
-    "model",
+    "model_name",
     "model_accession",
     "model_from",
     "model_to",
@@ -67,7 +67,6 @@ class CmHit:
     strand: str
     bit_score: float
     e_value: float
-    included: bool
 
     @property
     def model_start(self) -> int:
@@ -228,7 +227,6 @@ def _build_cm_hit(
     strand: str,
     bit_score: str,
     e_value: str,
-    included: bool,
     location: str,
     label: str,
 ) -> CmHit:
@@ -268,7 +266,6 @@ def _build_cm_hit(
         strand=strand,
         bit_score=parsed_bit_score,
         e_value=parsed_e_value,
-        included=included,
     )
 
 
@@ -287,6 +284,9 @@ def parse_cmsearch_tblout(tblout: str | Path) -> list[CmHit]:
                     f"expected at least 17 fields, found {len(fields)}"
                 )
 
+            if fields[16] != "!":
+                continue
+
             hits.append(
                 _build_cm_hit(
                     subject=fields[0],
@@ -299,7 +299,6 @@ def parse_cmsearch_tblout(tblout: str | Path) -> list[CmHit]:
                     strand=fields[9],
                     bit_score=fields[14],
                     e_value=fields[15],
-                    included=fields[16] == "!",
                     location=f"{tblout}:{line_number}",
                     label="cmsearch hit",
                 )
@@ -339,14 +338,14 @@ def _hit_output_order(hit: CmHit) -> tuple[object, ...]:
 def resolve_competing_model_hits(hits: Iterable[CmHit]) -> list[CmHit]:
     """Retain the best same-clan model explanation for each overlapping locus."""
 
-    included = [hit for hit in hits if hit.included]
-    if len(set(included)) != len(included):
+    hits = list(hits)
+    if len(set(hits)) != len(hits):
         raise ValueError("Duplicate included cmsearch hit")
 
     # Hits overlap only on one subject and strand, so compare within that group.
     accepted_by_locus: dict[tuple[str, str], list[CmHit]] = {}
     for candidate in sorted(
-        included,
+        hits,
         key=lambda hit: (hit.e_value, -hit.bit_score, *_hit_output_order(hit)),
     ):
         accepted = accepted_by_locus.setdefault(
@@ -413,7 +412,7 @@ def write_accepted_hits(hits: Iterable[CmHit], output: str | Path) -> None:
             writer.writerow(
                 {
                     "subject": hit.subject,
-                    "model": hit.model,
+                    "model_name": hit.model,
                     "model_accession": hit.model_accession,
                     "model_from": hit.model_from,
                     "model_to": hit.model_to,
@@ -439,7 +438,7 @@ def read_accepted_hits(path: str | Path) -> list[CmHit]:
             hits.append(
                 _build_cm_hit(
                     subject=row["subject"],
-                    model=row["model"],
+                    model=row["model_name"],
                     model_accession=row["model_accession"],
                     model_from=row["model_from"],
                     model_to=row["model_to"],
@@ -448,7 +447,6 @@ def read_accepted_hits(path: str | Path) -> list[CmHit]:
                     strand=row["strand"],
                     bit_score=row["bit_score"],
                     e_value=row["e_value"],
-                    included=True,
                     location=location,
                     label="Accepted hit",
                 )
@@ -509,10 +507,10 @@ def _is_full_model_hit(hit: CmHit, model_length: int) -> bool:
     return hit.model_start == 1 and hit.model_end == model_length
 
 
-def _sequence_order(hit: CmHit) -> tuple[int, int]:
+def _sequence_order(hit: CmHit) -> tuple[int, int, int, int]:
     if hit.strand == "+":
-        return (hit.sequence_start, hit.sequence_end)
-    return (-hit.sequence_end, -hit.sequence_start)
+        return (hit.sequence_start, hit.sequence_end, hit.model_start, hit.model_end)
+    return (-hit.sequence_end, -hit.sequence_start, hit.model_start, hit.model_end)
 
 
 def _fragments_can_merge(left: CmHit, right: CmHit) -> bool:
@@ -549,13 +547,12 @@ def resolve_extraction_regions(
 
     by_subject: dict[str, list[CmHit]] = defaultdict(list)
     for hit in hits:
-        if hit.included:
-            if hit.model_start < 1 or hit.model_end > model_length:
-                raise ValueError(
-                    f"Model interval for {hit.subject} is outside 1-{model_length}: "
-                    f"{hit.model_start}-{hit.model_end}"
-                )
-            by_subject[hit.subject].append(hit)
+        if hit.model_start < 1 or hit.model_end > model_length:
+            raise ValueError(
+                f"Model interval for {hit.subject} is outside 1-{model_length}: "
+                f"{hit.model_start}-{hit.model_end}"
+            )
+        by_subject[hit.subject].append(hit)
 
     regions: list[ExtractionRegion] = []
     for subject, subject_hits in by_subject.items():
@@ -649,6 +646,12 @@ def write_extraction_outputs(
     metadata_output: str | Path,
 ) -> None:
     record_list = list(records)
+    names: set[str] = set()
+    for record in record_list:
+        output_name = f"{sample}|{model}|{record.name}"
+        if output_name in names:
+            raise ValueError(f"Duplicate extracted FASTA identifier: {output_name}")
+        names.add(output_name)
     with Path(fasta_output).open("w") as fasta_handle:
         for record in record_list:
             output_name = f"{sample}|{model}|{record.name}"
@@ -675,13 +678,12 @@ def write_extraction_outputs(
                     "strand": region.strand,
                     "sequence_type": region.sequence_type,
                     "contig_name": region.subject,
-                    "is_assembled": str(region.is_assembled),
+                    "is_assembled": str(region.is_assembled).lower(),
                     "hit_length": region.hit_length,
                     "model_coverage": format(region.model_coverage, ".6g"),
                     "fragment_count": region.fragment_count,
                     "component_coordinates": ",".join(
-                        f"{start}-{end}"
-                        for start, end in region.component_coordinates
+                        f"{start}-{end}" for start, end in region.component_coordinates
                     ),
                 }
             )

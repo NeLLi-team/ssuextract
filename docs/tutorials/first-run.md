@@ -83,7 +83,7 @@ the sample, marker model, coordinates, reference source, final taxonomy,
 centroid evidence, and public reference identifier:
 
 ```bash
-cut -f2,3,5,14,15,23-26 results/smoke/cmsearch_summary.tsv
+cut -f2,3,5,14,15,21-24 results/smoke/cmsearch_summary.tsv
 ```
 
 View the ranked reference evidence:

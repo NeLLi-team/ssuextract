@@ -33,7 +33,6 @@ def hit(
     sequence_from: int,
     sequence_to: int,
     strand: str = "+",
-    included: bool = True,
     model_accession: str = "RF00177",
     model_name: str | None = None,
     bit_score: float = 100.0,
@@ -55,7 +54,6 @@ def hit(
         strand=strand,
         bit_score=bit_score,
         e_value=e_value,
-        included=included,
     )
 
 
@@ -74,7 +72,6 @@ class CmsearchParsingTests(unittest.TestCase):
         self.assertEqual(parsed[0].model_accession, "RFTEST")
         self.assertEqual(parsed[0].bit_score, 42.0)
         self.assertEqual(parsed[0].e_value, 1e-9)
-        self.assertTrue(parsed[0].included)
 
     def test_known_bundled_model_without_accession_fails_loudly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,19 +127,14 @@ class CmsearchParsingTests(unittest.TestCase):
                 read_covariance_model(model)
 
     def test_reported_but_not_included_hits_are_ignored(self) -> None:
-        regions = resolve_extraction_regions(
-            [
-                hit(
-                    model_from=1,
-                    model_to=10,
-                    sequence_from=1,
-                    sequence_to=10,
-                    included=False,
-                )
-            ],
-            model_length=10,
-        )
-        self.assertEqual(regions, [])
+        with tempfile.TemporaryDirectory() as temporary:
+            tblout = Path(temporary) / "hits.out"
+            tblout.write_text(
+                "contig1 - model RFTEST cm 1 10 1 10 + no 1 0.50 0.0 "
+                "42.0 1e-9 ? description\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(parse_cmsearch_tblout(tblout), [])
 
 
 class CompetingModelTests(unittest.TestCase):
@@ -159,6 +151,10 @@ class CompetingModelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "accepted.tsv"
             write_accepted_hits([accepted], path)
+            self.assertEqual(
+                path.read_text(encoding="utf-8").splitlines()[0].split("\t")[1],
+                "model_name",
+            )
             observed = read_accepted_hits(path)
         self.assertEqual(observed, [accepted])
 
@@ -357,6 +353,14 @@ class CompetingModelTests(unittest.TestCase):
 
 
 class RegionResolutionTests(unittest.TestCase):
+    def test_equal_sequence_intervals_have_deterministic_region_order(self) -> None:
+        left = hit(model_from=1, model_to=3, sequence_from=1, sequence_to=3)
+        right = hit(model_from=2, model_to=6, sequence_from=1, sequence_to=3)
+        self.assertEqual(
+            resolve_extraction_regions([left, right], model_length=10),
+            resolve_extraction_regions([right, left], model_length=10),
+        )
+
     def test_collinear_fragments_become_one_assembled_region(self) -> None:
         regions = resolve_extraction_regions(
             [
@@ -570,6 +574,33 @@ class RegionResolutionTests(unittest.TestCase):
 
 
 class SequenceExtractionTests(unittest.TestCase):
+    def test_duplicate_extraction_names_fail_before_writing(self) -> None:
+        regions = resolve_extraction_regions(
+            [
+                hit(model_from=1, model_to=3, sequence_from=1, sequence_to=3),
+                hit(model_from=2, model_to=6, sequence_from=1, sequence_to=3),
+            ],
+            model_length=10,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fasta = root / "input.fna"
+            fasta.write_text(">contig1\nAACCGGTTAA\n", encoding="utf-8")
+            records = extract_regions(fasta, regions, minimum_length=0)
+            output = root / "output.fna"
+            with self.assertRaisesRegex(
+                ValueError, r"Duplicate extracted.*sample\|RF00177\|contig1\|1-3"
+            ):
+                write_extraction_outputs(
+                    records,
+                    "sample",
+                    "RF00177",
+                    output,
+                    root / "hits.tsv",
+                    root / "meta.tsv",
+                )
+            self.assertFalse(output.exists())
+
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.fasta = Path(self.tempdir.name) / "input.fna"
@@ -701,6 +732,7 @@ class SequenceExtractionTests(unittest.TestCase):
             self.assertEqual(row["component_coordinates"], "1-6,9-11")
             self.assertEqual(row["coordinates"], "1-11")
             self.assertEqual(row["contig_name"], "contig1")
+            self.assertEqual(row["is_assembled"], "true")
 
         self.assertEqual(fasta_outputs, hit_names)
         self.assertEqual(len(set(hit_names)), 2)

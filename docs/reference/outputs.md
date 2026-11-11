@@ -14,13 +14,13 @@
 | `m8/*.top_hits.tsv` | Per-model input rows for `blast_top_hits.tsv`. |
 | `m8/merged.m8` | Deterministically merged BLAST output. |
 | `run_provenance.json` | Database, manifest, calibration, and runtime-code content IDs, application version, and assignment policy. |
-| `pipeline_info/` | Nextflow timeline, report, trace, and DAG. |
+| `pipeline_info/` | Nextflow timeline, report, and trace. |
 
 ## Detailed taxonomy fields
 
 | Column | Contents |
 | --- | --- |
-| `blast_sseqid` | Stable identifier of the top subject from the original detection-marker BLAST search. |
+| `blast_sseqid` | Stable identifier of the best subject that passes the coverage rule, or the top-ranked subject when none passes, in the original detection-marker BLAST search. Empty when the query has no BLAST hit. |
 | `reference_identifiers` | Public source identifier for the selected sequence, prefixed by `IMG:`, `PR2:`, or `SILVA:`. Multiple exact-sequence records are separated by `|`. |
 | `reference_versions` | Deduplicated reference releases for the selected sequence, prefixed by source. |
 | `centroid_names` | Cluster centroid names associated with that sequence, separated by `|` when exact-sequence deduplication links more than one centroid. Empty for native SILVA and PR2 records. |
@@ -34,6 +34,7 @@
 | `blast_query_coverage` | Fraction of the query covered by the selected BLAST interval, from 0 to 1. |
 | `assignment_candidate_count`, `assignment_unknown_count` | Number of subjects in the assignment set and number without a known lineage. |
 | `assignment_candidates_truncated` | Whether the fetched results can omit subjects inside the assignment score window. |
+| `blast_pident` | BLAST percent identity without trailing zeros (`99.5`, `100`), in the same form as in `blast_top_hits.tsv`. |
 | `query_sequence` | Extracted 16S rRNA gene or 18S rRNA gene sequence. |
 | `taxonomy_mode` | `blast` or `tree`, identifying which method supplied `taxonomy`. |
 | `blast_taxonomy`, `blast_taxonomy_source`, `blast_taxonomy_domain`, `blast_compartment`, `blast_taxonomy_assignment_method`, `blast_taxonomy_alternatives` | BLAST assignment from the original detection marker, retained independently of tree mode. |
@@ -70,6 +71,9 @@ fetched BLAST candidates when that source occurs below the requested cutoff.
 reason that applies to a row, joined by `|`: `overall_top_n`,
 `assignment_candidate`, `equal_best_assignment`, `best_IMG`, `best_PR2`, and
 `best_SILVA`.
+
+`equal_best_assignment` marks eligible subjects tied in bit score with the best
+subject that passes the query-coverage rule.
 
 Each row joins the stable `blast_sseqid` to its public source identifier,
 reference version, preferred taxonomy, centroid evidence, BLAST statistics, and
@@ -139,11 +143,13 @@ complement of the enclosing interval.
 | `model_coverage` | Union length of the component model-coordinate intervals divided by model length (`CLEN`), from 0 to 1. |
 | `fragment_count` | Number of CM hits in the extraction. |
 | `component_coordinates` | Comma-separated, inclusive component intervals in gene order. |
-| `is_assembled` | `True` when two or more partial hits form one extraction. |
+| `is_assembled` | `true` when two or more partial hits form one extraction; otherwise `false`. |
 
 These fields describe SSU detection. Model coverage includes positions between
 hit endpoints; it does not count individually aligned model states. These fields
 do not estimate genome completeness or contamination.
+
+Boolean values in output tables use `true` and `false`.
 
 ## Query identifiers and BLAST columns
 
@@ -151,6 +157,8 @@ Emitted query IDs use
 `sample|model|contig|start-end|strand_<strand>|<sequence_type>`. FASTA, hit tables,
 summaries, and merged BLAST rows use the same ID. Sample and model identifiers
 distinguish identical contig names in separate inputs.
+Two regions that produce the same query ID cause an error before extraction
+outputs are written.
 
 Runtime M8 output has 14 tab-separated columns: the 12 standard BLAST columns,
 then `qlen` and `slen`. Scripts that require exactly 12 columns must account for

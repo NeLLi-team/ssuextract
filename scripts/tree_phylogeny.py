@@ -132,8 +132,10 @@ def _lineage(row: dict[str, str]) -> tuple[tuple[str, ...], str, str]:
     if value and value != "Unclassified":
         try:
             return taxonomy_path(value), row["taxonomy_source"], "preferred_taxonomy"
-        except ValueError:
-            pass
+        except ValueError as error:
+            raise ValueError(
+                f"Malformed taxonomy for subject {row['blast_sseqid']!r}: {value!r}"
+            ) from error
     domain = row["taxonomy_domain"]
     if domain and domain not in {"ambiguous", "Unclassified"}:
         return (domain,), row["taxonomy_source"], "domain"
@@ -145,8 +147,10 @@ def _task_lineage(task: dict[str, object]) -> tuple[str, ...]:
     if taxonomy and taxonomy != "Unclassified":
         try:
             return taxonomy_path(taxonomy)
-        except ValueError:
-            return ()
+        except ValueError as error:
+            raise ValueError(
+                f"Malformed route taxonomy for query {task['name']!r}: {taxonomy!r}"
+            ) from error
     domain = str(task["tree_route_blast_taxonomy_domain"])
     if domain and domain not in {"ambiguous", "Unclassified"}:
         return (domain,)

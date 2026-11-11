@@ -49,8 +49,6 @@ SUMMARY_FIELDS = [
     "compartment",
     "taxonomy_assignment_method",
     "taxonomy_alternatives",
-    "blast_tied_subjects",
-    "blast_ties_truncated",
     "centroid_names",
     "centroid_taxonomy",
     "centroid_taxonomy_source",
@@ -248,13 +246,9 @@ def annotate_hits(
         )
         writer.writeheader()
         for row in hit_rows:
-            query_hits = blast_hits.get(row["name"], [])
             decision = decisions[row["name"]]
-            blast_hit = (
-                decision.candidate_hits[0]
-                if decision.candidate_hits
-                else (query_hits[0] if query_hits else None)
-            )
+            evidence_hits = decision.eligible_hits or blast_hits.get(row["name"], ())
+            blast_hit = evidence_hits[0] if evidence_hits else None
             selected_taxonomy = (
                 taxonomy_records[blast_hit.subject] if blast_hit else None
             )
@@ -263,11 +257,6 @@ def annotate_hits(
                 if blast_hit
                 else ReferenceRecord("", "", ())
             )
-            equal_best = [
-                hit
-                for hit in query_hits
-                if query_hits and hit.bit_score == query_hits[0].bit_score
-            ]
             writer.writerow(
                 {
                     "name": row["name"],
@@ -301,13 +290,13 @@ def annotate_hits(
                     "blast_taxonomy_assignment_method": decision.assignment_method,
                     "blast_taxonomy_alternatives": decision.taxonomy_alternatives,
                     "blast_pident": (
-                        str(round(blast_hit.percent_identity, 2)) if blast_hit else ""
+                        format(blast_hit.percent_identity, "g") if blast_hit else ""
                     ),
                     "blast_length": blast_hit.alignment_length if blast_hit else "",
                     "blast_bitscore": (
                         format(blast_hit.bit_score, "g") if blast_hit else ""
                     ),
-                    "is_assembled": row["is_assembled"],
+                    "is_assembled": row["is_assembled"].lower(),
                     "reference_source": (
                         selected_taxonomy.reference_source if selected_taxonomy else ""
                     ),
@@ -317,10 +306,6 @@ def annotate_hits(
                     "compartment": decision.compartment,
                     "taxonomy_assignment_method": decision.assignment_method,
                     "taxonomy_alternatives": decision.taxonomy_alternatives,
-                    "blast_tied_subjects": len(equal_best) if equal_best else "",
-                    "blast_ties_truncated": (
-                        str(len(equal_best) > max_targets).lower() if equal_best else ""
-                    ),
                     "hit_length": row["hit_length"],
                     "model_coverage": row["model_coverage"],
                     "fragment_count": row["fragment_count"],
