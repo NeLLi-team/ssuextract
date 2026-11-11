@@ -33,15 +33,26 @@ workflow {
         ? loadTreeModelIds(model_markers) \
         : [:]
 
-    def query_input = file(params.query, checkIfExists: true)
+    def query_input = file(params.query, glob: false, checkIfExists: true)
     def query_files = query_input.isDirectory() \
         ? channel.fromPath("${query_input}/*.{fna,fa,fasta}", checkIfExists: true) \
         : channel.of(validateQueryFasta(query_input))
     def fna_files = query_files
-        .map { fasta ->
-            def sample_id = fasta.baseName
-            validateIdentifier(sample_id, 'sample')
-            tuple(sample_id, fasta)
+        .toList()
+        .flatMap { files ->
+            def duplicates = files.groupBy { fasta -> fasta.baseName }
+                .findAll { _sample_id, paths -> paths.size() > 1 }
+            if (duplicates) {
+                def conflicts = duplicates.collect { sample_id, paths ->
+                    "'${sample_id}': ${paths.collect { path -> path.toString() }.sort().join(', ')}"
+                }.sort().join('; ')
+                throw new IllegalArgumentException("Duplicate sample identifiers: ${conflicts}")
+            }
+            files.collect { fasta ->
+                def sample_id = fasta.baseName
+                validateIdentifier(sample_id, 'sample')
+                tuple(sample_id, fasta)
+            }
         }
 
     def cm_models = channel
@@ -80,7 +91,13 @@ workflow {
     def tree_assignment_files
     def tree_neighbor_files
     if (tree_classification) {
-        PREPARE_TREE_TASKS(EXTRACT_HITS.out, database_config, runtime_code_digest, tree_model_ids)
+        def annotated_extractions = EXTRACT_HITS.out.combine(
+            BLAST_ANNOTATE.out.map { sample_id, model_id, m8, _summary, _top_hits, _metadata ->
+                tuple(sample_id, model_id, m8)
+            },
+            by: [0, 1]
+        )
+        PREPARE_TREE_TASKS(annotated_extractions, database_config, runtime_code_digest, tree_model_ids)
         def tree_task_inputs = PREPARE_TREE_TASKS.out.tasks.flatMap { sample_id, model_id, task_directories ->
             def directories = task_directories instanceof Collection \
                 ? task_directories \
@@ -96,7 +113,7 @@ workflow {
                     model_id,
                     task_config.query_key.toString(),
                     task_directory,
-                    file(resolveProjectPath("${params.modeldir}/${model}.cm"), checkIfExists: true),
+                    file("${params.modeldir}/${model}.cm", glob: false, checkIfExists: true),
                     databasePrefixForMarker(database_config, marker)
                 )
             }
@@ -104,29 +121,29 @@ workflow {
         TREE_CLASSIFY(tree_task_inputs, database_config, runtime_code_digest)
         tree_assignment_files = TREE_CLASSIFY.out
             .map { sample_id, model_id, query_key, tree_directory ->
-                file("${tree_directory}/${query_key}.tree_assignment.tsv")
+                file("${tree_directory}/${query_key}.tree_assignment.tsv", glob: false)
             }
             .mix(PREPARE_TREE_TASKS.out.skipped)
             .collect()
             .map { files ->
-                files ?: [file("${projectDir}/config/empty.tree_assignment.tsv")]
+                files ?: [file("${projectDir}/config/empty.tree_assignment.tsv", glob: false)]
             }
-            .ifEmpty([file("${projectDir}/config/empty.tree_assignment.tsv")])
+            .ifEmpty([file("${projectDir}/config/empty.tree_assignment.tsv", glob: false)])
         tree_neighbor_files = TREE_CLASSIFY.out
             .map { sample_id, model_id, query_key, tree_directory ->
-                file("${tree_directory}/${query_key}.tree_neighbors.tsv")
+                file("${tree_directory}/${query_key}.tree_neighbors.tsv", glob: false)
             }
             .collect()
             .map { files ->
-                files ?: [file("${projectDir}/config/empty.tree_neighbors.tsv")]
+                files ?: [file("${projectDir}/config/empty.tree_neighbors.tsv", glob: false)]
             }
-            .ifEmpty([file("${projectDir}/config/empty.tree_neighbors.tsv")])
+            .ifEmpty([file("${projectDir}/config/empty.tree_neighbors.tsv", glob: false)])
     } else {
         tree_assignment_files = channel.value(
-            [file("${projectDir}/config/empty.tree_assignment.tsv")]
+            [file("${projectDir}/config/empty.tree_assignment.tsv", glob: false)]
         )
         tree_neighbor_files = channel.value(
-            [file("${projectDir}/config/empty.tree_neighbors.tsv")]
+            [file("${projectDir}/config/empty.tree_neighbors.tsv", glob: false)]
         )
     }
 
@@ -356,7 +373,8 @@ process PREPARE_TREE_TASKS {
         val(marker), \
         val(db_prefix), \
         val(taxonomy_file), \
-        val(source_records_file)
+        val(source_records_file), \
+        path(annotation_m8)
     val(database_config)
     val(runtime_code_digest)
     val(tree_model_ids)
@@ -380,8 +398,28 @@ process PREPARE_TREE_TASKS {
         Math.max(params.tree_reference_count as int, params.max_blast_targets as int),
         100
     ) + 1
-    def database_16s = shellQuote(databasePrefixForMarker(database_config, '16S'))
-    def database_18s = shellQuote(databasePrefixForMarker(database_config, '18S'))
+    def annotation_fetch_targets = Math.max(
+        (params.max_blast_targets as int) + 1,
+        params.top_hits as int
+    )
+    def routing_commands = ['16S', '18S'].collect { tree_marker ->
+        if (tree_marker == marker && annotation_fetch_targets == fetch_targets) {
+            return "cp ${shellQuote(annotation_m8)} ${tree_marker}.tree_route.m8"
+        }
+        def database = shellQuote(databasePrefixForMarker(database_config, tree_marker))
+        """
+        blastn \\
+            -task blastn \\
+            -evalue 1e-5 \\
+            -outfmt '6 std qlen slen' \\
+            -db ${database} \\
+            -query "${extracted_fna}" \\
+            -max_target_seqs "${fetch_targets}" \\
+            -max_hsps 1 \\
+            -num_threads "${task.cpus}" \\
+            -out ${tree_marker}.tree_route.m8
+        """
+    }.join('\n')
     def taxonomy_argument = shellQuote(taxonomy_file)
     def source_records_argument = shellQuote(source_records_file)
     def calibration_argument = database_config.runtime_calibration \
@@ -390,27 +428,7 @@ process PREPARE_TREE_TASKS {
     """
     # Database SHA-256: ${database_config.content_digest}
     # Runtime code SHA-256: ${runtime_code_digest}
-    blastn \
-        -task blastn \
-        -evalue 1e-5 \
-        -outfmt '6 std qlen slen' \
-        -db ${database_16s} \
-        -query "${extracted_fna}" \
-        -max_target_seqs "${fetch_targets}" \
-        -max_hsps 1 \
-        -num_threads "${task.cpus}" \
-        -out 16S.tree_route.m8
-
-    blastn \
-        -task blastn \
-        -evalue 1e-5 \
-        -outfmt '6 std qlen slen' \
-        -db ${database_18s} \
-        -query "${extracted_fna}" \
-        -max_target_seqs "${fetch_targets}" \
-        -max_hsps 1 \
-        -num_threads "${task.cpus}" \
-        -out 18S.tree_route.m8
+    ${routing_commands}
 
     python3 "${projectDir}/scripts/tree_reference_selection.py" prepare \
         --query-fasta "${extracted_fna}" \
@@ -573,14 +591,8 @@ process FINALIZE_SUMMARIES {
 }
 
 
-def resolveProjectPath(value) {
-    def candidate = new File(value.toString())
-    return candidate.isAbsolute() ? candidate.toString() : "${projectDir}/${value}"
-}
-
-
 def loadJsonFile(pathValue, label) {
-    def path = new File(resolveProjectPath(pathValue))
+    def path = file(pathValue, glob: false).toFile()
     if (!path.isFile()) {
         throw new IllegalArgumentException("Missing ${label}: ${path}")
     }
@@ -637,7 +649,7 @@ def markerForModel(modelId, modelMarkers) {
 
 
 def loadDatabaseConfig(databasePath, profile) {
-    def root = new File(resolveProjectPath(databasePath))
+    def root = file(databasePath, glob: false).toFile()
     def profileDir = new File(root, profile.toString())
     def manifestFile = new File(profileDir, 'manifest.json')
     if (!manifestFile.isFile()) {
@@ -922,7 +934,7 @@ def helpMessage() {
                                   (default: data/example)
       -q [path]                   Same input through the Pixi wrapper
       --modeldir [path]           Directory containing covariance models (.cm)
-                                  (default: resources/models)
+                                  (default: <project>/resources/models)
 
     Optional arguments:
       --outdir [path]             Output directory (default: results/[input_name])
@@ -936,13 +948,16 @@ def helpMessage() {
                                  Nearest reference count for tree evidence (default: 5)
       --tree_trim_gap_fraction [n]
                                  Remove columns above this gap fraction (default: 0.9)
-      --database_path [path]      BLAST database directory (default: resources/database)
+      --database_path [path]      BLAST database directory (default: <project>/resources/database)
       --database_profile [name]   Database profile: curated or img (default: curated)
       --model_marker_map [path]   JSON mapping models to 16S rRNA gene or 18S rRNA gene markers
+                                  (default: <project>/config/model_markers.json)
       --max_cpus [int]            Maximum CPUs for one task (default: 16)
       --max_memory [size]         Maximum memory for one task (default: 128.GB)
       --max_time [duration]       Maximum wall time for one task (default: 240.h)
       --version                   Print the SSUextract version
       --help                      Print this help message
+
+    Relative user paths are resolved against the launch directory.
     """.stripIndent()
 }

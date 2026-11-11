@@ -44,9 +44,13 @@ reference labels, exact matches, and calibrated nonexact query assignments.
 
 ## Optional tree classification
 
-`--tree_classification` adds one tree task per extracted gene. Both marker
-indexes are searched before alignment. The marker represented by most of the
-best 100 unique subjects that pass the coverage rule is selected. Best bit score
+`--tree_classification` adds one tree task per extracted gene. Routing uses
+BLAST results from both marker indexes before alignment. When annotation and
+tree routing fetch the same number of subjects, routing reuses the detected
+marker's annotation result and searches only the other marker. Different fetch
+sizes require a separate detected-marker search to preserve the annotation and
+tree evidence. The marker represented by most of the best 100 unique subjects
+that pass the coverage rule is selected. Best bit score
 and the accepted Infernal model resolve ties.
 
 The selected 100 reference sequences and query are aligned with RF00177 or
@@ -67,9 +71,10 @@ other extracted genes continue through tree classification.
 ## Results
 
 The workflow writes extracted FASTA files, parsed hit tables, BLAST results, a
-per-hit summary, category counts, and Nextflow execution reports. Tree mode also
-writes reference sequences, alignments, trees, logs, QC, and a combined neighbor
-table. See [output files](../reference/outputs.md) for paths and contents.
+per-hit summary, category counts, and Nextflow execution trace, timeline, and
+report. Tree mode also writes reference sequences, alignments, trees, logs, QC,
+and a combined neighbor table. See [output files](../reference/outputs.md) for
+paths and contents.
 
 The workflow checks database files against their manifest hashes. Hashes of the
 database and runtime scripts enter the task cache keys. `run_provenance.json`

@@ -16,7 +16,10 @@ cleanup() {
         nextflow.log \
         unsupported.stdout.txt \
         unsupported.stderr.txt \
-        unsupported.nextflow.log; do
+        unsupported.nextflow.log \
+        duplicate.stdout.txt \
+        duplicate.stderr.txt \
+        duplicate.nextflow.log; do
         if [[ -s "${test_dir}/${log}" ]]; then
             echo "--- ${log} ---" >&2
             sed -n '1,400p' "${test_dir}/${log}" >&2
@@ -147,7 +150,6 @@ export NUMEXPR_NUM_THREADS=1
         -ansi-log false \
         -work-dir "${test_dir}/work" \
         --query "${query_fasta}" \
-        --modeldir "${repo_dir}/resources/models" \
         --database_path "${test_dir}/database" \
         --min_extract_length 0 \
         --threads_per_job 1 \
@@ -167,6 +169,10 @@ test "$(sed -n '2p' "${outdir}/cmsearch_summary.tab")" = "single_sample"
 test "$(find "${outdir}/stats" -name '*.hits.tsv' -type f | wc -l)" -eq 2
 test "$(find "${outdir}/out" "${outdir}/stats" -name '*.fna' -type f | wc -l)" -eq 0
 test "$(find "${outdir}/m8" -name '*.top_hits.tsv' -type f | wc -l)" -eq 2
+test "$(find "${outdir}/pipeline_info" -name 'pipeline_dag_*.html' -type f | wc -l)" -eq 0
+test "$(find "${outdir}/pipeline_info" -name 'execution_trace_*.txt' -type f | wc -l)" -eq 1
+test "$(find "${outdir}/pipeline_info" -name 'execution_timeline_*.html' -type f | wc -l)" -eq 1
+test "$(find "${outdir}/pipeline_info" -name 'execution_report_*.html' -type f | wc -l)" -eq 1
 
 unsupported="${test_dir}/input/single_sample.txt"
 cp "${query_fasta}" "${unsupported}"
@@ -195,5 +201,37 @@ if grep -Fq "Submitted process" \
     "${test_dir}/unsupported.stdout.txt" \
     "${test_dir}/unsupported.stderr.txt"; then
     echo "Unsupported single-file suffix submitted a process" >&2
+    exit 1
+fi
+
+mkdir "${test_dir}/duplicate-input"
+cp "${query_fasta}" "${test_dir}/duplicate-input/a.fna"
+cp "${query_fasta}" "${test_dir}/duplicate-input/a.fa"
+cp "${query_fasta}" "${test_dir}/duplicate-input/unique.fasta"
+if (
+    cd "${test_dir}"
+    nextflow \
+        -log "${test_dir}/duplicate.nextflow.log" \
+        run "${repo_dir}/main.nf" \
+        -ansi-log false \
+        -work-dir "${test_dir}/duplicate-work" \
+        --query "${test_dir}/duplicate-input" \
+        --database_path "${test_dir}/database" \
+        --outdir "${test_dir}/duplicate-results" \
+        > "${test_dir}/duplicate.stdout.txt" \
+        2> "${test_dir}/duplicate.stderr.txt"
+); then
+    echo "Duplicate sample identifiers unexpectedly started the pipeline" >&2
+    exit 1
+fi
+for expected in "Duplicate sample identifiers" "a.fna" "a.fa"; do
+    grep -Fq -- "${expected}" \
+        "${test_dir}/duplicate.stdout.txt" \
+        "${test_dir}/duplicate.stderr.txt"
+done
+if grep -Fq "Submitted process" \
+    "${test_dir}/duplicate.stdout.txt" \
+    "${test_dir}/duplicate.stderr.txt"; then
+    echo "Duplicate sample identifiers submitted a process" >&2
     exit 1
 fi

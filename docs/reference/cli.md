@@ -5,11 +5,11 @@ Run `pixi run ssuextract --help` for the installed version's generated help.
 | Parameter | Default | Description |
 | --- | --- | --- |
 | `-q`, `--query` | `data/example` | One `.fna`, `.fa`, or `.fasta` file, or a directory containing those files. The short form is available through `pixi run ssuextract`. |
-| `--modeldir` | `resources/models` | Directory containing Infernal covariance models. |
+| `--modeldir` | `<project>/resources/models` | Directory containing Infernal covariance models. |
 | `--outdir` | `results/<input-name>` | Output directory. The input name is the directory name or FASTA file stem. |
-| `--database_path` | Configured path or `resources/database` | Root containing database profiles. |
+| `--database_path` | Configured path or `<project>/resources/database` | Root containing database profiles. |
 | `--database_profile` | Saved profile or `curated` | Profile name: `curated` or `img`. The option overrides the saved profile for one run. |
-| `--model_marker_map` | `config/model_markers.json` | Covariance-model to marker mapping. Marker values must be `16S` or `18S`. |
+| `--model_marker_map` | `<project>/config/model_markers.json` | Covariance-model to marker mapping. Marker values must be `16S` or `18S`. |
 | `--max_blast_targets` | `500` | Candidate policy limit; one extra hit detects truncation. Must match `max_targets` when the profile has runtime calibration. |
 | `--top_hits` | `5` | Number of ranked BLAST subjects reported per query. All assignment candidates, equal-best subjects, and the best fetched IMG, PR2, and SILVA subjects are retained below this cutoff. |
 | `--tree_classification` | off | Use a query-plus-reference tree for taxonomy assignment. |
@@ -21,6 +21,15 @@ Run `pixi run ssuextract --help` for the installed version's generated help.
 | `--max_cpus` | `16` | Maximum CPUs assigned to one Nextflow task. |
 | `--max_memory` | `128.GB` | Maximum memory assigned to one Nextflow task. |
 | `--max_time` | `240.h` | Maximum wall time assigned to one Nextflow task. |
+
+Relative paths supplied by the user are resolved against the launch directory,
+including `--query`, `--modeldir`, `--database_path`, and `--model_marker_map`.
+`pixi run` starts its tasks in the project directory, so with
+`pixi run ssuextract` the launch directory is the project directory.
+The built-in model, database, and model-marker map defaults are absolute paths
+inside the pipeline project, independent of the launch directory. Input file
+stems must be unique within a run; duplicate sample identifiers stop the workflow
+before any process starts, and the error names the conflicting files.
 
 ## Pixi commands
 

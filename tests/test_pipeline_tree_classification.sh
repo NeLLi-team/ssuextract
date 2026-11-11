@@ -21,6 +21,7 @@ cleanup() {
     for log in \
         first.stdout first.stderr \
         resume.stdout resume.stderr \
+        unequal.stdout unequal.stderr \
         database-resume.stdout database-resume.stderr \
         code-resume.stdout code-resume.stderr \
         no-hit.stdout no-hit.stderr; do
@@ -41,7 +42,8 @@ mkdir -p \
 mkdir "${test_dir}/pipeline"
 cp "${repo}/main.nf" "${repo}/nextflow.config" "${test_dir}/pipeline/"
 cp -R "${repo}/scripts" "${repo}/config" "${test_dir}/pipeline/"
-printf "trace.fields = 'task_id,hash,name,status,exit,cpus,workdir'\n" > "${test_dir}/trace.config"
+ln -s "${repo}/resources/models" "${test_dir}/models"
+printf "trace.fields = 'task_id,hash,name,status,exit,cpus,memory,time,workdir'\n" > "${test_dir}/trace.config"
 
 python3 - \
     "${repo}/data/example/LKH565_P11_Ci.fna" \
@@ -300,13 +302,15 @@ manifest = {
 (profile / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 PY
 
-run_tree_pipeline() {
+tree_outdir="${test_dir}/results"
+run_tree_pipeline() (
+    cd "${test_dir}"
     nextflow run "${test_dir}/pipeline/main.nf" \
-        --query "${test_dir}/query" \
-        --modeldir "${repo}/resources/models" \
-        --database_path "${test_dir}/database" \
+        --query query \
+        --modeldir models \
+        --database_path database \
         --database_profile curated \
-        --outdir "${test_dir}/results" \
+        --outdir "${tree_outdir}" \
         --threads_per_job 4 \
         --max_cpus 1 \
         --tree_classification \
@@ -316,11 +320,17 @@ run_tree_pipeline() {
         -ansi-log false \
         -work-dir "${test_dir}/work" \
         "$@"
-}
+)
 
 run_tree_pipeline -with-trace "${test_dir}/first.trace.tsv" >"${test_dir}/first.stdout" 2>"${test_dir}/first.stderr"
 cp "${test_dir}/results/run_provenance.json" "${test_dir}/first.provenance.json"
 run_tree_pipeline -resume -with-trace "${test_dir}/resume.trace.tsv" >"${test_dir}/resume.stdout" 2>"${test_dir}/resume.stderr"
+tree_outdir="${test_dir}/unequal-results" run_tree_pipeline --top_hits 502 \
+    -with-trace "${test_dir}/unequal.trace.tsv" \
+    >"${test_dir}/unequal.stdout" 2>"${test_dir}/unequal.stderr"
+for output in cmsearch_summary.tsv cmsearch_summary.tab tree_nearest_neighbors.tsv; do
+    cmp "${test_dir}/results/${output}" "${test_dir}/unequal-results/${output}"
+done
 
 python3 - \
     "${test_dir}/results/cmsearch_summary.tsv" \
@@ -428,6 +438,52 @@ with (root / "first.trace.tsv").open() as handle:
     first = list(csv.DictReader(handle, delimiter="\t"))
 if any(int(row["cpus"]) > 1 for row in first):
     raise SystemExit("a task exceeded --max_cpus 1")
+blast_resources = {
+    (row["memory"], row["time"]) for row in first if "BLAST_ANNOTATE" in row["name"]
+}
+tree_resources = {
+    (row["memory"], row["time"])
+    for row in first
+    if "PREPARE_TREE_TASKS" in row["name"] or "TREE_CLASSIFY" in row["name"]
+}
+if len(blast_resources) != 1 or tree_resources != blast_resources:
+    raise SystemExit("tree memory/time requests do not match BLAST annotation")
+
+# Equal fetch sizes reuse the detected-marker m8; unequal sizes preserve both searches.
+for stage, expected_searches in (("first", 1), ("unequal", 2)):
+    with (root / f"{stage}.trace.tsv").open(encoding="utf-8") as handle:
+        stage_trace = list(csv.DictReader(handle, delimiter="\t"))
+    preparations = [row for row in stage_trace if "PREPARE_TREE_TASKS" in row["name"]]
+    if len(preparations) != 4:
+        raise SystemExit(f"{stage} run did not prepare all sample/model pairs")
+    for task in preparations:
+        workdir = Path(task["workdir"])
+        script = (workdir / ".command.sh").read_text(encoding="utf-8")
+        commands = [
+            shlex.split(line)
+            for line in script.replace("\\\n", " ").splitlines()
+            if line.strip().startswith("blastn ")
+        ]
+        if len(commands) != expected_searches:
+            raise SystemExit(
+                f"{stage} preparation emitted {len(commands)} BLAST searches; "
+                f"expected {expected_searches}: {task['name']}"
+            )
+        query = Path(commands[0][commands[0].index("-query") + 1])
+        detected = "16S" if query.stem.endswith("RF00177") else "18S"
+        searched = {
+            Path(command[command.index("-db") + 1]).name for command in commands
+        }
+        expected_markers = (
+            {"16S", "18S"} - {detected} if stage == "first" else {"16S", "18S"}
+        )
+        if searched != expected_markers:
+            raise SystemExit(f"{stage} preparation searched wrong markers: {searched}")
+        if stage == "first" and (
+            (workdir / f"{detected}.tree_route.m8").read_bytes()
+            != (workdir / f"{query.stem}.m8").read_bytes()
+        ):
+            raise SystemExit("detected-marker routing did not reuse the annotation m8")
 
 # Exercise the BLAST command emitted by the workflow on a seed-sensitive pair.
 rng = random.Random(904)

@@ -78,7 +78,6 @@ raw = [
     hit
     for path in sys.argv[1:3]
     for hit in parse_cmsearch_tblout(path)
-    if hit.included
 ]
 accessions = {hit.model_accession for hit in raw}
 if accessions != {"RF00177", "RF01960"}:
@@ -439,15 +438,21 @@ if nextflow run "${repo}/main.nf" \
 fi
 grep -F "missing taxonomy_database.source_records" "${test_dir}/missing-source.log"
 
-nextflow run "${repo}/main.nf" \
-    --query "${test_dir}/query" \
-    --modeldir "${repo}/resources/models" \
-    --database_path "${test_dir}/database" \
-    --database_profile curated \
-    --outdir "${test_dir}/results" \
-    --threads_per_job 1 \
-    -work-dir "${test_dir}/work" \
-    >/dev/null
+ln -s "${repo}/resources/models" "${test_dir}/models"
+cp "${repo}/config/model_markers.json" "${test_dir}/model-markers.json"
+(
+    cd "${test_dir}"
+    nextflow run "${repo}/main.nf" \
+        --query query \
+        --modeldir models \
+        --model_marker_map model-markers.json \
+        --database_path database \
+        --database_profile curated \
+        --outdir results \
+        --threads_per_job 1 \
+        -work-dir "${test_dir}/work" \
+        >/dev/null
+)
 
 python3 - \
     "${test_dir}/results/cmsearch_summary.tsv" \

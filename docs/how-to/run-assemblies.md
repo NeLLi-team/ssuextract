@@ -1,7 +1,9 @@
 # Run assembled genomes or metagenomes
 
 Pass one `.fna`, `.fa`, or `.fasta` assembly, or place several assemblies in one
-directory. Each file stem becomes its sample identifier.
+directory. Each file stem becomes its sample identifier. Use distinct stems:
+`a.fna` and `a.fa` both name sample `a` and cause the workflow to stop before any
+process starts.
 
 ## Run one assembly
 
@@ -48,16 +50,18 @@ Enable tree classification for each extracted 16S rRNA gene or 18S rRNA gene:
 pixi run ssuextract --query data/my_dataset --outdir results/my_dataset-tree --tree_classification --threads_per_job 4
 ```
 
-Tree mode searches both marker indexes. The 100 best unique subjects determine
-whether the 16S rRNA gene or 18S rRNA gene covariance model is used for
-alignment. SSUextract aligns the query and references with `cmalign`, removes
-covariance-model insert columns and match columns with more than 90% gaps, then
+Tree mode uses BLAST results from both marker indexes. It reuses the annotation
+search for the detected marker when the annotation and tree fetch sizes match;
+otherwise it searches that marker with the tree fetch size. The 100 best unique
+subjects determine whether the 16S rRNA gene or 18S rRNA gene covariance model
+is used for alignment. SSUextract aligns the query and references with `cmalign`,
+removes covariance-model insert columns and match columns with more than 90% gaps, then
 runs IQ-TREE 3 with `GTR+F+R4`, fast tree search, and 1,000 SH-aLRT replicates.
 
 Inspect the selected tree taxonomy and the nearest reference branches:
 
 ```bash
-cut -f1-3,29-53 results/my_dataset-tree/cmsearch_summary.tsv
+cut -f1-3,27-51 results/my_dataset-tree/cmsearch_summary.tsv
 cut -f1-11,13-20 results/my_dataset-tree/tree_nearest_neighbors.tsv
 ```
 
@@ -79,6 +83,9 @@ pixi run ssuextract --query data/my_dataset --outdir results/my_dataset --thread
 
 `--threads_per_job` controls each `cmsearch`, BLAST, and `cmalign` task.
 IQ-TREE uses one thread so near-tied branch distances are reproducible.
+Tree preparation and classification each request 8 GB of memory and 2 hours
+on the first attempt, like BLAST annotation. Retry requests scale with the
+attempt number and remain within the task ceilings.
 `--max_cpus` limits
 the resources that Nextflow assigns to one task; it does not set the number of
 concurrent tasks.
