@@ -1,26 +1,29 @@
 import hashlib
 import json
+import shutil
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
-
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import assemble_database_profile as assembler
 import build_database_release as builder
+import database_contracts as contracts  # noqa: E402  # needs the scripts path set above
 import database_manager as manager
+import database_release_io as release_io  # noqa: E402  # needs the scripts path set above
 
 
-def tiny_model() -> builder.DatabaseModel:
+def tiny_model() -> contracts.DatabaseModel:
     records = [
-        builder.PreparedSourceRecord(
+        contracts.PreparedSourceRecord(
             "SILVA",
             "138.2",
             "silva-16",
@@ -30,7 +33,7 @@ def tiny_model() -> builder.DatabaseModel:
             ("Bacteria", "Firmicutes"),
             "SILVA",
         ),
-        builder.PreparedSourceRecord(
+        contracts.PreparedSourceRecord(
             "PR2",
             "5.1.1",
             "pr2-plastid",
@@ -41,7 +44,7 @@ def tiny_model() -> builder.DatabaseModel:
             "PR2",
             "plastid",
         ),
-        builder.PreparedSourceRecord(
+        contracts.PreparedSourceRecord(
             "PR2",
             "5.1.1",
             "pr2-nucleus",
@@ -52,7 +55,7 @@ def tiny_model() -> builder.DatabaseModel:
             "PR2",
             "nucleus",
         ),
-        builder.PreparedSourceRecord(
+        contracts.PreparedSourceRecord(
             "PR2",
             "5.1.1",
             "pr2-18",
@@ -68,6 +71,44 @@ def tiny_model() -> builder.DatabaseModel:
 
 
 class DatabaseAssemblyTests(unittest.TestCase):
+    def test_marker_error_precedes_a_table_writer_error(self) -> None:
+        original = tiny_model()
+        model = replace(
+            original,
+            sequences=tuple(
+                replace(row, markers=("bad/marker",)) for row in original.sequences
+            ),
+            source_records=tuple(
+                replace(row, marker="bad/marker") for row in original.source_records
+            ),
+        )
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(
+                release_io, "_write_parquet", side_effect=OSError("table write failed")
+            ),
+            self.assertRaisesRegex(assembler.AssemblyError, "sequence marker"),
+        ):
+            assembler.assemble_database_profile(
+                model, Path(tmp) / "curated", profile="curated", version="2026.1"
+            )
+
+    def test_release_model_is_validated_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch(
+                    "database_release_io.validate_release",
+                    wraps=release_io.validate_release,
+                ) as validate,
+            ):
+                assembler.assemble_database_profile(
+                    tiny_model(),
+                    Path(tmp) / "curated",
+                    profile="curated",
+                    version="2026.1",
+                )
+            self.assertEqual(validate.call_count, 1)
+
     def test_assembles_marker_indexes_tables_manifest_and_validates(self) -> None:
         model = tiny_model()
         with tempfile.TemporaryDirectory() as tmp:
@@ -143,12 +184,35 @@ class DatabaseAssemblyTests(unittest.TestCase):
     def test_package_is_byte_deterministic_and_has_one_top_level_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            profile = root / "curated"
-            assembler.assemble_database_profile(
-                tiny_model(), profile, profile="curated", version="2026.1"
+            first_result = assembler.assemble_database_profile(
+                tiny_model(),
+                root / "first" / "curated",
+                profile="curated",
+                version="2026.1",
+                archive_path=root / "first.tar.zst",
             )
-            first = assembler.package_profile(profile, root / "first.tar.zst")
-            second = assembler.package_profile(profile, root / "second.tar.zst")
+
+            def reuse_validated_profile(staging: Path, *_: object) -> dict[str, object]:
+                """Reuse profile bytes because BLAST embeds creation timestamps."""
+                shutil.copytree(
+                    first_result.profile_directory, staging, dirs_exist_ok=True
+                )
+                return first_result.manifest
+
+            with mock.patch.object(
+                assembler,
+                "_assemble_staging_profile",
+                side_effect=reuse_validated_profile,
+            ):
+                second_result = assembler.assemble_database_profile(
+                    tiny_model(),
+                    root / "second" / "curated",
+                    profile="curated",
+                    version="2026.1",
+                    archive_path=root / "second.tar.zst",
+                )
+            first = first_result.archive
+            second = second_result.archive
             self.assertEqual(first.bytes, second.bytes)
             self.assertEqual(first.sha256, second.sha256)
 
@@ -172,9 +236,14 @@ class DatabaseAssemblyTests(unittest.TestCase):
     def test_rejects_archive_inside_profile_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             profile = Path(tmp) / "curated"
-            profile.mkdir()
             with self.assertRaisesRegex(assembler.AssemblyError, "outside"):
-                assembler.package_profile(profile, profile / "curated.tar.zst")
+                assembler.assemble_database_profile(
+                    tiny_model(),
+                    profile,
+                    profile="curated",
+                    version="2026.1",
+                    archive_path=profile / "curated.tar.zst",
+                )
 
     def test_archive_failure_publishes_neither_profile_nor_archive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -391,12 +460,10 @@ class DatabaseAssemblyTests(unittest.TestCase):
                 )
             )
 
-    def test_package_profile_post_link_failure_removes_archive(self) -> None:
+    def test_assembly_post_link_failure_removes_archive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             profile = root / "curated"
-            profile.mkdir()
-            (profile / "manifest.json").write_text("{}\n", encoding="utf-8")
             archive = root / "curated.tar.zst"
             real_fsync_directory = assembler.fsync_directory
 
@@ -413,7 +480,13 @@ class DatabaseAssemblyTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(OSError, "package sync failure"),
             ):
-                assembler.package_profile(profile, archive)
+                assembler.assemble_database_profile(
+                    tiny_model(),
+                    profile,
+                    profile="curated",
+                    version="2026.1",
+                    archive_path=archive,
+                )
 
             self.assertFalse(archive.exists())
 

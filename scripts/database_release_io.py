@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 
 from atomic_io import replace_and_fsync
 from database_contracts import (
-    IMG_LOCATION_COLUMNS,
     PREFERRED_COMPARTMENTS,
     BuildError,
     DatabaseModel,
@@ -32,11 +31,28 @@ from database_sources import (
     sequence_identifier,
     validate_privacy_columns,
 )
+from taxonomy_utils import taxonomy_path
 
 if TYPE_CHECKING:
     import duckdb
 
 _CSV_DEFAULT_MAX_LINE_BYTES = 2_000_000
+
+
+def _has_pr2_suffix(taxonomy_source: str, taxonomy: Sequence[str]) -> bool:
+    return "PR2" in taxonomy_source.upper().split("+") and any(
+        ":" in taxon for taxon in taxonomy
+    )
+
+
+def _taxonomy_error(taxonomy: Sequence[str], method: str) -> str:
+    try:
+        path = taxonomy_path(taxonomy)
+    except ValueError as error:
+        return str(error)
+    if path[0] == "Unclassified" and method != "updated_reference_unclassified":
+        return "Unclassified taxonomy requires an unclassified assignment method"
+    return ""
 
 
 def _duplicates(values: Iterable[str]) -> set[str]:
@@ -91,6 +107,11 @@ def validate_release(model: DatabaseModel, img_locations: Iterable[ImgLocation] 
     pr2_assignment_suffixes = 0
     pr2_assignment_suffix_examples: list[str] = []
     for assignment in model.taxonomy_assignments:
+        taxonomy_error = _taxonomy_error(
+            assignment.taxonomy, assignment.assignment_method
+        )
+        if taxonomy_error:
+            errors.append(f"{taxonomy_error}: {assignment.taxonomy_assignment_id}")
         if assignment.source_record_id not in source_ids:
             errors.append(f"orphan taxonomy source_record_id: {assignment.source_record_id}")
         if assignment.sequence_id not in sequence_ids:
@@ -102,9 +123,7 @@ def validate_release(model: DatabaseModel, img_locations: Iterable[ImgLocation] 
             errors.append(
                 f"taxonomy/source sequence mismatch: {assignment.taxonomy_assignment_id}"
             )
-        if assignment.taxonomy_source.upper() == "PR2" and any(
-            ":" in taxon for taxon in assignment.taxonomy
-        ):
+        if _has_pr2_suffix(assignment.taxonomy_source, assignment.taxonomy):
             pr2_assignment_suffixes += 1
             if len(pr2_assignment_suffix_examples) < 5:
                 pr2_assignment_suffix_examples.append(assignment.taxonomy_assignment_id)
@@ -150,6 +169,10 @@ def validate_release(model: DatabaseModel, img_locations: Iterable[ImgLocation] 
     pr2_preferred_suffixes = 0
     pr2_preferred_suffix_examples: list[str] = []
     for record in model.preferred_taxonomy:
+        if record.taxonomy:
+            taxonomy_error = _taxonomy_error(record.taxonomy, record.assignment_method)
+            if taxonomy_error:
+                errors.append(f"{taxonomy_error}: {record.sequence_id}")
         if record.compartment not in PREFERRED_COMPARTMENTS:
             errors.append(
                 f"invalid preferred taxonomy compartment for {record.sequence_id}: "
@@ -159,9 +182,7 @@ def validate_release(model: DatabaseModel, img_locations: Iterable[ImgLocation] 
             preferred_domain_mismatches += 1
             if len(preferred_domain_mismatch_examples) < 5:
                 preferred_domain_mismatch_examples.append(record.sequence_id)
-        if "PR2" in record.taxonomy_source.upper().split("+") and any(
-            ":" in taxon for taxon in record.taxonomy
-        ):
+        if _has_pr2_suffix(record.taxonomy_source, record.taxonomy):
             pr2_preferred_suffixes += 1
             if len(pr2_preferred_suffix_examples) < 5:
                 pr2_preferred_suffix_examples.append(record.sequence_id)
@@ -224,7 +245,6 @@ def validate_release(model: DatabaseModel, img_locations: Iterable[ImgLocation] 
         errors.append(f"IMG taxonomy is missing for {len(missing_img)} source records")
 
     try:
-        validate_privacy_columns(IMG_LOCATION_COLUMNS)
         locations = tuple(img_locations)
         if _duplicates(location.taxon_oid for location in locations):
             errors.append("duplicate IMG location taxon_oid")
@@ -432,16 +452,23 @@ def write_preferred_taxonomy_parquet(
 
 
 def write_img_location_parquet(path: str | Path, records: Iterable[ImgLocation]) -> Path:
-    validate_privacy_columns(IMG_LOCATION_COLUMNS)
     rows = [
         (record.taxon_oid, record.latitude, record.longitude)
         for record in sorted(records, key=lambda item: item.taxon_oid)
     ]
-    return _write_parquet(
+    output = _write_parquet(
         Path(path),
         "CREATE TABLE release_table(taxon_oid VARCHAR, latitude DOUBLE, longitude DOUBLE)",
         rows,
     )
+    import duckdb  # noqa: PLC0415  # DuckDB is needed only for Parquet I/O.
+
+    with duckdb.connect(":memory:", config={"threads": 1}) as connection:
+        columns = connection.execute(
+            "DESCRIBE SELECT * FROM read_parquet(?)", [str(output)]
+        ).fetchall()
+    validate_privacy_columns(column[0] for column in columns)
+    return output
 
 
 def write_release_tables(
@@ -450,6 +477,16 @@ def write_release_tables(
     output = Path(output_directory)
     locations = tuple(img_locations)
     validate_release(model, locations)
+    write_validated_release_tables(output, model, locations)
+
+
+def write_validated_release_tables(
+    output_directory: str | Path,
+    model: DatabaseModel,
+    img_locations: Iterable[ImgLocation],
+) -> None:
+    """Write all release tables after the caller validates the model and locations."""
+    output = Path(output_directory)
     write_sequences_parquet(output / "sequences.parquet", model.sequences)
     write_source_records_parquet(output / "source_records.parquet", model.source_records)
     write_taxonomy_assignments_parquet(
@@ -458,4 +495,4 @@ def write_release_tables(
     write_preferred_taxonomy_parquet(
         output / "preferred_taxonomy.parquet", model.preferred_taxonomy
     )
-    write_img_location_parquet(output / "img_location.parquet", locations)
+    write_img_location_parquet(output / "img_location.parquet", img_locations)

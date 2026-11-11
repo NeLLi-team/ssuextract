@@ -44,10 +44,9 @@ python scripts/classify_img_clusters.py \
     --search-provenance "${search_provenance}" \
     --propagation-rank-cap 0 \
     --assignments-tsv "${output_directory}/assignments.tsv" \
-    --assignments-jsonl "${output_directory}/assignments.jsonl" \
     --outcomes-jsonl "${output_directory}/outcomes.jsonl" \
     --qc-json "${output_directory}/qc.json"
 
-test -s "${output_directory}/assignments.tsv"
+awk 'END { exit (NR < 2) }' "${output_directory}/assignments.tsv"
 test -s "${output_directory}/outcomes.jsonl"
 test -s "${output_directory}/qc.json"

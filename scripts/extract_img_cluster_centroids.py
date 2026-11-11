@@ -4,35 +4,25 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
-import sys
 from pathlib import Path
 from typing import Iterable, Sequence
 
-import build_database_release as builder
+from database_sources import iter_fasta, normalize_sequence_for_hashing
+from img_classification_data import parse_clusters
 
 
 def read_centroids(lines: Iterable[str]) -> dict[str, str]:
-    csv.field_size_limit(sys.maxsize)
-    reader = csv.DictReader(lines, delimiter="\t")
-    required = {"cluster_id", "centroid"}
-    missing = required - set(reader.fieldnames or ())
-    if missing:
-        raise ValueError(f"cluster table lacks columns: {sorted(missing)}")
+    """Return centroid headers only for clusters with IMG members."""
     by_header: dict[str, str] = {}
-    cluster_ids: set[str] = set()
-    for row_number, row in enumerate(reader, 2):
-        cluster_id = (row.get("cluster_id") or "").strip()
-        centroid = (row.get("centroid") or "").strip()
-        if not cluster_id or not centroid:
-            raise ValueError(f"cluster row {row_number} lacks cluster_id or centroid")
-        if cluster_id in cluster_ids:
-            raise ValueError(f"duplicate cluster_id {cluster_id!r}")
-        if centroid in by_header:
-            raise ValueError(f"centroid {centroid!r} belongs to more than one cluster")
-        cluster_ids.add(cluster_id)
-        by_header[centroid] = cluster_id
+    for cluster in parse_clusters(lines):
+        if not cluster.img_members:
+            continue
+        if cluster.centroid in by_header:
+            raise ValueError(
+                f"centroid {cluster.centroid!r} belongs to more than one cluster"
+            )
+        by_header[cluster.centroid] = cluster.cluster_id
     return by_header
 
 
@@ -42,24 +32,23 @@ def extract_centroids(
     with Path(cluster_path).open(newline="", encoding="utf-8") as handle:
         centroids = read_centroids(handle)
     sequences: dict[str, str] = {}
-    for record in builder.iter_fasta(fasta_path):
+    for record in iter_fasta(fasta_path):
         cluster_id = centroids.get(record.header)
         if cluster_id is None:
             continue
         if cluster_id in sequences:
             raise ValueError(f"multiple FASTA records match cluster {cluster_id!r}")
-        sequences[cluster_id] = builder.normalize_sequence_for_hashing(record.sequence)
+        sequences[cluster_id] = normalize_sequence_for_hashing(record.sequence)
     missing = sorted(set(centroids.values()) - sequences.keys())
     if missing:
         preview = ", ".join(missing[:10])
         raise ValueError(f"missing FASTA sequence for {len(missing)} centroids: {preview}")
-    records = [builder.FastaRecord(cluster_id, sequences[cluster_id]) for cluster_id in sequences]
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="ascii", newline="\n") as handle:
-        for record in sorted(records, key=lambda item: item.header):
-            handle.write(f">{record.header}\n{record.sequence}\n")
-    return {"clusters": len(centroids), "centroids_written": len(records)}
+        for cluster_id, sequence in sorted(sequences.items()):
+            handle.write(f">{cluster_id}\n{sequence}\n")
+    return {"clusters": len(centroids), "centroids_written": len(sequences)}
 
 
 def _parser() -> argparse.ArgumentParser:

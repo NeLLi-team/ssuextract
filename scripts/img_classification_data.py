@@ -7,14 +7,12 @@ import csv
 import json
 import os
 import sys
-from collections import defaultdict
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Iterable, Mapping
 
 from taxonomy_utils import taxonomy_path
-
 
 BLAST_FIELDS = (
     "qseqid",
@@ -103,11 +101,6 @@ class CalibrationRankRule:
 
 @dataclass(frozen=True)
 class CalibrationData:
-    schema_version: int
-    calibration_use_case: str
-    stratum_basis: str
-    classification_policy: dict[str, object]
-    rank_caps: dict[str, int]
     strata: dict[str, CalibrationStratum]
     rank_rules: dict[str, tuple[CalibrationRankRule, ...]]
 
@@ -124,80 +117,103 @@ def _decimal(value: str, field: str, line_number: int) -> Decimal:
     return number
 
 
-def parse_blast_hits(lines: Iterable[str]) -> dict[str, tuple[BlastHit, ...]]:
-    """Parse eight-column BLAST outfmt 6 and reject multiple HSPs per subject."""
+def parse_blast_hits(
+    lines: Iterable[str],
+) -> Iterator[tuple[str, tuple[BlastHit, ...]]]:
+    """Yield sorted hits for each contiguous query in eight-column BLAST output.
 
-    by_query: dict[str, list[BlastHit]] = defaultdict(list)
-    observed_pairs: set[tuple[str, str]] = set()
+    Raises:
+        ValueError: A query reappears, a subject has multiple HSPs, or a row is invalid.
+    """
+    query_hits: list[BlastHit] = []
+    current_query = ""
+    observed_queries: set[str] = set()
+    observed_subjects: set[str] = set()
     for line_number, raw_line in enumerate(lines, 1):
         line = raw_line.rstrip("\r\n")
         if not line:
             continue
-        fields = line.split("\t")
-        if len(fields) != len(BLAST_FIELDS):
+        hit = _parse_blast_row(line, line_number)
+        if hit.query != current_query:
+            if hit.query in observed_queries:
+                raise ValueError(
+                    f"BLAST query {hit.query!r} reappears after another query"
+                )
+            if query_hits:
+                yield current_query, _sorted_hits(query_hits)
+            current_query = hit.query
+            observed_queries.add(hit.query)
+            query_hits = []
+            observed_subjects = set()
+        if hit.subject in observed_subjects:
             raise ValueError(
-                f"Malformed BLAST row {line_number}: expected {len(BLAST_FIELDS)} "
-                f"columns ({' '.join(BLAST_FIELDS)}), found {len(fields)}"
-            )
-        query, subject = fields[:2]
-        if not query or not subject:
-            raise ValueError(f"Empty BLAST query or subject on line {line_number}")
-        pair = (query, subject)
-        if pair in observed_pairs:
-            raise ValueError(
-                f"Multiple HSPs for BLAST query/subject {query!r}/{subject!r}; "
+                f"Multiple HSPs for BLAST query/subject {hit.query!r}/{hit.subject!r}; "
                 "run BLAST with one HSP per subject"
             )
-        observed_pairs.add(pair)
-        percent_identity = _decimal(fields[2], "pident", line_number)
-        try:
-            alignment_length, query_length, subject_length = map(int, fields[3:6])
-        except ValueError as error:
-            raise ValueError(f"Invalid BLAST sequence length on line {line_number}") from error
-        if min(alignment_length, query_length, subject_length) < 1:
-            raise ValueError(f"Non-positive BLAST sequence length on line {line_number}")
-        query_coverage = _decimal(fields[6], "qcovs", line_number)
-        bit_score = _decimal(fields[7], "bitscore", line_number)
-        if not Decimal("0") <= percent_identity <= Decimal("100"):
-            raise ValueError(f"BLAST pident outside [0, 100] on line {line_number}")
-        if not Decimal("0") <= query_coverage <= Decimal("100"):
-            raise ValueError(f"BLAST qcovs outside [0, 100] on line {line_number}")
-        if bit_score < 0:
-            raise ValueError(f"Negative BLAST bitscore on line {line_number}")
-        by_query[query].append(
-            BlastHit(
-                query,
-                subject,
-                percent_identity,
-                alignment_length,
-                query_length,
-                subject_length,
-                query_coverage,
-                bit_score,
-            )
-        )
+        observed_subjects.add(hit.subject)
+        query_hits.append(hit)
+    if query_hits:
+        yield current_query, _sorted_hits(query_hits)
 
-    result: dict[str, tuple[BlastHit, ...]] = {}
-    for query, hits in by_query.items():
-        result[query] = tuple(
-            sorted(
-                hits,
-                key=lambda hit: (
-                    -hit.bit_score,
-                    -hit.percent_identity,
-                    -hit.query_coverage,
-                    hit.subject,
-                ),
-            )
+
+def _parse_blast_row(line: str, line_number: int) -> BlastHit:
+    fields = line.split("\t")
+    if len(fields) != len(BLAST_FIELDS):
+        raise ValueError(
+            f"Malformed BLAST row {line_number}: expected {len(BLAST_FIELDS)} "
+            f"columns ({' '.join(BLAST_FIELDS)}), found {len(fields)}"
         )
-    return result
+    query, subject = fields[:2]
+    if not query or not subject:
+        raise ValueError(f"Empty BLAST query or subject on line {line_number}")
+    percent_identity = _decimal(fields[2], "pident", line_number)
+    try:
+        alignment_length, query_length, subject_length = map(int, fields[3:6])
+    except ValueError as error:
+        raise ValueError(
+            f"Invalid BLAST sequence length on line {line_number}"
+        ) from error
+    if min(alignment_length, query_length, subject_length) < 1:
+        raise ValueError(f"Non-positive BLAST sequence length on line {line_number}")
+    query_coverage = _decimal(fields[6], "qcovs", line_number)
+    bit_score = _decimal(fields[7], "bitscore", line_number)
+    if not Decimal(0) <= percent_identity <= Decimal(100):
+        raise ValueError(f"BLAST pident outside [0, 100] on line {line_number}")
+    if not Decimal(0) <= query_coverage <= Decimal(100):
+        raise ValueError(f"BLAST qcovs outside [0, 100] on line {line_number}")
+    if bit_score < 0:
+        raise ValueError(f"Negative BLAST bitscore on line {line_number}")
+    return BlastHit(
+        query,
+        subject,
+        percent_identity,
+        alignment_length,
+        query_length,
+        subject_length,
+        query_coverage,
+        bit_score,
+    )
+
+
+def _sorted_hits(hits: Iterable[BlastHit]) -> tuple[BlastHit, ...]:
+    return tuple(
+        sorted(
+            hits,
+            key=lambda hit: (
+                -hit.bit_score,
+                -hit.percent_identity,
+                -hit.query_coverage,
+                hit.subject,
+            ),
+        )
+    )
 
 
 def _taxonomy_path(value: object) -> tuple[str, ...]:
     try:
         return taxonomy_path(str(value or ""))
     except ValueError as error:
-        raise ValueError("Reference taxonomy must contain a non-empty domain") from error
+        raise ValueError(f"Invalid reference taxonomy: {error}") from error
 
 
 def _boolean(value: object) -> bool:
@@ -255,26 +271,6 @@ def _taxonomy_record(row: Mapping[str, object], subject: str) -> TaxonomyRecord:
         cross_domain_conflict=False,
         taxonomy_alternatives="",
     )
-
-
-def load_taxonomy_tsv(
-    path: str | Path, subjects: set[str]
-) -> dict[str, TaxonomyRecord]:
-    records: dict[str, TaxonomyRecord] = {}
-    with Path(path).open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        required = {"sequence_id", "taxonomy", "taxonomy_source", "domain"}
-        missing = required - set(reader.fieldnames or ())
-        if missing:
-            raise ValueError(f"Taxonomy TSV lacks columns: {sorted(missing)}")
-        for row in reader:
-            subject = row["sequence_id"].strip()
-            if subject not in subjects:
-                continue
-            if subject in records:
-                raise ValueError(f"Duplicate reference taxonomy row for {subject}")
-            records[subject] = _taxonomy_record(row, subject)
-    return records
 
 
 def load_taxonomy_parquet(
@@ -345,10 +341,7 @@ def load_taxonomy_parquet(
 def load_taxonomy(
     path: str | Path, subjects: set[str]
 ) -> dict[str, TaxonomyRecord]:
-    source = Path(path)
-    if source.suffix.lower() == ".parquet":
-        return load_taxonomy_parquet(source, subjects)
-    return load_taxonomy_tsv(source, subjects)
+    return load_taxonomy_parquet(path, subjects)
 
 
 def load_calibration(path: str | Path) -> CalibrationData:
@@ -439,7 +432,7 @@ def load_calibration(path: str | Path) -> CalibrationData:
             if type(threshold) not in {int, float}:
                 raise ValueError(f"taxonomy calibration identity threshold is invalid: {key}")
             identity = Decimal(str(threshold))
-            if not identity.is_finite() or not Decimal("0") <= identity <= Decimal("100"):
+            if not identity.is_finite() or not Decimal(0) <= identity <= Decimal(100):
                 raise ValueError(f"taxonomy calibration identity threshold is invalid: {key}")
             if parsed_rules and identity < parsed_rules[-1].min_candidate_identity:
                 raise ValueError(f"taxonomy calibration identity thresholds decrease: {key}")
@@ -453,11 +446,6 @@ def load_calibration(path: str | Path) -> CalibrationData:
             f"taxonomy calibration status must be {expected_status!r} for its rank caps"
         )
     return CalibrationData(
-        CALIBRATION_SCHEMA_VERSION,
-        CALIBRATION_USE_CASE,
-        CALIBRATION_STRATUM_BASIS,
-        policy,
-        caps,
         strata,
         rank_rules,
     )

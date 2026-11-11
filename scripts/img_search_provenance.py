@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run or validate an IMG centroid BLAST search completion contract."""
+"""Validate the completion contract of a chunked IMG centroid BLAST search."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import json
 import os
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -15,7 +14,7 @@ from typing import Mapping, Sequence
 from atomic_io import replace_and_fsync
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STATUS = "complete"
 MAX_TARGETS = 501
 MANIFEST_NAME = "manifest.json"
@@ -113,34 +112,6 @@ def _file_records(paths: Mapping[str, Path]) -> dict[str, dict[str, str]]:
     }
 
 
-def _payload(
-    marker: str,
-    curated_profile: str | Path,
-    clusters: str | Path,
-    source_fasta: str | Path,
-    centroids_fasta: str | Path,
-    blast_m8: str | Path,
-    threads: int,
-) -> dict[str, object]:
-    _validate_marker_threads(marker, threads)
-    paths = _file_paths(
-        curated_profile, clusters, source_fasta, centroids_fasta, blast_m8
-    )
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "status": STATUS,
-        "marker": marker,
-        "files": _file_records(paths),
-        "blastn": {
-            "argv": blastn_argv(
-                marker, curated_profile, centroids_fasta, blast_m8, threads
-            ),
-            "max_target_seqs": MAX_TARGETS,
-            "threads": threads,
-        },
-    }
-
-
 def _write_json_durably(path: Path, value: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -156,50 +127,6 @@ def _write_json_durably(path: Path, value: Mapping[str, object]) -> None:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
-
-
-def run_search(
-    marker: str,
-    curated_profile: str | Path,
-    clusters: str | Path,
-    source_fasta: str | Path,
-    centroids_fasta: str | Path,
-    blast_m8: str | Path,
-    sidecar: str | Path,
-    threads: int,
-) -> dict[str, object]:
-    _validate_marker_threads(marker, threads)
-    paths = _file_paths(
-        curated_profile, clusters, source_fasta, centroids_fasta, blast_m8
-    )
-    _file_records({name: path for name, path in paths.items() if name != "blast_m8"})
-    sidecar_path = Path(sidecar)
-    blast_path = Path(blast_m8)
-    sidecar_path.unlink(missing_ok=True)
-    blast_path.parent.mkdir(parents=True, exist_ok=True)
-    blast_path.unlink(missing_ok=True)
-    command = blastn_argv(
-        marker, curated_profile, centroids_fasta, blast_m8, threads
-    )
-    try:
-        subprocess.run(command, check=True)
-    except FileNotFoundError as error:
-        raise RuntimeError("required executable not found: blastn") from error
-    except subprocess.CalledProcessError as error:
-        raise RuntimeError(
-            f"blastn failed with exit code {error.returncode}"
-        ) from error
-    payload = _payload(
-        marker,
-        curated_profile,
-        clusters,
-        source_fasta,
-        centroids_fasta,
-        blast_m8,
-        threads,
-    )
-    _write_json_durably(sidecar_path, payload)
-    return payload
 
 
 def validate_search(
@@ -227,122 +154,29 @@ def validate_search(
         "blastn",
     }:
         raise RuntimeError("invalid IMG search completion sidecar schema")
-    if (
-        observed["schema_version"] == 2
-        and isinstance(observed.get("blastn"), dict)
-        and observed["blastn"].get("mode") == "query_chunks"
-    ):
-        import img_chunked_search
-
-        return img_chunked_search.validate_search_payload(
-            observed,
-            marker,
-            curated_profile,
-            clusters,
-            source_fasta,
-            centroids_fasta,
-            blast_m8,
-            sidecar_path,
-            threads,
-        )
     if observed["schema_version"] != SCHEMA_VERSION or observed["status"] != STATUS:
-        raise RuntimeError("IMG search completion sidecar is not schema-1 complete")
-    if observed["marker"] != marker:
-        raise RuntimeError("IMG search completion sidecar marker mismatch")
+        raise RuntimeError("IMG search completion sidecar is not schema-2 complete")
+    import img_chunked_search  # noqa: PLC0415  # Chunk helpers import this module.
 
-    expected = _payload(
+    return img_chunked_search.validate_search_payload(
+        observed,
         marker,
         curated_profile,
         clusters,
         source_fasta,
         centroids_fasta,
         blast_m8,
+        sidecar_path,
         threads,
     )
-    observed_files = observed["files"]
-    expected_files = expected["files"]
-    if not isinstance(observed_files, dict) or set(observed_files) != set(FILE_KEYS):
-        raise RuntimeError("invalid IMG search completion file binding")
-    for name in FILE_KEYS:
-        if observed_files.get(name) != expected_files[name]:
-            raise RuntimeError(f"IMG search completion file binding mismatch: {name}")
-    if observed["blastn"] != expected["blastn"]:
-        raise RuntimeError("IMG search completion BLAST command contract mismatch")
-    return observed
 
 
 def portable_provenance(
     payload: Mapping[str, object], sidecar_sha256: str
 ) -> dict[str, object]:
-    if payload.get("schema_version") == 2:
-        import img_chunked_search
+    import img_chunked_search  # noqa: PLC0415  # Chunk helpers import this module.
 
-        return img_chunked_search.portable_provenance(payload, sidecar_sha256)
-    if len(sidecar_sha256) != 64 or any(
-        character not in "0123456789abcdef" for character in sidecar_sha256
-    ):
-        raise ValueError("sidecar_sha256 must be a lowercase SHA256 digest")
-    if (
-        payload.get("schema_version") != SCHEMA_VERSION
-        or payload.get("status") != STATUS
-        or payload.get("marker") not in {"16S", "18S"}
-    ):
-        raise ValueError("cannot make portable provenance from an invalid search payload")
-    files = payload.get("files")
-    blastn = payload.get("blastn")
-    if not isinstance(files, dict) or set(files) != set(FILE_KEYS):
-        raise ValueError("search payload has an invalid file binding")
-    if not isinstance(blastn, dict):
-        raise ValueError("search payload has an invalid BLAST contract")
-    hashes: dict[str, dict[str, str]] = {}
-    for name in FILE_KEYS:
-        record = files.get(name)
-        if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
-            raise ValueError(f"search payload has an invalid file record: {name}")
-        sha256 = record.get("sha256")
-        if (
-            not isinstance(sha256, str)
-            or len(sha256) != 64
-            or any(character not in "0123456789abcdef" for character in sha256)
-        ):
-            raise ValueError(f"search payload has an invalid file SHA256: {name}")
-        hashes[name] = {"sha256": sha256}
-    threads = blastn.get("threads")
-    max_targets = blastn.get("max_target_seqs")
-    if type(threads) is not int:
-        raise ValueError("search payload has an invalid BLAST thread contract")
-    _validate_marker_threads(str(payload["marker"]), threads)
-    if max_targets != MAX_TARGETS:
-        raise ValueError("search payload has an invalid max_target_seqs contract")
-    observed_argv = blastn.get("argv")
-    if not isinstance(observed_argv, list):
-        raise ValueError("search payload has an invalid BLAST argv contract")
-    normalized_argv = list(observed_argv)
-    portable_argv = blastn_argv(str(payload["marker"]), ".", ".", ".", threads)
-    path_roles = {
-        "-query": "@centroids_fasta",
-        "-db": "@curated_blast_database",
-        "-out": "@blast_m8",
-    }
-    for flag, role in path_roles.items():
-        if normalized_argv.count(flag) != 1 or portable_argv.count(flag) != 1:
-            raise ValueError("search payload has an invalid BLAST argv contract")
-        normalized_argv[normalized_argv.index(flag) + 1] = role
-        portable_argv[portable_argv.index(flag) + 1] = role
-    if normalized_argv != portable_argv:
-        raise ValueError("search payload has an invalid BLAST argv contract")
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "status": STATUS,
-        "marker": payload["marker"],
-        "sidecar_sha256": sidecar_sha256,
-        "files": hashes,
-        "blastn": {
-            "argv": portable_argv,
-            "max_target_seqs": MAX_TARGETS,
-            "threads": threads,
-        },
-    }
+    return img_chunked_search.portable_provenance(payload, sidecar_sha256)
 
 
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
@@ -359,16 +193,14 @@ def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="action", required=True)
-    for action in ("run", "validate"):
-        child = subparsers.add_parser(action)
-        _add_common_arguments(child)
+    child = subparsers.add_parser("validate")
+    _add_common_arguments(child)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    function = run_search if args.action == "run" else validate_search
-    payload = function(
+    payload = validate_search(
         args.marker,
         args.curated_profile,
         args.clusters,

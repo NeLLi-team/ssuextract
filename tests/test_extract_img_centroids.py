@@ -11,6 +11,25 @@ import extract_img_cluster_centroids as extractor
 
 
 class ExtractCentroidTests(unittest.TestCase):
+    def test_skips_clusters_without_img_members_even_when_centroid_is_missing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            clusters = root / "clusters.tsv"
+            fasta = root / "source.fna"
+            output = root / "centroids.fna"
+            clusters.write_text(
+                "cluster_id\tcentroid\tsequences\n"
+                "C1\tIMG_1\t['IMG_1']\n"
+                "C2\tmissing\t['REF_only']\n",
+                encoding="utf-8",
+            )
+            fasta.write_text(">IMG_1\nACGT\n", encoding="ascii")
+            report = extractor.extract_centroids(clusters, fasta, output)
+            self.assertEqual(report, {"clusters": 1, "centroids_written": 1})
+            self.assertEqual(output.read_text(encoding="ascii"), ">C1\nACGT\n")
+
     def test_extracts_exact_headers_and_uses_cluster_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -19,8 +38,8 @@ class ExtractCentroidTests(unittest.TestCase):
             output = root / "centroids.fna"
             clusters.write_text(
                 "cluster_id\tcentroid\tsequences\n"
-                "C2\tREF_two;Taxonomy\t[]\n"
-                "C1\tIMG_1\t[]\n"
+                "C2\tREF_two;Taxonomy\t['IMG_2']\n"
+                "C1\tIMG_1\t['IMG_1']\n"
             )
             fasta.write_text(
                 ">unused\nAAAA\n>REF_two;Taxonomy\naugu\n>IMG_1\nCCCC\n"
@@ -35,7 +54,9 @@ class ExtractCentroidTests(unittest.TestCase):
             root = Path(tmp)
             clusters = root / "clusters.tsv"
             fasta = root / "source.fna"
-            clusters.write_text("cluster_id\tcentroid\nC1\tmissing\n")
+            clusters.write_text(
+                "cluster_id\tcentroid\tsequences\nC1\tmissing\t['IMG_1']\n"
+            )
             fasta.write_text(">other\nAAAA\n")
             with self.assertRaisesRegex(ValueError, "missing FASTA sequence"):
                 extractor.extract_centroids(clusters, fasta, root / "out.fna")

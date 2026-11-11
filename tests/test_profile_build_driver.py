@@ -1,33 +1,250 @@
+import ast
 import csv
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
-import build_database_profiles as profiles
+import build_database_profiles as profiles  # noqa: E402  # Standalone scripts are loaded from the repository path.
+import build_database_release as builder  # noqa: E402  # Standalone scripts are loaded from the repository path.
+import classify_img_clusters as classifier  # noqa: E402  # Load repository scripts.
+import database_contracts as contracts  # noqa: E402  # Load repository scripts.
+import database_release_io as release_io  # noqa: E402  # Load repository scripts.
+import img_chunked_search as chunked  # noqa: E402  # Standalone scripts are loaded from the repository path.
+import img_classification_data as classification_data  # noqa: E402  # Standalone scripts are loaded from the repository path.
 
 
 def calibration_document(
     rank_caps: dict[str, int], strata: dict[str, dict[str, object]]
 ) -> dict[str, object]:
     return {
-        "schema_version": profiles.classifier.CALIBRATION_SCHEMA_VERSION,
+        "schema_version": classification_data.CALIBRATION_SCHEMA_VERSION,
         "status": "complete" if rank_caps else "failed",
         "calibration_use_case": "img_centroid",
         "stratum_basis": "predicted_candidate_source_and_lca_domain",
-        "classification_policy": profiles.classifier.classification_policy(),
+        "classification_policy": classification_data.classification_policy(),
         "rank_caps": rank_caps,
         "strata": strata,
     }
 
 
 class ProfileBuildDriverTests(unittest.TestCase):
+    def test_source_fingerprint_covers_driver_import_closure(self) -> None:
+        pending = [REPO / "scripts/build_database_profiles.py"]
+        closure = set()
+        while pending:
+            path = pending.pop()
+            if path in closure:
+                continue
+            closure.add(path)
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    modules = [node.module]
+                else:
+                    continue
+                pending.extend(
+                    candidate
+                    for module in modules
+                    if (candidate := REPO / "scripts" / f"{module}.py").is_file()
+                )
+        self.assertLessEqual(
+            {str(path.relative_to(REPO)) for path in closure},
+            set(profiles.SOURCE_TREE_FILES),
+        )
+
+    def test_git_provenance_rejects_missing_unknown_or_dirty_state(self) -> None:
+        clean_commit = subprocess.CompletedProcess([], 0, "a" * 40 + "\n", "")
+        clean_status = subprocess.CompletedProcess([], 0, "", "")
+        cases = (
+            [FileNotFoundError("git")],
+            [subprocess.CompletedProcess([], 0, "\n", ""), clean_status],
+            [clean_commit, subprocess.CalledProcessError(1, ["git", "status"])],
+            *(
+                [clean_commit, subprocess.CompletedProcess([], 0, status, "")]
+                for status in (
+                    " M tracked.txt\n",
+                    "M  tracked.txt\n",
+                    " D tracked.txt\n",
+                )
+            ),
+        )
+        for responses in cases:
+            with (
+                self.subTest(responses=responses),
+                mock.patch.object(profiles.subprocess, "run", side_effect=responses),
+                mock.patch.object(profiles, "_tool_version", return_value="test"),
+                self.assertRaisesRegex(Exception, "git|Git|dirty"),
+            ):
+                profiles._source_tree_provenance()
+        with (
+            mock.patch.object(
+                profiles.subprocess,
+                "run",
+                side_effect=[clean_commit, clean_status],
+            ) as run,
+            mock.patch.object(profiles, "_tool_version", return_value="test"),
+        ):
+            provenance = profiles._source_tree_provenance()
+        self.assertEqual(provenance["repository"]["commit"], "a" * 40)
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+        )
+        self.assertFalse(provenance["repository"]["tracked_worktree_dirty"])
+
+    def test_build_checks_destinations_and_version_before_source_loading(self) -> None:
+        for profile in ("curated", "img"):
+            for invalid in ("profile", "archive", "version"):
+                with (
+                    self.subTest(profile=profile, invalid=invalid),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    root = Path(temporary)
+                    args = profiles._parser().parse_args(
+                        [
+                            profile,
+                            "--source-directory",
+                            str(root / "sources"),
+                            "--output-root",
+                            str(root / "profiles"),
+                            "--archive-directory",
+                            str(root / "archives"),
+                        ]
+                    )
+                    if invalid == "profile":
+                        (args.output_root / profile).mkdir(parents=True)
+                    elif invalid == "archive":
+                        args.archive_directory.mkdir()
+                        (
+                            args.archive_directory
+                            / f"ssuextract-db-{profile}-v{args.version}.tar.zst"
+                        ).touch()
+                    else:
+                        args.version = "bad/version"
+                    build = (
+                        profiles.build_curated
+                        if profile == "curated"
+                        else profiles.build_img
+                    )
+                    with (
+                        mock.patch.object(profiles, "load_source_catalog") as load,
+                        self.assertRaisesRegex(
+                            Exception, "already exists|safe, non-empty"
+                        ),
+                    ):
+                        build(args)
+                    load.assert_not_called()
+
+    def test_location_corrections_only_include_released_taxa(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "metadata.tsv"
+            path.write_text(
+                "taxon_oid\tlatitude\tlongitude\n1\t999\t10\n2\t999\t10\n",
+                encoding="utf-8",
+            )
+            locations, corrections = profiles.read_img_locations(path, {"1"})
+        self.assertEqual([location.taxon_oid for location in locations], ["1"])
+        self.assertEqual([correction["taxon_oid"] for correction in corrections], ["1"])
+
+    def test_outcome_evidence_requires_classifier_identifier(self) -> None:
+        with self.assertRaisesRegex(Exception, "evidence_id"):
+            profiles._outcome_evidence_id({"classification_status": "unclassified"})
+
+    def test_unclassified_classifier_evidence_roundtrips_through_builder(self) -> None:
+        clusters = classification_data.parse_clusters(
+            [
+                "cluster_id\tcentroid\tsequences\n",
+                "C1\tIMG_1\t['IMG_1']\n",
+                "C2\tREF_A\t['REF_A']\n",
+            ]
+        )
+        assignments, outcomes, _ = classifier.classify_clusters(
+            clusters, (), {}, marker="16S"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            marker = root / "16S"
+            marker.mkdir()
+            path = marker / "assignments.tsv"
+            with path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=classifier.ASSIGNMENT_FIELDS,
+                    delimiter="\t",
+                    lineterminator="\n",
+                )
+                writer.writeheader()
+                writer.writerows(assignments)
+            (marker / "outcomes.jsonl").write_text(
+                "".join(json.dumps(outcome) + "\n" for outcome in outcomes),
+                encoding="utf-8",
+            )
+            mappings, metadata = profiles.create_img_evidence_catalog(
+                [path], root / "evidence.jsonl", {}
+            )
+            rows = list(profiles.read_assignment_rows([path], mappings))
+        self.assertEqual(metadata["records"], 2)
+        self.assertEqual(rows[0]["taxonomy"], "Unclassified")
+        self.assertEqual(rows[0]["marker"], "16S")
+
+    def test_curated_source_rebuild_matches_classification_reference(self) -> None:
+        reference = builder.build_deduplicated_model(
+            [
+                contracts.PreparedSourceRecord(
+                    "SILVA", "test", "ref", "ref", "ACGT", "16S", ("Bacteria",), "SILVA"
+                )
+            ]
+        )
+        other = builder.build_deduplicated_model(
+            [
+                contracts.PreparedSourceRecord(
+                    "SILVA", "test", "ref", "ref", "ACGA", "16S", ("Bacteria",), "SILVA"
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary)
+            (profile / "tables").mkdir()
+            release_io.write_sequences_parquet(
+                profile / "tables/sequences.parquet", reference.sequences
+            )
+            profiles.validate_curated_sequences(reference, profile)
+            with self.assertRaisesRegex(Exception, "curated.*sequences"):
+                profiles.validate_curated_sequences(other, profile)
+
+    def test_curated_source_filter_counts_reach_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = {
+                "silva_ssu_nr99_fasta": root / "silva.fasta",
+                "silva_ssu_taxonomy": root / "silva.tsv",
+                "pr2_ssu_fasta": root / "pr2.fasta",
+            }
+            paths["silva_ssu_nr99_fasta"].write_text(
+                ">S1.1.4 Bacteria;Firmicutes;\nACGT\n>E1.1.4 Eukaryota;TSAR;\nACGA\n",
+                encoding="utf-8",
+            )
+            paths["silva_ssu_taxonomy"].write_text(
+                "Bacteria;\t2\tdomain\n", encoding="utf-8"
+            )
+            paths["pr2_ssu_fasta"].write_text(
+                ">P1.1.4_U|18S_rRNA|nucleus|9|Eukaryota|TSAR|D|S|C|O|F|G|Species\nACGG\n",
+                encoding="utf-8",
+            )
+            catalog = {"sources": {name: {"version": "test"} for name in paths}}
+            skipped = {}
+            list(profiles.iter_curated_records(paths, catalog, skipped))
+        self.assertEqual(skipped, {"silva_ssu_nr99_fasta": 1, "pr2_ssu_fasta": 0})
+
     def test_default_profile_version_tracks_taxonomy_policy_repair(self) -> None:
         args = profiles._parser().parse_args(
             [
@@ -49,7 +266,20 @@ class ProfileBuildDriverTests(unittest.TestCase):
             profile = root / "curated"
             (profile / "tables").mkdir(parents=True)
             (profile / "blast").mkdir()
-            (profile / "manifest.json").write_text("{}\n", encoding="utf-8")
+            artifacts = []
+            for suffix in ("nhr", "nin", "nsq"):
+                artifact = profile / "blast" / f"16S.{suffix}"
+                artifact.write_bytes(b"blast fixture")
+                artifacts.append(
+                    {
+                        "path": f"blast/16S.{suffix}",
+                        "bytes": artifact.stat().st_size,
+                        "sha256": profiles._sha256(artifact),
+                    }
+                )
+            (profile / "manifest.json").write_text(
+                json.dumps({"artifacts": artifacts}), encoding="utf-8"
+            )
             (profile / "tables/preferred_taxonomy.parquet").write_bytes(b"PAR1tax")
             clusters = root / "clusters.tsv"
             source_fasta = root / "source.fna"
@@ -66,26 +296,42 @@ class ProfileBuildDriverTests(unittest.TestCase):
             blast.write_text("0\tref\t100\t4\t4\t4\t100\t8\n")
             assignments.write_text("source_identifier\n", encoding="utf-8")
             outcomes.write_text("{}\n", encoding="utf-8")
-            raw_search = profiles.img_search_provenance._payload(
-                "16S", profile, clusters, source_fasta, centroids, blast, 8
-            )
-            sidecar.write_text(
-                json.dumps(raw_search, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            portable = profiles.validate_classification_search(
-                assignments,
-                "16S",
-                profile,
-                clusters,
-                source_fasta,
-            )
+            chunk_directory = marker / "chunks"
+            chunked.prepare_chunks("16S", centroids, chunk_directory, 1)
+            tool = {"path": "/fake/blastn", "version": "test", "sha256": "a" * 64}
+
+            def fake_blastn(command: list[str], *, check: bool) -> None:
+                self.assertTrue(check)
+                Path(command[command.index("-out") + 1]).write_text(
+                    "0\tref\t100\t4\t4\t4\t100\t8\n", encoding="ascii"
+                )
+
+            with (
+                mock.patch.object(chunked, "_blastn_tool", return_value=tool),
+                mock.patch.object(chunked.subprocess, "run", side_effect=fake_blastn),
+            ):
+                chunked.run_chunk("16S", profile, centroids, chunk_directory, 0, 8)
+                chunked.finalize_search(
+                    "16S",
+                    profile,
+                    clusters,
+                    source_fasta,
+                    centroids,
+                    blast,
+                    sidecar,
+                    chunk_directory,
+                    8,
+                )
+            with mock.patch.object(chunked, "_blastn_tool", return_value=tool):
+                portable = profiles.validate_classification_search(
+                    assignments, "16S", profile, clusters, source_fasta
+                )
             binding = {
                 "schema_version": 1,
                 "calibration": {"sha256": "a" * 64, "schema_version": 3},
                 "marker": "16S",
                 "propagation_rank_cap": 0,
-                "policy": profiles.classifier.classification_policy(),
+                "policy": classification_data.classification_policy(),
                 "outputs": {
                     "assignments_tsv": {"sha256": profiles._sha256(assignments)},
                     "outcomes_jsonl": {"sha256": profiles._sha256(outcomes)},
@@ -103,7 +349,10 @@ class ProfileBuildDriverTests(unittest.TestCase):
             )
             self.assertNotIn("path", json.dumps(portable, sort_keys=True))
             blast.write_text("tampered\n", encoding="utf-8")
-            with self.assertRaisesRegex(Exception, "blast_m8"):
+            with (
+                mock.patch.object(chunked, "_blastn_tool", return_value=tool),
+                self.assertRaisesRegex(Exception, "ordered chunk concatenation"),
+            ):
                 profiles.validate_classification_search(
                     assignments,
                     "16S",
@@ -152,7 +401,7 @@ class ProfileBuildDriverTests(unittest.TestCase):
         )
         self.assertEqual(
             provenance["classification_policy"],
-            profiles.classifier.classification_policy(),
+            classification_data.classification_policy(),
         )
         self.assertEqual(provenance["rank_caps"], {calibrated_key: 6})
         self.assertEqual(provenance["strata"], strata)
@@ -238,12 +487,14 @@ class ProfileBuildDriverTests(unittest.TestCase):
             "sha256": "a" * 64,
             "schema_version": 3,
         }
+        search = {"schema_version": 2}
         expected = {
+            "search_provenance": search,
             "schema_version": 1,
             "calibration": {"sha256": "a" * 64, "schema_version": 3},
             "marker": "16S",
             "propagation_rank_cap": 0,
-            "policy": profiles.classifier.classification_policy(),
+            "policy": classification_data.classification_policy(),
         }
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "16S"
@@ -261,22 +512,30 @@ class ProfileBuildDriverTests(unittest.TestCase):
                 },
             }
             with self.assertRaisesRegex(Exception, "classification QC"):
-                profiles.validate_classification_qc(assignment, "16S", calibration)
+                profiles.validate_classification_qc(
+                    assignment, "16S", calibration, search
+                )
             qc_path = marker / "qc.json"
             qc_path.write_text(
                 json.dumps({"classification_binding": expected}), encoding="utf-8"
             )
             self.assertEqual(
-                profiles.validate_classification_qc(assignment, "16S", calibration),
+                profiles.validate_classification_qc(
+                    assignment, "16S", calibration, search
+                ),
                 qc_path,
             )
             assignment.write_text("substituted\n", encoding="utf-8")
             with self.assertRaisesRegex(Exception, "does not match"):
-                profiles.validate_classification_qc(assignment, "16S", calibration)
+                profiles.validate_classification_qc(
+                    assignment, "16S", calibration, search
+                )
             assignment.write_text("source_identifier\n", encoding="utf-8")
             outcomes.write_text('{"substituted":true}\n', encoding="utf-8")
             with self.assertRaisesRegex(Exception, "does not match"):
-                profiles.validate_classification_qc(assignment, "16S", calibration)
+                profiles.validate_classification_qc(
+                    assignment, "16S", calibration, search
+                )
             outcomes.write_text("{}\n", encoding="utf-8")
             mutations = (
                 (
@@ -311,7 +570,7 @@ class ProfileBuildDriverTests(unittest.TestCase):
                     )
                     with self.assertRaisesRegex(Exception, "does not match"):
                         profiles.validate_classification_qc(
-                            assignment, "16S", calibration
+                            assignment, "16S", calibration, search
                         )
 
     def test_evidence_catalog_rejects_classified_failed_or_wrong_cap_outcomes(self) -> None:
@@ -392,9 +651,7 @@ class ProfileBuildDriverTests(unittest.TestCase):
                     "taxonomy_source": "PR2",
                 }
             ],
-            "failed_calibration_strata": [
-                {"key": key, "reason": "forged_reason"}
-            ],
+            "failed_calibration_strata": [{"key": key, "reason": "forged_reason"}],
             "evidence_id": "IMGEV_" + "a" * 64,
         }
         calibration = {
@@ -490,8 +747,11 @@ class ProfileBuildDriverTests(unittest.TestCase):
 
     def test_assignment_reader_requires_builder_contract_and_streams_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "assignments.tsv"
+            path = Path(tmp) / "16S" / "assignments.tsv"
+            path.parent.mkdir()
             fields = [
+                "marker",
+                "evidence_id",
                 "source_identifier",
                 "taxonomy",
                 "taxonomy_source",
@@ -508,11 +768,13 @@ class ProfileBuildDriverTests(unittest.TestCase):
                 writer.writeheader()
                 writer.writerow(
                     {
+                        "evidence_id": "old-id",
+                        "marker": "16S",
                         "source_identifier": "IMG_1",
                         "taxonomy": "Unclassified",
                         "taxonomy_source": "SILVA+PR2",
                         "assignment_method": "updated_reference_unclassified",
-                        "evidence": "no hit",
+                        "evidence": "no hit old-id",
                         "compartment": "",
                         "centroid": "centroid-1",
                         "centroid_name": "centroid-1",
@@ -520,7 +782,31 @@ class ProfileBuildDriverTests(unittest.TestCase):
                         "centroid_taxonomy_source": "",
                     }
                 )
-            rows = list(profiles.read_assignment_rows([path]))
+            resolution = {
+                "evidence_id": "new-id",
+                "taxonomy": "Unclassified",
+                "taxonomy_source": "SILVA+PR2",
+                "assignment_method": "updated_reference_unclassified",
+                "compartment": "",
+                "centroid": "centroid-1",
+                "centroid_name": "centroid-1",
+                "centroid_taxonomy": "",
+                "centroid_taxonomy_source": "",
+            }
+            rows = list(
+                profiles.read_assignment_rows(
+                    [path], {path.resolve(): {"old-id": resolution}}
+                )
+            )
+            path.write_text(
+                path.read_text(encoding="utf-8").replace("16S", "18S"), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(Exception, "marker"):
+                list(
+                    profiles.read_assignment_rows(
+                        [path], {path.resolve(): {"old-id": resolution}}
+                    )
+                )
         self.assertEqual(rows[0]["source_identifier"], "IMG_1")
 
     def test_provenance_marks_cluster_inputs_as_build_only(self) -> None:
@@ -540,12 +826,23 @@ class ProfileBuildDriverTests(unittest.TestCase):
                 for name in profiles.IMG_SOURCE_NAMES
             },
         }
-        details = profiles._provenance_details(
-            catalog,
-            profiles.IMG_SOURCE_NAMES,
-            "img",
-            [{"action": "dropped_invalid_pair"}],
-        )
+        with (
+            mock.patch.object(
+                profiles.subprocess,
+                "run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, "a" * 40, ""),
+                    subprocess.CompletedProcess([], 0, "", ""),
+                ],
+            ),
+            mock.patch.object(profiles, "_tool_version", return_value="test"),
+        ):
+            details = profiles._provenance_details(
+                catalog,
+                profiles.IMG_SOURCE_NAMES,
+                "img",
+                [{"action": "dropped_invalid_pair"}],
+            )
         self.assertFalse(details["cluster_tables_packaged"])
         self.assertFalse(details["embedded_reference_records_retained"])
         self.assertEqual(
@@ -603,6 +900,7 @@ class ProfileBuildDriverTests(unittest.TestCase):
             )
             assignments = marker / "assignments.tsv"
             fields = [
+                "marker",
                 "source_identifier",
                 "taxonomy",
                 "taxonomy_source",
@@ -620,6 +918,7 @@ class ProfileBuildDriverTests(unittest.TestCase):
                 writer.writeheader()
                 writer.writerow(
                     {
+                        "marker": "16S",
                         "source_identifier": "IMG_1",
                         "taxonomy": "Bacteria",
                         "taxonomy_source": "SILVA",

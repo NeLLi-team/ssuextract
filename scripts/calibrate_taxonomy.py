@@ -21,8 +21,8 @@ import duckdb
 
 import classify_img_clusters as classifier
 import database_manager as manager
+import img_classification_data as img_data
 from atomic_io import replace_and_fsync
-
 
 RANKS = {
     "SILVA": ("domain", "phylum", "class", "order", "family", "genus"),
@@ -41,7 +41,7 @@ RANKS = {
 MIN_CALIBRATION_CALLS = 100
 HIGHER_RANK_MIN_PRECISION = 0.95
 GENUS_MIN_PRECISION = 0.98
-CALIBRATION_FETCH_TARGETS = classifier.BLAST_FETCH_TARGETS + 1
+CALIBRATION_FETCH_TARGETS = img_data.BLAST_FETCH_TARGETS + 1
 SEARCH_PROVENANCE_NAME = "search_provenance.json"
 SEARCH_PROVENANCE_SCHEMA_VERSION = 1
 
@@ -50,7 +50,6 @@ SEARCH_PROVENANCE_SCHEMA_VERSION = 1
 class CalibrationPrediction:
     taxonomy: tuple[str, ...]
     candidate_sources: tuple[str, ...]
-    candidate_count: int
     truncated: bool
     species_guard_applied: bool
 
@@ -272,7 +271,7 @@ def _validate_complete_blast_results(
     if not blast_output.is_file() or blast_output.stat().st_size == 0:
         raise RuntimeError(f"{context} {marker}: BLAST output is missing or empty")
     with blast_output.open(encoding="utf-8") as handle:
-        retained_hits = classifier.parse_blast_hits(handle)
+        retained_hits = dict(img_data.parse_blast_hits(handle))
     expected = {row["sequence_id"] for row in marker_rows}
     observed = set(retained_hits)
     missing_queries = sorted(expected - observed)
@@ -422,17 +421,10 @@ def _write_queries(
     rows: Sequence[Mapping[str, str]],
     threads: int,
     *,
-    reuse_existing_blast: bool = False,
     reuse_blast_directory: str | Path | None = None,
 ) -> dict[str, Path]:
-    if reuse_existing_blast and reuse_blast_directory is not None:
-        raise ValueError(
-            "reuse_existing_blast and reuse_blast_directory are mutually exclusive"
-        )
     retained_root = (
-        Path(reuse_blast_directory)
-        if reuse_blast_directory is not None
-        else output if reuse_existing_blast else None
+        Path(reuse_blast_directory) if reuse_blast_directory is not None else None
     )
     by_marker: dict[str, list[Mapping[str, str]]] = defaultdict(list)
     for row in rows:
@@ -493,13 +485,13 @@ def wilson_lower_bound(correct: int, total: int, z: float = 1.959963984540054) -
 
 def _prediction(
     query: str,
-    hits: Sequence[classifier.BlastHit],
-    taxonomy: Mapping[str, classifier.TaxonomyRecord],
+    hits: Sequence[img_data.BlastHit],
+    taxonomy: Mapping[str, img_data.TaxonomyRecord],
 ) -> CalibrationPrediction:
     non_self = [hit for hit in hits if hit.subject != query]
     eligible, threshold, candidates = classifier.select_candidate_hits(non_self)
     if not eligible:
-        return CalibrationPrediction((), (), 0, False, False)
+        return CalibrationPrediction((), (), False, False)
     assert threshold is not None
     missing_subjects = sorted(
         {hit.subject for hit in candidates if hit.subject not in taxonomy}
@@ -514,20 +506,19 @@ def _prediction(
     records = [taxonomy[hit.subject] for hit in candidates]
     sources = tuple(sorted({record.taxonomy_source for record in records}))
     if any(record.cross_domain_conflict for record in records):
-        return CalibrationPrediction((), sources, len(candidates), False, False)
+        return CalibrationPrediction((), sources, False, False)
     prediction, truncated, _exact, species_guard_applied = (
         classifier.resolve_candidate_taxonomy(
             non_self,
             candidates,
             records,
             threshold,
-            max_targets=classifier.BLAST_MAX_TARGETS,
+            max_targets=img_data.BLAST_MAX_TARGETS,
         )
     )
     return CalibrationPrediction(
         prediction,
         sources,
-        len(candidates),
         truncated,
         species_guard_applied,
     )
@@ -538,7 +529,7 @@ def evaluate_calibration(
     rows: Sequence[Mapping[str, str]],
     blast_outputs: Mapping[str, Path],
     *,
-    samples_per_stratum_requested: int | None = None,
+    samples_per_stratum_requested: int,
 ) -> dict[str, object]:
     if not rows:
         raise RuntimeError("calibration selected no rows")
@@ -547,12 +538,12 @@ def evaluate_calibration(
     all_subjects: set[str] = set()
     for marker, path in blast_outputs.items():
         with path.open(encoding="utf-8") as handle:
-            marker_hits = classifier.parse_blast_hits(handle)
+            marker_hits = dict(img_data.parse_blast_hits(handle))
         hits_by_marker[marker] = marker_hits
         all_subjects.update(
             hit.subject for hits in marker_hits.values() for hit in hits
         )
-    taxonomy = classifier.load_taxonomy(
+    taxonomy = img_data.load_taxonomy(
         profile / "tables" / "preferred_taxonomy.parquet", all_subjects
     )
 
@@ -701,19 +692,14 @@ def evaluate_calibration(
             "reason": reason,
             "metrics": stratum_metrics,
         }
-    requested = (
-        samples_per_stratum_requested
-        if samples_per_stratum_requested is not None
-        else max(true_stratum_counts.values())
-    )
     return {
-        "schema_version": classifier.CALIBRATION_SCHEMA_VERSION,
+        "schema_version": img_data.CALIBRATION_SCHEMA_VERSION,
         "status": "complete" if rank_caps else "failed",
-        "calibration_use_case": classifier.CALIBRATION_USE_CASE,
-        "stratum_basis": classifier.CALIBRATION_STRATUM_BASIS,
-        "classification_policy": classifier.classification_policy(),
+        "calibration_use_case": img_data.CALIBRATION_USE_CASE,
+        "stratum_basis": img_data.CALIBRATION_STRATUM_BASIS,
+        "classification_policy": img_data.classification_policy(),
         "method": "deterministic_leave_one_reference_out",
-        "samples_per_stratum_requested": requested,
+        "samples_per_stratum_requested": samples_per_stratum_requested,
         "minimum_calls": MIN_CALIBRATION_CALLS,
         "higher_rank_minimum_wilson_95_lower": HIGHER_RANK_MIN_PRECISION,
         "genus_minimum_wilson_95_lower": GENUS_MIN_PRECISION,
@@ -746,7 +732,6 @@ def run_calibration(
     samples_per_stratum: int,
     threads: int,
     *,
-    reuse_existing_blast: bool = False,
     reuse_blast_directory: str | Path | None = None,
 ) -> dict[str, object]:
     if threads < 1:
@@ -763,7 +748,6 @@ def run_calibration(
         output,
         rows,
         threads,
-        reuse_existing_blast=reuse_existing_blast,
         reuse_blast_directory=reuse_blast_directory,
     )
     result = evaluate_calibration(
@@ -784,6 +768,7 @@ def run_calibration(
             "scripts/calibrate_taxonomy.py",
             "scripts/classify_img_clusters.py",
             "scripts/img_classification_data.py",
+            "scripts/taxonomy_utils.py",
         )
     }
     result["search_bindings"] = {}
@@ -808,14 +793,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--samples-per-stratum", type=int, default=1000)
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument(
-        "--reuse-existing-blast",
-        action="store_true",
-        help=(
-            "reuse retained leave_one_out.m8 only after validating deterministic "
-            "IDs/truth, regenerated query FASTA, exact query coverage, and self hits"
-        ),
-    )
-    parser.add_argument(
         "--reuse-blast-directory",
         type=Path,
         help=(
@@ -833,11 +810,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.output,
         args.samples_per_stratum,
         args.threads,
-        reuse_existing_blast=args.reuse_existing_blast,
         reuse_blast_directory=args.reuse_blast_directory,
     )
     print(json.dumps({"rank_caps": result["rank_caps"]}, sort_keys=True))
-    return 0
+    return 0 if result["status"] == "complete" else 1
 
 
 if __name__ == "__main__":

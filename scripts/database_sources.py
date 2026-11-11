@@ -72,13 +72,6 @@ def load_source_config(path: str | Path = DEFAULT_SOURCES) -> dict[str, dict[str
     return sources
 
 
-def _new_md5():
-    try:
-        return hashlib.md5(usedforsecurity=False)
-    except TypeError:  # pragma: no cover - Python builds without this keyword
-        return hashlib.md5()
-
-
 def validate_artifact(path: Path, source: Mapping[str, object]) -> None:
     expected_size = source.get("bytes")
     if not isinstance(expected_size, int) or expected_size < 0:
@@ -90,7 +83,7 @@ def validate_artifact(path: Path, source: Mapping[str, object]) -> None:
         )
 
     sha256 = hashlib.sha256()
-    md5 = _new_md5()
+    md5 = hashlib.md5(usedforsecurity=False)
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             sha256.update(chunk)
@@ -325,7 +318,10 @@ def normalize_pr2_taxonomy(
 def parse_silva_header(header: str) -> SilvaHeader:
     text = header[1:] if header.startswith(">") else header
     source_identifier, separator, lineage = text.partition(" ")
-    taxonomy = tuple(part.strip() for part in lineage.split(";") if part.strip())
+    try:
+        taxonomy = taxonomy_path(lineage)
+    except ValueError as error:
+        raise TaxonomyError(str(error)) from error
     if not source_identifier or not separator or not taxonomy:
         raise TaxonomyError("SILVA header must contain an identifier and semicolon taxonomy")
     accession, start, end = _parse_accession_coordinates(source_identifier)
@@ -347,7 +343,12 @@ def parse_silva_rank_table(lines: Iterable[str]) -> dict[str, str]:
         fields = line.split("\t")
         if len(fields) < 3:
             raise TaxonomyError(f"Malformed SILVA taxonomy row {line_number}")
-        path = ";".join(part.strip() for part in fields[0].strip(";").split(";") if part.strip())
+        try:
+            path = ";".join(taxonomy_path(fields[0]))
+        except ValueError as error:
+            raise TaxonomyError(
+                f"Invalid SILVA taxonomy row {line_number}: {error}"
+            ) from error
         rank = fields[2].strip().lower()
         if not path or not rank:
             raise TaxonomyError(f"Malformed SILVA taxonomy row {line_number}")
@@ -363,11 +364,10 @@ def rank_silva_prokaryotic_path(
 ) -> tuple[str, ...]:
     """Project a SILVA lineage onto domain/phylum/class/order/family/genus."""
 
-    lineage = (
-        tuple(part.strip() for part in taxonomy.split(";") if part.strip())
-        if isinstance(taxonomy, str)
-        else tuple(str(part).strip() for part in taxonomy if str(part).strip())
-    )
+    try:
+        lineage = taxonomy_path(taxonomy)
+    except ValueError as error:
+        raise TaxonomyError(str(error)) from error
     if not lineage or lineage[0] not in PROKARYOTIC_DOMAINS:
         raise TaxonomyError("SILVA prokaryotic taxonomy must begin with Bacteria or Archaea")
     values = {rank: "" for rank in SILVA_PROKARYOTIC_RANKS}
@@ -396,6 +396,7 @@ def iter_curated_silva_records(
     rank_table_path: str | Path,
     *,
     source_version: str,
+    skipped_counts: dict[str, int],
 ) -> Iterator[PreparedSourceRecord]:
     """Yield rank-normalized bacterial and archaeal SILVA SSU records."""
 
@@ -403,6 +404,7 @@ def iter_curated_silva_records(
     for record in iter_fasta(fasta_path):
         header = parse_silva_header(record.header)
         if not include_silva_header(header):
+            skipped_counts["SILVA"] = skipped_counts.get("SILVA", 0) + 1
             continue
         yield PreparedSourceRecord(
             reference_source="SILVA",
@@ -418,7 +420,10 @@ def iter_curated_silva_records(
 
 
 def iter_curated_pr2_records(
-    fasta_path: str | Path, *, source_version: str
+    fasta_path: str | Path,
+    *,
+    source_version: str,
+    skipped_counts: dict[str, int],
 ) -> Iterator[PreparedSourceRecord]:
     """Yield PR2 eukaryotic and organellar SSU records with fixed-rank taxonomy."""
 
@@ -426,6 +431,7 @@ def iter_curated_pr2_records(
     for record in iter_fasta(fasta_path):
         header = parse_pr2_header(record.header)
         if not include_pr2_header(header):
+            skipped_counts["PR2"] = skipped_counts.get("PR2", 0) + 1
             continue
         try:
             marker = marker_by_gene[header.gene]
@@ -458,7 +464,11 @@ def parse_img_identifier(header: str) -> ImgIdentifier:
 
 
 def iter_img_records(
-    fasta_path: str | Path, marker: str, *, source_version: str
+    fasta_path: str | Path,
+    marker: str,
+    *,
+    source_version: str,
+    skipped_counts: dict[str, int],
 ) -> Iterator[PreparedSourceRecord]:
     """Yield only IMG records, excluding every embedded legacy reference record."""
 
@@ -466,6 +476,7 @@ def iter_img_records(
         raise TaxonomyError(f"Unsupported IMG marker: {marker}")
     for record in iter_fasta(fasta_path):
         if not record.header.startswith("IMG_"):
+            skipped_counts["IMG"] = skipped_counts.get("IMG", 0) + 1
             continue
         parsed = parse_img_identifier(record.header)
         yield PreparedSourceRecord(
@@ -513,7 +524,7 @@ def clean_img_metadata_row(
     """Return only the privacy-reviewed IMG location allowlist."""
 
     normalized = {str(key).strip().lower(): value for key, value in row.items()}
-    oid_value = normalized.get("taxon_oid", normalized.get("img genome id"))
+    oid_value = normalized.get("taxon_oid")
     oid = "" if oid_value is None else str(oid_value).strip()
     if not oid.isdigit():
         raise ReleaseValidationError(f"IMG taxon_oid must contain only digits: {oid!r}")

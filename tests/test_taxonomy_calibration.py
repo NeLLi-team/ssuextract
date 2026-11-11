@@ -1,3 +1,6 @@
+import contextlib
+import hashlib
+import io
 import json
 import os
 import sys
@@ -9,12 +12,11 @@ from unittest import mock
 
 import duckdb
 
-
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import calibrate_taxonomy as calibration
-import classify_img_clusters as classifier
+import img_classification_data as img_data  # noqa: E402  # Scripts need the path above.
 
 
 class CalibrationMathTests(unittest.TestCase):
@@ -24,8 +26,8 @@ class CalibrationMathTests(unittest.TestCase):
         self.assertEqual(calibration.wilson_lower_bound(0, 0), 0.0)
 
     def test_self_hit_is_additional_to_overflow_sentinel(self) -> None:
-        def hit(subject: str) -> classifier.BlastHit:
-            return classifier.BlastHit(
+        def hit(subject: str) -> img_data.BlastHit:
+            return img_data.BlastHit(
                 query="query",
                 subject=subject,
                 percent_identity=Decimal("100"),
@@ -37,15 +39,16 @@ class CalibrationMathTests(unittest.TestCase):
             )
 
         taxonomy = {
-            f"ref-{index}": classifier.TaxonomyRecord(
+            f"ref-{index}": img_data.TaxonomyRecord(
                 ("Bacteria", "Firmicutes"), "SILVA", "Bacteria", ""
             )
-            for index in range(classifier.BLAST_MAX_TARGETS + 1)
+            for index in range(img_data.BLAST_MAX_TARGETS + 1)
         }
-        exactly_at_policy = [hit("query")] + [
-            hit(f"ref-{index}") for index in range(classifier.BLAST_MAX_TARGETS)
+        exactly_at_policy = [
+            hit("query"),
+            *(hit(f"ref-{index}") for index in range(img_data.BLAST_MAX_TARGETS)),
         ]
-        overflow = exactly_at_policy + [hit(f"ref-{classifier.BLAST_MAX_TARGETS}")]
+        overflow = [*exactly_at_policy, hit(f"ref-{img_data.BLAST_MAX_TARGETS}")]
 
         self.assertEqual(
             calibration._prediction("query", exactly_at_policy, taxonomy).taxonomy,
@@ -60,8 +63,8 @@ class CalibrationMathTests(unittest.TestCase):
     def test_low_coverage_raw_overflow_sentinel_still_backs_off(self) -> None:
         def hit(
             subject: str, query_coverage: Decimal = Decimal("100")
-        ) -> classifier.BlastHit:
-            return classifier.BlastHit(
+        ) -> img_data.BlastHit:
+            return img_data.BlastHit(
                 query="query",
                 subject=subject,
                 percent_identity=Decimal("100"),
@@ -73,14 +76,16 @@ class CalibrationMathTests(unittest.TestCase):
             )
 
         taxonomy = {
-            f"ref-{index}": classifier.TaxonomyRecord(
+            f"ref-{index}": img_data.TaxonomyRecord(
                 ("Bacteria", "Firmicutes"), "SILVA", "Bacteria", ""
             )
-            for index in range(classifier.BLAST_MAX_TARGETS)
+            for index in range(img_data.BLAST_MAX_TARGETS)
         }
-        raw_hits = [hit("query")] + [
-            hit(f"ref-{index}") for index in range(classifier.BLAST_MAX_TARGETS)
-        ] + [hit("low-coverage-sentinel", Decimal("79.99"))]
+        raw_hits = (
+            [hit("query")]
+            + [hit(f"ref-{index}") for index in range(img_data.BLAST_MAX_TARGETS)]
+            + [hit("low-coverage-sentinel", Decimal("79.99"))]
+        )
 
         self.assertEqual(
             calibration._prediction("query", raw_hits, taxonomy).taxonomy,
@@ -88,7 +93,7 @@ class CalibrationMathTests(unittest.TestCase):
         )
 
     def test_prediction_reports_missing_subject_taxonomy(self) -> None:
-        hit = classifier.BlastHit(
+        hit = img_data.BlastHit(
             query="query",
             subject="missing-reference",
             percent_identity=Decimal("99"),
@@ -104,7 +109,7 @@ class CalibrationMathTests(unittest.TestCase):
             calibration._prediction("query", [hit], {})
 
     def test_prediction_uses_the_classifier_species_guard(self) -> None:
-        hit = classifier.BlastHit(
+        hit = img_data.BlastHit(
             query="query",
             subject="reference",
             percent_identity=Decimal("99"),
@@ -129,7 +134,7 @@ class CalibrationMathTests(unittest.TestCase):
             "query",
             [hit],
             {
-                "reference": classifier.TaxonomyRecord(
+                "reference": img_data.TaxonomyRecord(
                     species, "PR2", "Eukaryota", "nucleus"
                 )
             },
@@ -227,9 +232,13 @@ class CalibrationSelectionTests(unittest.TestCase):
 
 
 class CalibrationSchemaTests(unittest.TestCase):
+    def test_requested_sample_count_is_required(self) -> None:
+        with self.assertRaisesRegex(TypeError, "samples_per_stratum_requested"):
+            calibration.evaluate_calibration("unused", [], {})
+
     @staticmethod
-    def _hit(query: str, subject: str) -> classifier.BlastHit:
-        return classifier.BlastHit(
+    def _hit(query: str, subject: str) -> img_data.BlastHit:
+        return img_data.BlastHit(
             query=query,
             subject=subject,
             percent_identity=Decimal("99"),
@@ -272,10 +281,10 @@ class CalibrationSchemaTests(unittest.TestCase):
             }
         )
         taxonomy = {
-            "pass-reference": classifier.TaxonomyRecord(
+            "pass-reference": img_data.TaxonomyRecord(
                 ("Bacteria", "Firmicutes"), "SILVA", "Bacteria", ""
             ),
-            "bad-reference": classifier.TaxonomyRecord(
+            "bad-reference": img_data.TaxonomyRecord(
                 ("Bacteria", "Firmicutes"), "SILVA", "Bacteria", ""
             ),
         }
@@ -284,8 +293,8 @@ class CalibrationSchemaTests(unittest.TestCase):
             blast_output = Path(temporary) / "leave_one_out.m8"
             blast_output.touch()
             with (
-                mock.patch.object(classifier, "parse_blast_hits", return_value=hits),
-                mock.patch.object(classifier, "load_taxonomy", return_value=taxonomy),
+                mock.patch.object(img_data, "parse_blast_hits", return_value=hits),
+                mock.patch.object(img_data, "load_taxonomy", return_value=taxonomy),
             ):
                 result = calibration.evaluate_calibration(
                     temporary,
@@ -303,7 +312,9 @@ class CalibrationSchemaTests(unittest.TestCase):
             result["stratum_basis"],
             "predicted_candidate_source_and_lca_domain",
         )
-        self.assertEqual(result["classification_policy"], classifier.classification_policy())
+        self.assertEqual(
+            result["classification_policy"], img_data.classification_policy()
+        )
         self.assertEqual(result["samples_per_stratum_requested"], 777)
         self.assertEqual(result["rank_caps"], {})
         self.assertEqual(result["strata"][bacterial_route]["status"], "failed")
@@ -346,7 +357,7 @@ class CalibrationSchemaTests(unittest.TestCase):
             for row in rows
         }
         taxonomy = {
-            "reference": classifier.TaxonomyRecord(
+            "reference": img_data.TaxonomyRecord(
                 ("Bacteria", "Firmicutes"), "SILVA", "Bacteria", ""
             )
         }
@@ -354,11 +365,14 @@ class CalibrationSchemaTests(unittest.TestCase):
             blast_output = Path(temporary) / "leave_one_out.m8"
             blast_output.touch()
             with (
-                mock.patch.object(classifier, "parse_blast_hits", return_value=hits),
-                mock.patch.object(classifier, "load_taxonomy", return_value=taxonomy),
+                mock.patch.object(img_data, "parse_blast_hits", return_value=hits),
+                mock.patch.object(img_data, "load_taxonomy", return_value=taxonomy),
             ):
                 result = calibration.evaluate_calibration(
-                    temporary, rows, {"16S": blast_output}
+                    temporary,
+                    rows,
+                    {"16S": blast_output},
+                    samples_per_stratum_requested=100,
                 )
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["rank_caps"], {"16S|SILVA|Bacteria": 1})
@@ -378,22 +392,25 @@ class CalibrationSchemaTests(unittest.TestCase):
             )
         }
         taxonomy = {
-            "pr2-reference": classifier.TaxonomyRecord(
+            "pr2-reference": img_data.TaxonomyRecord(
                 ("Eukaryota", "TSAR"), "PR2", "Eukaryota", ""
             ),
-            "silva-reference": classifier.TaxonomyRecord(
+            "silva-reference": img_data.TaxonomyRecord(
                 ("Eukaryota", "TSAR"), "SILVA", "Eukaryota", ""
-            )
+            ),
         }
         with tempfile.TemporaryDirectory() as temporary:
             blast_output = Path(temporary) / "leave_one_out.m8"
             blast_output.touch()
             with (
-                mock.patch.object(classifier, "parse_blast_hits", return_value=hits),
-                mock.patch.object(classifier, "load_taxonomy", return_value=taxonomy),
+                mock.patch.object(img_data, "parse_blast_hits", return_value=hits),
+                mock.patch.object(img_data, "load_taxonomy", return_value=taxonomy),
             ):
                 result = calibration.evaluate_calibration(
-                    temporary, [row], {"18S": blast_output}
+                    temporary,
+                    [row],
+                    {"18S": blast_output},
+                    samples_per_stratum_requested=100,
                 )
         route_metrics = result["strata"]["18S|SILVA|Eukaryota"]["metrics"]
         pr2_metrics = result["strata"]["18S|PR2|Eukaryota"]["metrics"]
@@ -409,7 +426,9 @@ class CalibrationSchemaTests(unittest.TestCase):
 
     def test_no_rows_is_fatal_but_all_failed_returns_an_artifact(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "selected no rows"):
-            calibration.evaluate_calibration("unused", [], {})
+            calibration.evaluate_calibration(
+                "unused", [], {}, samples_per_stratum_requested=100
+            )
 
         row = {
             "sequence_id": "fail",
@@ -422,17 +441,93 @@ class CalibrationSchemaTests(unittest.TestCase):
             blast_output = Path(temporary) / "leave_one_out.m8"
             blast_output.touch()
             with (
-                mock.patch.object(classifier, "parse_blast_hits", return_value={}),
-                mock.patch.object(classifier, "load_taxonomy", return_value={}),
+                mock.patch.object(img_data, "parse_blast_hits", return_value={}),
+                mock.patch.object(img_data, "load_taxonomy", return_value={}),
             ):
                 result = calibration.evaluate_calibration(
-                    temporary, [row], {"18S": blast_output}
+                    temporary,
+                    [row],
+                    {"18S": blast_output},
+                    samples_per_stratum_requested=100,
                 )
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["rank_caps"], {})
         self.assertEqual(
             result["strata"]["18S|PR2|Eukaryota"]["status"], "failed"
         )
+
+
+class CalibrationCliTests(unittest.TestCase):
+    def test_removed_reuse_existing_blast_option_is_rejected(self) -> None:
+        with (
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as error,
+        ):
+            calibration._parser().parse_args(
+                ["--profile", "profile", "--output", "output", "--reuse-existing-blast"]
+            )
+        self.assertEqual(error.exception.code, 2)
+
+    def test_main_returns_failure_for_incomplete_calibration(self) -> None:
+        with (
+            mock.patch.object(
+                calibration,
+                "run_calibration",
+                return_value={"status": "failed", "rank_caps": {}},
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            exit_code = calibration.main(["--profile", "profile", "--output", "output"])
+        self.assertEqual(exit_code, 1)
+
+    def test_main_returns_success_for_complete_calibration(self) -> None:
+        with (
+            mock.patch.object(
+                calibration,
+                "run_calibration",
+                return_value={
+                    "status": "complete",
+                    "rank_caps": {"16S|SILVA|Bacteria": 1},
+                },
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            exit_code = calibration.main(["--profile", "profile", "--output", "output"])
+        self.assertEqual(exit_code, 0)
+
+    def test_run_records_shared_taxonomy_implementation_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile = root / "profile"
+            profile.mkdir()
+            (profile / calibration.manager.MANIFEST_NAME).write_text(
+                '{"version": "test"}\n', encoding="utf-8"
+            )
+            with (
+                mock.patch.object(
+                    calibration.manager,
+                    "validate_profile_directory",
+                    return_value={"version": "test"},
+                ),
+                mock.patch.object(
+                    calibration,
+                    "select_calibration_rows",
+                    return_value=[{"marker": "16S"}],
+                ),
+                mock.patch.object(calibration, "_write_queries", return_value={}),
+                mock.patch.object(
+                    calibration,
+                    "evaluate_calibration",
+                    return_value={"status": "failed", "rank_caps": {}},
+                ),
+            ):
+                result = calibration.run_calibration(profile, root / "output", 100, 1)
+            self.assertEqual(
+                result["implementation_sha256"].get("scripts/taxonomy_utils.py"),
+                hashlib.sha256(
+                    (REPO / "scripts/taxonomy_utils.py").read_bytes()
+                ).hexdigest(),
+            )
 
 
 class CalibrationReuseTests(unittest.TestCase):
@@ -542,7 +637,7 @@ class CalibrationReuseTests(unittest.TestCase):
                     output,
                     [row],
                     threads=8,
-                    reuse_existing_blast=True,
+                    reuse_blast_directory=output,
                 )
 
             self.assertEqual(outputs, {"16S": retained})
@@ -636,7 +731,7 @@ class CalibrationReuseTests(unittest.TestCase):
                     output,
                     [row],
                     threads=8,
-                    reuse_existing_blast=True,
+                    reuse_blast_directory=output,
                 )
 
             self._prepare_retained(profile, output, row)
@@ -647,7 +742,7 @@ class CalibrationReuseTests(unittest.TestCase):
                     output,
                     [row],
                     threads=8,
-                    reuse_existing_blast=True,
+                    reuse_blast_directory=output,
                 )
 
             self._prepare_retained(profile, output, row)
@@ -665,7 +760,7 @@ class CalibrationReuseTests(unittest.TestCase):
                     output,
                     [row],
                     threads=2,
-                    reuse_existing_blast=True,
+                    reuse_blast_directory=output,
                 )
             runner.assert_not_called()
 
@@ -676,7 +771,7 @@ class CalibrationReuseTests(unittest.TestCase):
                 encoding="ascii",
             )
             with (
-                mock.patch.object(classifier, "parse_blast_hits") as parser,
+                mock.patch.object(img_data, "parse_blast_hits") as parser,
                 self.assertRaisesRegex(RuntimeError, "hash mismatch"),
             ):
                 calibration._write_queries(
@@ -684,7 +779,7 @@ class CalibrationReuseTests(unittest.TestCase):
                     output,
                     [row],
                     threads=8,
-                    reuse_existing_blast=True,
+                    reuse_blast_directory=output,
                 )
             parser.assert_not_called()
 
@@ -702,7 +797,7 @@ class CalibrationReuseTests(unittest.TestCase):
                     output,
                     [changed_truth],
                     threads=8,
-                    reuse_existing_blast=True,
+                    reuse_blast_directory=output,
                 )
 
             blast_output = self._prepare_retained(profile, output, row)
@@ -734,7 +829,7 @@ class CalibrationReuseTests(unittest.TestCase):
                     output,
                     [row],
                     threads=8,
-                    reuse_existing_blast=True,
+                    reuse_blast_directory=output,
                 )
 
 

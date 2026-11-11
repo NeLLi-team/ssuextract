@@ -1,21 +1,26 @@
 import csv
+import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest import mock
-
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import build_database_release as builder
-import classify_img_clusters as classifier
+import classify_img_clusters as classifier  # noqa: E402  # Add the scripts directory before local imports.
+import database_contracts  # noqa: E402  # Add the scripts directory before local imports.
+import database_release_io  # noqa: E402  # Add the scripts directory before local imports.
+import img_chunked_search as chunked  # noqa: E402  # Add the scripts directory before local imports.
+import img_classification_data as classification_data  # noqa: E402  # Add the scripts directory before local imports.
 import img_search_provenance as search_provenance
-
 
 EUK_PREFIX = (
     "Eukaryota",
@@ -29,17 +34,21 @@ EUK_PREFIX = (
 )
 
 
-def clusters(*rows: tuple[str, str, list[str]]) -> tuple[classifier.Cluster, ...]:
+def clusters(
+    *rows: tuple[str, str, list[str]],
+) -> tuple[classification_data.Cluster, ...]:
     text = io.StringIO()
     writer = csv.writer(text, delimiter="\t", lineterminator="\n")
     writer.writerow(["cluster_id", "centroid", "legacy_taxonomy", "sequences"])
     for cluster_id, centroid, members in rows:
         writer.writerow([cluster_id, centroid, "Wrong;Legacy;Taxonomy", repr(members)])
     text.seek(0)
-    return classifier.parse_clusters(text)
+    return classification_data.parse_clusters(text)
 
 
-def hits(*rows: tuple[object, ...]) -> dict[str, tuple[classifier.BlastHit, ...]]:
+def hits(
+    *rows: tuple[object, ...],
+) -> tuple[tuple[str, tuple[classification_data.BlastHit, ...]], ...]:
     expanded = []
     for query, subject, pident, qcov, bitscore in rows:
         coverage = float(qcov)
@@ -57,21 +66,27 @@ def hits(*rows: tuple[object, ...]) -> dict[str, tuple[classifier.BlastHit, ...]
                 bitscore,
             )
         )
-    return classifier.parse_blast_hits("\t".join(map(str, row)) + "\n" for row in expanded)
+    return tuple(
+        classification_data.parse_blast_hits(
+            "\t".join(map(str, row)) + "\n" for row in expanded
+        )
+    )
 
 
 def taxonomy(
     path: tuple[str, ...], source: str = "PR2", compartment: str = "nucleus"
-) -> classifier.TaxonomyRecord:
-    return classifier.TaxonomyRecord(path, source, path[0], compartment)
+) -> classification_data.TaxonomyRecord:
+    return classification_data.TaxonomyRecord(path, source, path[0], compartment)
 
 
-def calibrated(rank_cap: int) -> classifier.CalibrationStratum:
-    return classifier.CalibrationStratum("calibrated", rank_cap, "")
+def calibrated(rank_cap: int) -> classification_data.CalibrationStratum:
+    return classification_data.CalibrationStratum("calibrated", rank_cap, "")
 
 
-def failed(reason: str = "insufficient_domain_calls") -> classifier.CalibrationStratum:
-    return classifier.CalibrationStratum("failed", None, reason)
+def failed(
+    reason: str = "insufficient_domain_calls",
+) -> classification_data.CalibrationStratum:
+    return classification_data.CalibrationStratum("failed", None, reason)
 
 
 def calibration_document(
@@ -80,11 +95,11 @@ def calibration_document(
     rank_rules: dict[str, list[dict[str, object]]] | None = None,
 ) -> dict[str, object]:
     return {
-        "schema_version": classifier.CALIBRATION_SCHEMA_VERSION,
+        "schema_version": classification_data.CALIBRATION_SCHEMA_VERSION,
         "status": "complete" if rank_caps else "failed",
         "calibration_use_case": "img_centroid",
         "stratum_basis": "predicted_candidate_source_and_lca_domain",
-        "classification_policy": classifier.classification_policy(),
+        "classification_policy": classification_data.classification_policy(),
         "rank_caps": rank_caps,
         "rank_rules": rank_rules or {},
         "strata": strata,
@@ -92,15 +107,79 @@ def calibration_document(
 
 
 class BlastParsingTests(unittest.TestCase):
+    def test_parser_streams_query_groups_and_rejects_reappearing_query(self) -> None:
+        rows = [
+            "C1\tref\t100\t100\t100\t100\t100\t100\n",
+            "C2\tref\t100\t100\t100\t100\t100\t100\n",
+            "C1\tother\t100\t100\t100\t100\t100\t100\n",
+        ]
+        parsed = classification_data.parse_blast_hits(rows)
+        self.assertEqual(next(parsed)[0], "C1")
+        with self.assertRaisesRegex(ValueError, "reappears"):
+            list(parsed)
+
+    def test_grouped_stream_matches_baseline_multi_query_outcomes(
+        self,
+    ) -> None:
+        rows = [
+            "C2\tref_a\t99\t100\t100\t100\t100\t100\n",
+            "C2\tref_b\t100\t100\t100\t100\t79\t101\n",
+            "C1\tref_b\t100\t100\t100\t100\t100\t100\n",
+            "C1\tref_a\t99\t100\t100\t100\t100\t98\n",
+        ]
+        cluster_rows = clusters(
+            ("C1", "first", ["IMG_1"]),
+            ("C2", "second", ["IMG_2"]),
+            ("C3", "third", []),
+        )
+        records = {
+            "ref_a": taxonomy(("Bacteria", "Firmicutes"), "SILVA", ""),
+            "ref_b": taxonomy(("Bacteria", "Proteobacteria"), "SILVA", ""),
+        }
+        streamed = classifier.classify_clusters(
+            cluster_rows, classification_data.parse_blast_hits(rows), records
+        )
+        # SHA256 of the two classified outcomes produced at commit 58ccc07.
+        expected_digest = (
+            "dbe8795d3a0f73f4182c8cb14fd15f321deb6b518e41275b19fd21ffd70f6fce"
+        )
+        rendered = json.dumps(streamed[1][:2], sort_keys=True, separators=(",", ":"))
+        self.assertEqual(hashlib.sha256(rendered.encode()).hexdigest(), expected_digest)
+        self.assertEqual(streamed[1][2]["reason"], "no_img_members")
+
     def test_one_hsp_per_subject_is_enforced(self) -> None:
         with self.assertRaisesRegex(ValueError, "Multiple HSPs"):
             hits(
-                ("centroid", "subject", 100, 100, 50),
-                ("centroid", "subject", 99, 100, 49),
+                ("C1", "subject", 100, 100, 50),
+                ("C1", "subject", 99, 100, 49),
             )
 
 
 class ClassificationPolicyTests(unittest.TestCase):
+    def test_all_outcomes_have_evidence_ids_and_assignments_reuse_them(self) -> None:
+        assignments, outcomes, _ = classifier.classify_clusters(
+            clusters(
+                ("C1", "first", ["IMG_1"]),
+                ("C2", "second", []),
+            ),
+            (),
+            {},
+            marker="16S",
+        )
+        self.assertTrue(
+            all(row["evidence_id"].startswith("IMGEV_") for row in outcomes)
+        )
+        self.assertEqual(assignments[0]["evidence_id"], outcomes[0]["evidence_id"])
+        self.assertEqual(outcomes[1]["reason"], "no_img_members")
+
+    def test_centroid_name_is_not_a_blast_query_alias(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cluster ID"):
+            classifier.classify_clusters(
+                clusters(("C1", "centroid", ["IMG_1"])),
+                hits(("centroid", "ref", 100, 100, 100)),
+                {"ref": taxonomy(("Bacteria",), "SILVA", "")},
+            )
+
     def test_centroid_display_name_removes_only_silva_lineage_text(self) -> None:
         self.assertEqual(
             classifier.centroid_name(
@@ -120,12 +199,12 @@ class ClassificationPolicyTests(unittest.TestCase):
             "ref_b": taxonomy(EUK_PREFIX[:-2] + ("FamilyB", "GenusB", "Species_b")),
         }
         forward = hits(
-            ("centroid", "ref_b", 99, 100, 200),
-            ("centroid", "ref_a", 98, 100, 200),
+            ("C1", "ref_b", 99, 100, 200),
+            ("C1", "ref_a", 98, 100, 200),
         )
         reverse = hits(
-            ("centroid", "ref_a", 98, 100, 200),
-            ("centroid", "ref_b", 99, 100, 200),
+            ("C1", "ref_a", 98, 100, 200),
+            ("C1", "ref_b", 99, 100, 200),
         )
 
         first = classifier.classify_clusters(cluster_rows, forward, records)
@@ -144,8 +223,8 @@ class ClassificationPolicyTests(unittest.TestCase):
             "eligible": taxonomy(("Bacteria", "Firmicutes"), "SILVA", ""),
         }
         blast_hits = hits(
-            ("centroid", "low_coverage", 100, 79.99, 1000),
-            ("centroid", "eligible", 97, 80, 100),
+            ("C1", "low_coverage", 100, 79.99, 1000),
+            ("C1", "eligible", 97, 80, 100),
         )
 
         _, outcomes, qc = classifier.classify_clusters(cluster_rows, blast_hits, records)
@@ -162,9 +241,9 @@ class ClassificationPolicyTests(unittest.TestCase):
             "below": taxonomy(("Archaea", "Thermoproteota"), "SILVA", ""),
         }
         blast_hits = hits(
-            ("centroid", "below", 100, 100, 97.99),
-            ("centroid", "edge", 100, 100, 98),
-            ("centroid", "best", 100, 100, 100),
+            ("C1", "below", 100, 100, 97.99),
+            ("C1", "edge", 100, 100, 98),
+            ("C1", "best", 100, 100, 100),
         )
 
         _, outcomes, _ = classifier.classify_clusters(cluster_rows, blast_hits, records)
@@ -180,9 +259,9 @@ class ClassificationPolicyTests(unittest.TestCase):
             "ref_c": taxonomy(("Eukaryota", "Other")),
         }
         blast_hits = hits(
-            ("centroid", "ref_a", 100, 100, 100),
-            ("centroid", "ref_b", 100, 100, 99),
-            ("centroid", "ref_c", 100, 100, 98.5),
+            ("C1", "ref_a", 100, 100, 100),
+            ("C1", "ref_b", 100, 100, 99),
+            ("C1", "ref_c", 100, 100, 98.5),
         )
 
         assignments, outcomes, qc = classifier.classify_clusters(
@@ -202,8 +281,8 @@ class ClassificationPolicyTests(unittest.TestCase):
             "outside": taxonomy(("Eukaryota", "Other")),
         }
         blast_hits = hits(
-            ("centroid", "best", 100, 100, 100),
-            ("centroid", "outside", 100, 100, 97.99),
+            ("C1", "best", 100, 100, 100),
+            ("C1", "outside", 100, 100, 97.99),
         )
 
         _, outcomes, qc = classifier.classify_clusters(
@@ -221,11 +300,11 @@ class ClassificationPolicyTests(unittest.TestCase):
             "second": taxonomy(("Bacteria", "Firmicutes"), "SILVA", ""),
             "filtered": taxonomy(("Bacteria", "Proteobacteria"), "SILVA", ""),
         }
-        blast_hits = classifier.parse_blast_hits(
+        blast_hits = classification_data.parse_blast_hits(
             [
-                "centroid\tbest\t100\t100\t100\t100\t100\t100\n",
-                "centroid\tfiltered\t100\t100\t100\t100\t79\t99\n",
-                "centroid\tsecond\t100\t100\t100\t100\t100\t99\n",
+                "C1\tbest\t100\t100\t100\t100\t100\t100\n",
+                "C1\tfiltered\t100\t100\t100\t100\t79\t99\n",
+                "C1\tsecond\t100\t100\t100\t100\t100\t99\n",
             ]
         )
 
@@ -245,15 +324,15 @@ class ClassificationPolicyTests(unittest.TestCase):
             "ref_b": taxonomy(species_path),
         }
         exact_hits = hits(
-            ("centroid", "ref_a", 100, 100, 100),
-            ("centroid", "ref_b", 100, 100, 99),
+            ("C1", "ref_a", 100, 100, 100),
+            ("C1", "ref_b", 100, 100, 99),
         )
         non_exact_hits = hits(
-            ("centroid", "ref_a", 100, 100, 100),
-            ("centroid", "ref_b", 99.9, 100, 99),
+            ("C1", "ref_a", 100, 100, 100),
+            ("C1", "ref_b", 99.9, 100, 99),
         )
-        longer_subject_hits = classifier.parse_blast_hits(
-            ["centroid\tref_a\t100\t100\t100\t101\t100\t100\n"]
+        longer_subject_hits = classification_data.parse_blast_hits(
+            ["C1\tref_a\t100\t100\t100\t101\t100\t100\n"]
         )
 
         _, exact_outcomes, _ = classifier.classify_clusters(
@@ -277,7 +356,7 @@ class ClassificationPolicyTests(unittest.TestCase):
         cluster_rows = clusters(("C1", "centroid", ["IMG_1"]))
         path = EUK_PREFIX + ("Species_a",)
         records = {"ref": taxonomy(path)}
-        blast_hits = hits(("centroid", "ref", 99, 100, 100))
+        blast_hits = hits(("C1", "ref", 99, 100, 100))
         assignments, outcomes, _ = classifier.classify_clusters(
             cluster_rows,
             blast_hits,
@@ -302,18 +381,18 @@ class ClassificationPolicyTests(unittest.TestCase):
         }
         rules = {
             "16S|PR2|Eukaryota": (
-                classifier.CalibrationRankRule(0, classifier.Decimal("95")),
-                classifier.CalibrationRankRule(1, classifier.Decimal("97")),
+                classification_data.CalibrationRankRule(0, Decimal(95)),
+                classification_data.CalibrationRankRule(1, Decimal(97)),
             ),
             "16S|SILVA|Eukaryota": (
-                classifier.CalibrationRankRule(0, classifier.Decimal("90")),
+                classification_data.CalibrationRankRule(0, Decimal(90)),
             ),
         }
         assignments, outcomes, _ = classifier.classify_clusters(
             cluster_rows,
             hits(
-                ("centroid", "pr2", 96, 100, 100),
-                ("centroid", "silva", 96, 100, 100),
+                ("C1", "pr2", 96, 100, 100),
+                ("C1", "silva", 96, 100, 100),
             ),
             records,
             marker="16S",
@@ -327,8 +406,8 @@ class ClassificationPolicyTests(unittest.TestCase):
         assignments, outcomes, _ = classifier.classify_clusters(
             cluster_rows,
             hits(
-                ("centroid", "pr2", 94, 100, 100),
-                ("centroid", "silva", 94, 100, 100),
+                ("C1", "pr2", 94, 100, 100),
+                ("C1", "silva", 94, 100, 100),
             ),
             records,
             marker="16S",
@@ -343,7 +422,7 @@ class ClassificationPolicyTests(unittest.TestCase):
         species_path = EUK_PREFIX + ("Species_a",)
         assignments, outcomes, _ = classifier.classify_clusters(
             cluster_rows,
-            hits(("centroid", "ref", 100, 100, 100)),
+            hits(("C1", "ref", 100, 100, 100)),
             {"ref": taxonomy(species_path)},
             marker="18S",
             calibration_strata={"18S|PR2|Eukaryota": calibrated(7)},
@@ -365,7 +444,7 @@ class ClassificationPolicyTests(unittest.TestCase):
         species_path = EUK_PREFIX + ("Species_a",)
         strata = {"16S|PR2|Eukaryota": failed()}
         source_records = (
-            builder.SourceRecord(
+            database_contracts.SourceRecord(
                 "SRC_1", "SSU_1", "IMG", "2025", "IMG_1", "IMG_1", "16S"
             ),
         )
@@ -373,7 +452,7 @@ class ClassificationPolicyTests(unittest.TestCase):
             with self.subTest(percent_identity=percent_identity):
                 assignments, outcomes, qc = classifier.classify_clusters(
                     cluster_rows,
-                    hits(("centroid", "ref", percent_identity, 100, 100)),
+                    hits(("C1", "ref", percent_identity, 100, 100)),
                     {"ref": taxonomy(species_path)},
                     marker="16S",
                     calibration_strata=strata,
@@ -381,6 +460,7 @@ class ClassificationPolicyTests(unittest.TestCase):
                 self.assertEqual(outcomes[0]["classification_status"], "unclassified")
                 self.assertEqual(outcomes[0]["reason"], "calibration_stratum_failed")
                 self.assertEqual(assignments[0]["taxonomy"], "Unclassified")
+                self.assertEqual(assignments[0]["marker"], "16S")
                 self.assertEqual(
                     qc["unclassified_clusters_by_reason"],
                     {"calibration_stratum_failed": 1},
@@ -391,7 +471,7 @@ class ClassificationPolicyTests(unittest.TestCase):
                 self.assertEqual(derived[0].taxonomy, ("Unclassified",))
         model = builder.build_deduplicated_model(
             [
-                builder.PreparedSourceRecord(
+                database_contracts.PreparedSourceRecord(
                     "PR2",
                     "5.1.1",
                     "pr2-ref",
@@ -402,7 +482,7 @@ class ClassificationPolicyTests(unittest.TestCase):
                     "PR2",
                     "nucleus",
                 ),
-                builder.PreparedSourceRecord(
+                database_contracts.PreparedSourceRecord(
                     "IMG",
                     "2025",
                     "IMG_1",
@@ -423,7 +503,7 @@ class ClassificationPolicyTests(unittest.TestCase):
     def test_propagation_cap_cannot_override_failed_calibration(self) -> None:
         assignments, outcomes, _ = classifier.classify_clusters(
             clusters(("C1", "centroid", ["IMG_1"])),
-            hits(("centroid", "ref", 100, 100, 100)),
+            hits(("C1", "ref", 100, 100, 100)),
             {"ref": taxonomy(EUK_PREFIX + ("Species_a",))},
             marker="16S",
             calibration_strata={"16S|PR2|Eukaryota": failed()},
@@ -437,8 +517,8 @@ class ClassificationPolicyTests(unittest.TestCase):
         assignments, outcomes, _ = classifier.classify_clusters(
             clusters(("C1", "centroid", ["IMG_1"])),
             hits(
-                ("centroid", "pr2", 99, 100, 100),
-                ("centroid", "silva", 99, 100, 100),
+                ("C1", "pr2", 99, 100, 100),
+                ("C1", "silva", 99, 100, 100),
             ),
             {
                 "pr2": taxonomy(path, "PR2"),
@@ -464,7 +544,7 @@ class ClassificationPolicyTests(unittest.TestCase):
     def test_missing_calibration_stratum_abstains(self) -> None:
         assignments, outcomes, _ = classifier.classify_clusters(
             clusters(("C1", "centroid", ["IMG_1"])),
-            hits(("centroid", "ref", 99, 100, 100)),
+            hits(("C1", "ref", 99, 100, 100)),
             {"ref": taxonomy(("Eukaryota", "TSAR"))},
             marker="16S",
             calibration_strata={"16S|SILVA|Bacteria": calibrated(0)},
@@ -477,7 +557,7 @@ class ClassificationPolicyTests(unittest.TestCase):
             ("C1", "centroid_1", ["IMG_1"]),
             ("C2", "centroid_2", ["IMG_2"]),
         )
-        blast_hits = hits(("centroid_2", "ref", 100, 79, 100))
+        blast_hits = hits(("C2", "ref", 100, 79, 100))
 
         assignments, outcomes, qc = classifier.classify_clusters(
             cluster_rows, blast_hits, {"ref": taxonomy(("Eukaryota", "TSAR"))}
@@ -501,8 +581,8 @@ class ClassificationPolicyTests(unittest.TestCase):
     def test_cross_domain_candidate_set_is_unclassified(self) -> None:
         cluster_rows = clusters(("C1", "centroid", ["IMG_1"]))
         blast_hits = hits(
-            ("centroid", "bacteria", 100, 100, 100),
-            ("centroid", "eukaryote", 100, 100, 100),
+            ("C1", "bacteria", 100, 100, 100),
+            ("C1", "eukaryote", 100, 100, 100),
         )
         records = {
             "bacteria": taxonomy(("Bacteria", "Firmicutes"), "SILVA", ""),
@@ -518,7 +598,7 @@ class ClassificationPolicyTests(unittest.TestCase):
 
     def test_ambiguous_reference_subject_is_explicitly_unclassified(self) -> None:
         cluster_rows = clusters(("C1", "centroid", ["IMG_1"]))
-        blast_hits = hits(("centroid", "ambiguous", 100, 100, 100))
+        blast_hits = hits(("C1", "ambiguous", 100, 100, 100))
         alternatives = json.dumps(
             [
                 {"domain": "Bacteria", "taxonomy": "Bacteria;Firmicutes"},
@@ -526,13 +606,13 @@ class ClassificationPolicyTests(unittest.TestCase):
             ]
         )
         records = {
-            "ambiguous": classifier.TaxonomyRecord(
+            "ambiguous": classification_data.TaxonomyRecord(
                 (), "PR2+SILVA", "ambiguous", "mixed", True, alternatives
             )
         }
 
         assignments, outcomes, qc = classifier.classify_clusters(
-            cluster_rows, blast_hits, records
+            cluster_rows, blast_hits, records, marker="16S"
         )
 
         self.assertEqual(assignments[0]["assignment_method"], "updated_reference_unclassified")
@@ -548,7 +628,7 @@ class ClassificationPolicyTests(unittest.TestCase):
 
     def test_missing_reference_taxonomy_is_explicitly_unclassified(self) -> None:
         cluster_rows = clusters(("C1", "centroid", ["IMG_1"]))
-        blast_hits = hits(("centroid", "missing", 100, 100, 100))
+        blast_hits = hits(("C1", "missing", 100, 100, 100))
 
         assignments, outcomes, _ = classifier.classify_clusters(
             cluster_rows, blast_hits, {}
@@ -575,8 +655,7 @@ class InputValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "calibration.json"
             path.write_text(json.dumps(document), encoding="utf-8")
-            loaded = classifier.load_calibration(path)
-        self.assertEqual(loaded.rank_caps, {})
+            loaded = classification_data.load_calibration(path)
         self.assertEqual(loaded.strata[key], failed())
         self.assertEqual(loaded.rank_rules, {})
 
@@ -595,12 +674,12 @@ class InputValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "calibration.json"
             path.write_text(json.dumps(document), encoding="utf-8")
-            loaded = classifier.load_calibration(path)
+            loaded = classification_data.load_calibration(path)
         self.assertEqual(
             loaded.rank_rules[key],
             (
-                classifier.CalibrationRankRule(0, classifier.Decimal("90")),
-                classifier.CalibrationRankRule(1, classifier.Decimal("97.0")),
+                classification_data.CalibrationRankRule(0, Decimal(90)),
+                classification_data.CalibrationRankRule(1, Decimal("97.0")),
             ),
         )
 
@@ -622,7 +701,7 @@ class InputValidationTests(unittest.TestCase):
             "wrong policy": {
                 **failed_document,
                 "classification_policy": {
-                    **classifier.classification_policy(),
+                    **classification_data.classification_policy(),
                     "min_query_coverage_percent": "79",
                 },
             },
@@ -643,9 +722,7 @@ class InputValidationTests(unittest.TestCase):
             "rank caps mismatch": {
                 **failed_document,
                 "rank_caps": {},
-                "strata": {
-                    key: {"status": "calibrated", "rank_cap": 0, "reason": ""}
-                },
+                "strata": {key: {"status": "calibrated", "rank_cap": 0, "reason": ""}},
             },
             "wrong root status": {**failed_document, "status": "complete"},
         }
@@ -702,39 +779,132 @@ class InputValidationTests(unittest.TestCase):
                 with self.subTest(label=label):
                     path.write_text(json.dumps(document), encoding="utf-8")
                     with self.assertRaises(ValueError):
-                        classifier.load_calibration(path)
+                        classification_data.load_calibration(path)
 
     def test_short_cluster_row_has_structured_error(self) -> None:
         table = io.StringIO("cluster_id\tcentroid\tsequences\nC1\n")
 
         with self.assertRaisesRegex(ValueError, "lacks cluster_id or centroid"):
-            classifier.parse_clusters(table)
+            classification_data.parse_clusters(table)
 
-    def test_internal_empty_taxonomy_rank_is_preserved(self) -> None:
-        record = classifier._taxonomy_record(
-            {
-                "taxonomy": "Bacteria;;Firmicutes",
-                "taxonomy_source": "SILVA",
-                "domain": "Bacteria",
-            },
-            "ref",
-        )
-        self.assertEqual(record.taxonomy, ("Bacteria", "", "Firmicutes"))
+    def test_internal_empty_taxonomy_rank_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "empty rank"):
+            classification_data._taxonomy_record(
+                {
+                    "taxonomy": "Bacteria;;Firmicutes",
+                    "taxonomy_source": "SILVA",
+                    "domain": "Bacteria",
+                },
+                "ref",
+            )
 
 
 class OutputContractTests(unittest.TestCase):
+    def test_cli_requires_release_classification_inputs(self) -> None:
+        arguments = [
+            "--blast",
+            "hits.m8",
+            "--blast-fetch-targets",
+            "501",
+            "--taxonomy",
+            "taxonomy.parquet",
+            "--clusters",
+            "clusters.tsv",
+            "--assignments-tsv",
+            "assignments.tsv",
+            "--outcomes-jsonl",
+            "outcomes.jsonl",
+            "--qc-json",
+            "qc.json",
+            "--marker",
+            "16S",
+            "--calibration",
+            "calibration.json",
+            "--search-provenance",
+            "search.json",
+            "--propagation-rank-cap",
+            "0",
+        ]
+        for option in (
+            "--marker",
+            "--calibration",
+            "--search-provenance",
+            "--propagation-rank-cap",
+        ):
+            with self.subTest(option=option):
+                missing = list(arguments)
+                index = missing.index(option)
+                del missing[index : index + 2]
+                with self.assertRaises(SystemExit) as raised:
+                    classifier._parser().parse_args(missing)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_shell_rejects_header_only_assignments(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stub = root / "python"
+            stub.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                'if [[ "$1" == scripts/img_search_provenance.py ]]; then exit 0; fi\n'
+                "while (($#)); do\n"
+                '  case "$1" in\n'
+                "    --assignments-tsv)\n"
+                '      printf "marker\\tsource_identifier\\n" > "$2";;\n'
+                '    --outcomes-jsonl|--qc-json) printf "{}\\n" > "$2";;\n'
+                "  esac\n"
+                "  shift\n"
+                "done\n",
+                encoding="utf-8",
+            )
+            stub.chmod(0o755)
+            environment = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}")
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "scripts/classify_img_marker.sh",
+                    "16S",
+                    "clusters.tsv",
+                    "source.fna",
+                    "profile",
+                    "calibration.json",
+                    str(root / "output"),
+                    "1",
+                ],
+                cwd=REPO,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+
     def test_cli_rejects_missing_overflow_target_contract(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be 501"):
             classifier.main(
                 [
-                    "--blast", "missing.m8",
-                    "--blast-fetch-targets", "500",
-                    "--taxonomy", "missing.parquet",
-                    "--clusters", "missing.tsv",
-                    "--assignments-tsv", "assignments.tsv",
-                    "--assignments-jsonl", "assignments.jsonl",
-                    "--outcomes-jsonl", "outcomes.jsonl",
-                    "--qc-json", "qc.json",
+                    "--blast",
+                    "missing.m8",
+                    "--blast-fetch-targets",
+                    "500",
+                    "--taxonomy",
+                    "missing.parquet",
+                    "--clusters",
+                    "missing.tsv",
+                    "--assignments-tsv",
+                    "assignments.tsv",
+                    "--outcomes-jsonl",
+                    "outcomes.jsonl",
+                    "--qc-json",
+                    "qc.json",
+                    "--marker",
+                    "16S",
+                    "--calibration",
+                    "calibration.json",
+                    "--search-provenance",
+                    "search.json",
+                    "--propagation-rank-cap",
+                    "0",
                 ]
             )
 
@@ -745,7 +915,6 @@ class OutputContractTests(unittest.TestCase):
             cluster_tsv = root / "clusters.tsv"
             outputs = [
                 root / "assignments.tsv",
-                root / "assignments.jsonl",
                 root / "outcomes.jsonl",
                 root / "qc.json",
             ]
@@ -765,7 +934,7 @@ class OutputContractTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            blast.write_text("centroid\tref\t100\t4\t4\t4\t100\t100\n")
+            blast.write_text("C1\tref\t100\t4\t4\t4\t100\t100\n")
             cluster_tsv.write_text(
                 "cluster_id\tcentroid\tsequences\n"
                 "C1\tcentroid\t['IMG_1']\n"
@@ -775,10 +944,10 @@ class OutputContractTests(unittest.TestCase):
             (profile / "blast").mkdir()
             (profile / "manifest.json").write_text("{}\n", encoding="utf-8")
             preferred = profile / "tables/preferred_taxonomy.parquet"
-            builder.write_preferred_taxonomy_parquet(
+            database_release_io.write_preferred_taxonomy_parquet(
                 preferred,
                 [
-                    builder.PreferredTaxonomy(
+                    database_contracts.PreferredTaxonomy(
                         sequence_id="ref",
                         reference_source="SILVA",
                         taxonomy=("Bacteria", "Firmicutes"),
@@ -793,56 +962,79 @@ class OutputContractTests(unittest.TestCase):
             source_fasta = root / "source.fna"
             centroids_fasta = root / "centroids.fna"
             source_fasta.write_text(">IMG_1\nACGT\n", encoding="ascii")
-            centroids_fasta.write_text(">centroid\nACGT\n", encoding="ascii")
+            centroids_fasta.write_text(">C1\nACGT\n", encoding="ascii")
             search_sidecar = root / "search_provenance.json"
-            raw_search = search_provenance._payload(
-                "16S",
-                profile,
-                cluster_tsv,
-                source_fasta,
-                centroids_fasta,
-                blast,
-                8,
+            for suffix in ("nhr", "nin", "nsq"):
+                (profile / "blast" / f"16S.{suffix}").write_bytes(b"database")
+            artifacts = [
+                {
+                    "path": f"blast/16S.{suffix}",
+                    "bytes": 8,
+                    "sha256": hashlib.sha256(b"database").hexdigest(),
+                }
+                for suffix in ("nhr", "nin", "nsq")
+            ]
+            (profile / "manifest.json").write_text(
+                json.dumps({"artifacts": artifacts}), encoding="utf-8"
             )
-            search_sidecar.write_text(
-                json.dumps(raw_search, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
+            chunk_directory = root / "chunks"
+            chunked.prepare_chunks("16S", centroids_fasta, chunk_directory, 1)
+            tool = {"path": "/fake/blastn", "sha256": "a" * 64, "version": "test"}
+
+            def fake_blast(command: list[str], check: bool) -> None:
+                Path(command[command.index("-out") + 1]).write_bytes(blast.read_bytes())
+
+            with (
+                mock.patch.object(chunked, "_blastn_tool", return_value=tool),
+                mock.patch.object(chunked.subprocess, "run", side_effect=fake_blast),
+            ):
+                chunked.run_chunk(
+                    "16S", profile, centroids_fasta, chunk_directory, 0, 8
+                )
+                raw_search = chunked.finalize_search(
+                    "16S",
+                    profile,
+                    cluster_tsv,
+                    source_fasta,
+                    centroids_fasta,
+                    blast,
+                    search_sidecar,
+                    chunk_directory,
+                    8,
+                )
             portable_search = search_provenance.portable_provenance(
                 raw_search, classifier._file_sha256(search_sidecar)
             )
 
             arguments = [
-                    "--blast",
-                    str(blast),
-                    "--blast-fetch-targets",
-                    str(classifier.BLAST_FETCH_TARGETS),
-                    "--taxonomy",
-                    str(preferred),
-                    "--clusters",
-                    str(cluster_tsv),
-                    "--marker",
-                    "16S",
-                    "--calibration",
-                    str(calibration),
-                    "--search-provenance",
-                    str(search_sidecar),
-                    "--propagation-rank-cap",
-                    "0",
-                    "--assignments-tsv",
-                    str(outputs[0]),
-                    "--assignments-jsonl",
-                    str(outputs[1]),
-                    "--outcomes-jsonl",
-                    str(outputs[2]),
-                    "--qc-json",
-                    str(outputs[3]),
-                ]
+                "--blast",
+                str(blast),
+                "--blast-fetch-targets",
+                str(classifier.BLAST_FETCH_TARGETS),
+                "--taxonomy",
+                str(preferred),
+                "--clusters",
+                str(cluster_tsv),
+                "--marker",
+                "16S",
+                "--calibration",
+                str(calibration),
+                "--search-provenance",
+                str(search_sidecar),
+                "--propagation-rank-cap",
+                "0",
+                "--assignments-tsv",
+                str(outputs[0]),
+                "--outcomes-jsonl",
+                str(outputs[1]),
+                "--qc-json",
+                str(outputs[2]),
+            ]
             result = classifier.main(arguments)
 
             self.assertEqual(result, 0)
             self.assertTrue(all(path.is_file() and path.stat().st_size for path in outputs))
-            qc = json.loads(outputs[3].read_text())
+            qc = json.loads(outputs[2].read_text())
             self.assertEqual(qc["assignments_written"], 1)
             self.assertEqual(
                 qc["classification_binding"],
@@ -854,13 +1046,13 @@ class OutputContractTests(unittest.TestCase):
                     },
                     "marker": "16S",
                     "propagation_rank_cap": 0,
-                    "policy": classifier.classification_policy(),
+                    "policy": classification_data.classification_policy(),
                     "outputs": {
                         "assignments_tsv": {
                             "sha256": classifier._file_sha256(outputs[0])
                         },
                         "outcomes_jsonl": {
-                            "sha256": classifier._file_sha256(outputs[2])
+                            "sha256": classifier._file_sha256(outputs[1])
                         },
                     },
                     "search_provenance": portable_search,
@@ -869,7 +1061,7 @@ class OutputContractTests(unittest.TestCase):
 
             mismatched_blast = root / "mismatched.m8"
             mismatched_blast.write_text(
-                "centroid\tref\t100\t4\t4\t4\t100\t99\n", encoding="ascii"
+                "C1\tref\t100\t4\t4\t4\t100\t99\n", encoding="ascii"
             )
             mismatched_arguments = list(arguments)
             mismatched_arguments[1] = str(mismatched_blast)
@@ -885,7 +1077,7 @@ class OutputContractTests(unittest.TestCase):
             separators=(",", ":"),
             sort_keys=True,
         )
-        preferred = builder.PreferredTaxonomy(
+        preferred = database_contracts.PreferredTaxonomy(
             sequence_id="SSU_ambiguous",
             reference_source="PR2+SILVA",
             taxonomy=(),
@@ -898,12 +1090,12 @@ class OutputContractTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "preferred_taxonomy.parquet"
-            builder.write_preferred_taxonomy_parquet(path, [preferred])
+            database_release_io.write_preferred_taxonomy_parquet(path, [preferred])
             with mock.patch.dict(
                 os.environ,
                 {"SLURM_CPUS_PER_TASK": "", "OMP_NUM_THREADS": ""},
             ):
-                loaded = classifier.load_taxonomy(path, {"SSU_ambiguous"})
+                loaded = classification_data.load_taxonomy(path, {"SSU_ambiguous"})
 
         self.assertTrue(loaded["SSU_ambiguous"].cross_domain_conflict)
         self.assertEqual(
@@ -916,13 +1108,17 @@ class OutputContractTests(unittest.TestCase):
             ("C1", "centroid", ["REF_legacy", "IMG_2", "IMG_1"])
         )
         records = {"ref": taxonomy(("Bacteria", "Firmicutes"), "SILVA", "")}
-        blast_hits = hits(("centroid", "ref", 100, 100, 100))
+        blast_hits = hits(("C1", "ref", 100, 100, 100))
         assignments, outcomes, qc = classifier.classify_clusters(
-            cluster_rows, blast_hits, records
+            cluster_rows, blast_hits, records, marker="16S"
         )
         source_records = (
-            builder.SourceRecord("SRC_1", "SSU_1", "IMG", "2025", "IMG_1", "IMG_1", "16S"),
-            builder.SourceRecord("SRC_2", "SSU_2", "IMG", "2025", "IMG_2", "IMG_2", "16S"),
+            database_contracts.SourceRecord(
+                "SRC_1", "SSU_1", "IMG", "2025", "IMG_1", "IMG_1", "16S"
+            ),
+            database_contracts.SourceRecord(
+                "SRC_2", "SSU_2", "IMG", "2025", "IMG_2", "IMG_2", "16S"
+            ),
         )
 
         derived = builder.ingest_derived_cluster_assignments(assignments, source_records)
@@ -932,7 +1128,9 @@ class OutputContractTests(unittest.TestCase):
         self.assertNotIn("Wrong", assignments[0]["taxonomy"])
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            paths = [root / name for name in ("assignments.tsv", "assignments.jsonl", "outcomes.jsonl", "qc.json")]
+            paths = [
+                root / name for name in ("assignments.tsv", "outcomes.jsonl", "qc.json")
+            ]
             with mock.patch.object(classifier.os, "fsync") as fsync:
                 classifier._write_outputs(*paths, assignments, outcomes, qc)
             # Each output flushes its open handle, syncs the staged file after
@@ -940,12 +1138,12 @@ class OutputContractTests(unittest.TestCase):
             self.assertEqual(fsync.call_count, 3 * len(paths))
             with paths[0].open(newline="") as handle:
                 written = list(csv.DictReader(handle, delimiter="\t"))
-            assignment_json = [json.loads(line) for line in paths[1].read_text().splitlines()]
-            outcome_json = [json.loads(line) for line in paths[2].read_text().splitlines()]
-            qc_json = json.loads(paths[3].read_text())
+            outcome_json = [
+                json.loads(line) for line in paths[1].read_text().splitlines()
+            ]
+            qc_json = json.loads(paths[2].read_text())
 
         self.assertEqual(written, assignments)
-        self.assertEqual(assignment_json, assignments)
         self.assertEqual(outcome_json, outcomes)
         self.assertEqual(qc_json, qc)
 

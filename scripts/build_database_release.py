@@ -9,63 +9,35 @@ module owns exact-sequence deduplication, taxonomy selection, and CLI orchestrat
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import json
 from collections import defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Iterable, Iterator, Mapping, Sequence
 
 from database_contracts import (
-    BuildError,
-    DatabaseModel,
-    FastaFormatError,
-    FastaRecord,
-    IMG_LOCATION_COLUMNS,
-    ImgLocation,
     PR2_COMPARTMENTS,
     PROKARYOTIC_DOMAINS,
+    DatabaseModel,
     PreferredTaxonomy,
     PreparedSourceRecord,
     ReleaseValidationError,
     SequenceRecord,
-    SourceIntegrityError,
     SourceRecord,
     TaxonomyAssignment,
     TaxonomyError,
 )
 from database_sources import (
     DEFAULT_SOURCES,
-    clean_img_metadata,
-    clean_img_metadata_row,
-    fetch_artifact,
     fetch_configured_source,
-    include_pr2_header,
-    include_silva_header,
-    iter_curated_pr2_records,
-    iter_curated_silva_records,
-    iter_fasta,
-    iter_fasta_lines,
-    iter_img_records,
-    normalize_pr2_taxonomy,
     normalize_sequence_for_hashing,
-    parse_img_identifier,
-    parse_pr2_header,
-    parse_silva_header,
-    parse_silva_rank_table,
-    rank_silva_prokaryotic_path,
     sequence_identifier,
-    validate_privacy_columns,
 )
-from database_release_io import (
-    validate_release,
-    write_marker_fasta,
-    write_preferred_taxonomy_parquet,
-    write_release_tables,
+from taxonomy_utils import (
+    common_value,
+    lowest_common_ancestor as _shared_lca,
+    taxonomy_path,
 )
-from taxonomy_utils import common_value
-from taxonomy_utils import lowest_common_ancestor as _shared_lca
-from taxonomy_utils import taxonomy_path
 
 
 def _stable_id(prefix: str, *values: str) -> str:
@@ -78,6 +50,31 @@ def _taxonomy_tuple(value: Sequence[str] | str) -> tuple[str, ...]:
         return taxonomy_path(value)
     except ValueError as error:
         raise TaxonomyError(str(error)) from error
+
+
+def _validate_assignment_taxonomy(
+    value: Sequence[str] | str, method: str
+) -> tuple[str, ...]:
+    taxonomy = _taxonomy_tuple(value)
+    if taxonomy[0] == "Unclassified" and method != "updated_reference_unclassified":
+        raise TaxonomyError(
+            "Unclassified taxonomy requires an unclassified assignment method: "
+            f"{method!r}"
+        )
+    return taxonomy
+
+
+def _reference_source(assignments: Iterable[TaxonomyAssignment]) -> str:
+    return "+".join(
+        sorted(
+            {
+                "IMG"
+                if assignment.assignment_method.lower() != "native"
+                else assignment.taxonomy_source
+                for assignment in assignments
+            }
+        )
+    )
 
 
 def lowest_common_ancestor(taxonomies: Iterable[Sequence[str] | str]) -> tuple[str, ...]:
@@ -138,6 +135,8 @@ def select_preferred_taxonomy(
     candidates = list(assignments)
     if not candidates:
         raise TaxonomyError(f"No taxonomy assignments for {sequence_id}")
+    for candidate in candidates:
+        _validate_assignment_taxonomy(candidate.taxonomy, candidate.assignment_method)
     # Apply the source policy before testing for a domain conflict. Otherwise a
     # lower-priority, cluster-derived IMG assignment could turn an exact native
     # SILVA or PR2 match into a false cross-domain ambiguity.
@@ -171,9 +170,7 @@ def select_preferred_taxonomy(
         ]
         return PreferredTaxonomy(
             sequence_id=sequence_id,
-            reference_source="+".join(
-                sorted({assignment.taxonomy_source for assignment in best})
-            ),
+            reference_source=_reference_source(best),
             taxonomy=(),
             taxonomy_source="+".join(
                 sorted({assignment.taxonomy_source for assignment in best})
@@ -189,27 +186,27 @@ def select_preferred_taxonomy(
             centroid_taxonomy=centroid_taxonomy,
             centroid_taxonomy_source=centroid_taxonomy_source,
         )
-    taxonomy = lowest_common_ancestor(assignment.taxonomy for assignment in best)
+    taxonomy = (
+        best[0].taxonomy
+        if len(best) == 1
+        else lowest_common_ancestor(assignment.taxonomy for assignment in best)
+    )
     if not taxonomy:
         raise TaxonomyError(f"No common taxonomy domain for {sequence_id}")
     disagreement = len({assignment.taxonomy for assignment in best}) > 1
     taxonomy_sources = sorted({assignment.taxonomy_source for assignment in best})
-    reference_sources = sorted(
-        {
-            "IMG" if assignment.assignment_method.lower() != "native" else assignment.taxonomy_source
-            for assignment in best
-        }
-    )
     return PreferredTaxonomy(
         sequence_id=sequence_id,
-        reference_source="+".join(reference_sources),
+        reference_source=_reference_source(best),
         taxonomy=taxonomy,
         taxonomy_source="+".join(taxonomy_sources),
         domain=taxonomy[0],
         compartment=common_value(
             (assignment.compartment for assignment in best), conflict="mixed"
         ),
-        assignment_method="lowest_common_ancestor" if disagreement else best[0].assignment_method,
+        assignment_method="lowest_common_ancestor"
+        if disagreement
+        else best[0].assignment_method,
         cross_domain_conflict=cross_domain_conflict,
         centroid_names=centroid_names,
         centroid_taxonomy=centroid_taxonomy,
@@ -263,7 +260,9 @@ def build_deduplicated_model(records: Iterable[PreparedSourceRecord]) -> Databas
         )
         source_records.append(source_record)
         if record.taxonomy:
-            taxonomy = _taxonomy_tuple(record.taxonomy)
+            taxonomy = _validate_assignment_taxonomy(
+                record.taxonomy, record.assignment_method
+            )
             assignment_id = _stable_id(
                 "TAX_",
                 source_record_id,
@@ -320,23 +319,29 @@ def ingest_derived_cluster_assignments(
 ) -> tuple[TaxonomyAssignment, ...]:
     """Ingest explicit IMG cluster-derived assignments; never infer or invent them."""
 
-    by_identifier: dict[str, list[SourceRecord]] = defaultdict(list)
+    by_identifier: dict[tuple[str, str], list[SourceRecord]] = defaultdict(list)
     for source_record in source_records:
         if source_record.reference_source.upper() == "IMG":
-            by_identifier[source_record.source_identifier].append(source_record)
+            by_identifier[
+                (source_record.marker, source_record.source_identifier)
+            ].append(source_record)
     assignments: list[TaxonomyAssignment] = []
     for row_number, row in enumerate(rows, 1):
         source_identifier = str(row.get("source_identifier", "")).strip()
+        marker = str(row.get("marker", "")).strip()
         taxonomy_source = str(row.get("taxonomy_source", "")).strip()
-        method = str(row.get("method", row.get("assignment_method", ""))).strip()
+        method = str(row.get("assignment_method", "")).strip()
         evidence = str(row.get("evidence", "")).strip()
         centroid_name = str(row.get("centroid_name", "")).strip()
         centroid_taxonomy_text = str(row.get("centroid_taxonomy", "")).strip()
         centroid_taxonomy_source = str(
             row.get("centroid_taxonomy_source", "")
         ).strip()
-        if source_identifier not in by_identifier:
-            raise TaxonomyError(f"Unknown IMG source_identifier on assignment row {row_number}")
+        if (marker, source_identifier) not in by_identifier:
+            raise TaxonomyError(
+                f"Unknown IMG marker/source_identifier on assignment row {row_number}: "
+                f"{marker!r}/{source_identifier!r}"
+            )
         if not taxonomy_source or method not in {
             "updated_reference_cluster",
             "updated_reference_derived",
@@ -346,7 +351,7 @@ def ingest_derived_cluster_assignments(
                 "Derived IMG assignments require taxonomy_source, an updated-reference method, "
                 "and evidence"
             )
-        taxonomy = _taxonomy_tuple(row.get("taxonomy", ""))
+        taxonomy = _validate_assignment_taxonomy(row.get("taxonomy", ""), method)
         centroid_taxonomy = (
             _taxonomy_tuple(centroid_taxonomy_text)
             if centroid_taxonomy_text
@@ -372,7 +377,7 @@ def ingest_derived_cluster_assignments(
                 "Unclassified IMG cluster assignments require a centroid name"
             )
         compartment = str(row.get("compartment", "")).strip()
-        for source_record in by_identifier[source_identifier]:
+        for source_record in by_identifier[(marker, source_identifier)]:
             assignment_id = _stable_id(
                 "TAX_",
                 source_record.source_record_id,
@@ -427,35 +432,6 @@ def add_taxonomy_assignments(
 
 
 
-def read_prepared_jsonl(path: Path) -> Iterator[PreparedSourceRecord]:
-    with path.open(encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, 1):
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-                raw_taxonomy = row.pop("taxonomy", ())
-                taxonomy = _taxonomy_tuple(raw_taxonomy) if raw_taxonomy else ()
-                yield PreparedSourceRecord(taxonomy=taxonomy, **row)
-            except (TypeError, ValueError, json.JSONDecodeError) as error:
-                raise BuildError(f"Invalid prepared JSONL row {line_number}: {error}") from error
-
-
-def read_img_metadata_tsv(path: Path) -> tuple[ImgLocation, ...]:
-    with path.open(newline="", encoding="utf-8") as handle:
-        return clean_img_metadata(csv.DictReader(handle, delimiter="\t"))
-
-
-def _build_prepared(args: argparse.Namespace) -> None:
-    model = build_deduplicated_model(read_prepared_jsonl(args.records_jsonl))
-    locations = read_img_metadata_tsv(args.img_metadata) if args.img_metadata else ()
-    output = args.output
-    output.mkdir(parents=True, exist_ok=True)
-    validate_release(model, locations)
-    write_marker_fasta(output / "markers.fasta", model.sequences)
-    write_release_tables(output, model, locations)
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -464,12 +440,6 @@ def _parser() -> argparse.ArgumentParser:
     fetch.add_argument("--config", type=Path, default=DEFAULT_SOURCES)
     fetch.add_argument("--output", type=Path, required=True)
 
-    build = subparsers.add_parser(
-        "build-prepared", help="Build from explicit prepared JSONL records"
-    )
-    build.add_argument("--records-jsonl", type=Path, required=True)
-    build.add_argument("--img-metadata", type=Path)
-    build.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -478,8 +448,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "fetch":
         for name in args.sources:
             fetch_configured_source(name, args.output, config_path=args.config)
-    else:
-        _build_prepared(args)
     return 0
 
 

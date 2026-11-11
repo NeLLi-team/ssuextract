@@ -18,12 +18,15 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping, Sequence
 
+import duckdb
+
 import assemble_database_profile as assembler
 import build_database_release as builder
 import classify_img_clusters as classifier
+import database_contracts as contracts
 import database_sources
+import img_classification_data as classification_data
 import img_search_provenance
-
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE_CONFIG = REPO / "config" / "database_sources.json"
@@ -60,12 +63,13 @@ SOURCE_TREE_FILES = (
     "scripts/img_classification_data.py",
     "scripts/database_contracts.py",
     "scripts/database_manager.py",
+    "scripts/database_download.py",
+    "scripts/database_updates.py",
     "scripts/database_release_io.py",
     "scripts/database_sources.py",
     "scripts/extract_img_cluster_centroids.py",
     "scripts/img_chunked_search.py",
     "scripts/img_search_provenance.py",
-    "scripts/search_img_marker.sh",
     "scripts/taxonomy_utils.py",
 )
 EVIDENCE_FIELDS = (
@@ -116,11 +120,13 @@ def load_source_catalog(path: str | Path) -> dict[str, object]:
     try:
         catalog = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise builder.BuildError(f"Could not read source catalog {source}: {error}") from error
+        raise contracts.BuildError(
+            f"Could not read source catalog {source}: {error}"
+        ) from error
     if not isinstance(catalog, dict) or catalog.get("schema_version") != 1:
-        raise builder.BuildError("source catalog schema_version must be 1")
+        raise contracts.BuildError("source catalog schema_version must be 1")
     if not isinstance(catalog.get("sources"), dict):
-        raise builder.BuildError("source catalog must contain a sources object")
+        raise contracts.BuildError("source catalog must contain a sources object")
     return catalog
 
 
@@ -129,12 +135,16 @@ def calibration_provenance(path: str | Path) -> dict[str, object]:
     try:
         source_sha256 = _sha256(source)
         calibration = json.loads(source.read_text(encoding="utf-8"))
-        classifier.load_calibration(source)
+        classification_data.load_calibration(source)
     except (OSError, json.JSONDecodeError, ValueError) as error:
-        raise builder.BuildError(f"Invalid taxonomy calibration {source}: {error}") from error
+        raise contracts.BuildError(
+            f"Invalid taxonomy calibration {source}: {error}"
+        ) from error
     curated_profile = calibration.get("curated_profile")
     if not isinstance(curated_profile, dict):
-        raise builder.BuildError("taxonomy calibration lacks curated_profile provenance")
+        raise contracts.BuildError(
+            "taxonomy calibration lacks curated_profile provenance"
+        )
     version = curated_profile.get("version")
     manifest_sha256 = curated_profile.get("manifest_sha256")
     if (
@@ -144,9 +154,13 @@ def calibration_provenance(path: str | Path) -> dict[str, object]:
         or len(manifest_sha256) != 64
         or any(character not in "0123456789abcdef" for character in manifest_sha256)
     ):
-        raise builder.BuildError("taxonomy calibration has invalid curated_profile provenance")
+        raise contracts.BuildError(
+            "taxonomy calibration has invalid curated_profile provenance"
+        )
     if _sha256(source) != source_sha256:
-        raise builder.BuildError("taxonomy calibration changed while it was being loaded")
+        raise contracts.BuildError(
+            "taxonomy calibration changed while it was being loaded"
+        )
     return {
         "sha256": source_sha256,
         "schema_version": calibration["schema_version"],
@@ -166,11 +180,11 @@ def validate_curated_manifest(
 ) -> dict[str, str]:
     source = Path(path)
     if not source.is_file():
-        raise builder.BuildError(f"curated manifest is missing: {source}")
+        raise contracts.BuildError(f"curated manifest is missing: {source}")
     actual_sha256 = _sha256(source)
     expected_sha256 = calibration["curated_profile"]["manifest_sha256"]
     if actual_sha256 != expected_sha256:
-        raise builder.BuildError(
+        raise contracts.BuildError(
             "curated manifest SHA256 does not match taxonomy calibration: "
             f"{actual_sha256} != {expected_sha256}"
         )
@@ -181,9 +195,9 @@ def _load_json_object(path: Path, label: str) -> dict[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise builder.BuildError(f"Invalid {label} {path}: {error}") from error
+        raise contracts.BuildError(f"Invalid {label} {path}: {error}") from error
     if not isinstance(value, dict):
-        raise builder.BuildError(f"{label} must be a JSON object: {path}")
+        raise contracts.BuildError(f"{label} must be a JSON object: {path}")
     return value
 
 
@@ -191,14 +205,14 @@ def validate_classification_qc(
     assignment_path: str | Path,
     marker: str,
     calibration: Mapping[str, object],
-    search_provenance: Mapping[str, object] | None = None,
+    search_provenance: Mapping[str, object],
 ) -> Path:
     assignment = Path(assignment_path).resolve()
     qc_path = assignment.parent / "qc.json"
     qc = _load_json_object(qc_path, "IMG classification QC")
     outcomes_path = assignment.parent / "outcomes.jsonl"
     if not assignment.is_file() or not outcomes_path.is_file():
-        raise builder.BuildError(
+        raise contracts.BuildError(
             f"IMG classification outputs are missing for {marker}"
         )
     expected = {
@@ -209,17 +223,16 @@ def validate_classification_qc(
         },
         "marker": marker,
         "propagation_rank_cap": 0,
-        "policy": classifier.classification_policy(),
+        "policy": classification_data.classification_policy(),
         "outputs": {
             "assignments_tsv": {"sha256": _sha256(assignment)},
             "outcomes_jsonl": {"sha256": _sha256(outcomes_path)},
         },
     }
-    if search_provenance is not None:
-        expected["search_provenance"] = search_provenance
+    expected["search_provenance"] = search_provenance
     binding = qc.get("classification_binding")
     if _canonical_json(binding) != _canonical_json(expected):
-        raise builder.BuildError(
+        raise contracts.BuildError(
             f"IMG classification QC binding does not match build inputs for {marker}"
         )
     return qc_path
@@ -251,7 +264,7 @@ def validate_classification_search(
             payload, _sha256(sidecar)
         )
     except (OSError, RuntimeError, ValueError) as error:
-        raise builder.BuildError(
+        raise contracts.BuildError(
             f"Invalid {marker} IMG search provenance: {error}"
         ) from error
 
@@ -259,12 +272,12 @@ def validate_classification_search(
 def _candidate_strata(marker: str, outcome: Mapping[str, object]) -> list[str]:
     candidates = outcome.get("candidates")
     if not isinstance(candidates, list) or not candidates:
-        raise builder.BuildError("calibration-gated IMG outcome lacks candidates")
+        raise contracts.BuildError("calibration-gated IMG outcome lacks candidates")
     domains: set[str] = set()
     sources: set[str] = set()
     for candidate in candidates:
         if not isinstance(candidate, dict):
-            raise builder.BuildError("IMG outcome candidate must be an object")
+            raise contracts.BuildError("IMG outcome candidate must be an object")
         taxonomy = candidate.get("taxonomy")
         source = candidate.get("taxonomy_source")
         if (
@@ -273,11 +286,13 @@ def _candidate_strata(marker: str, outcome: Mapping[str, object]) -> list[str]:
             or not isinstance(source, str)
             or not source
         ):
-            raise builder.BuildError("IMG outcome candidate lacks taxonomy or source")
+            raise contracts.BuildError("IMG outcome candidate lacks taxonomy or source")
         domains.add(taxonomy.split(";", 1)[0])
         sources.add(source)
     if len(domains) != 1:
-        raise builder.BuildError("calibration-gated IMG outcome lacks one candidate domain")
+        raise contracts.BuildError(
+            "calibration-gated IMG outcome lacks one candidate domain"
+        )
     domain = next(iter(domains))
     return list(classifier.calibration_stratum_keys(marker, sources, domain))
 
@@ -290,7 +305,7 @@ def validate_outcome_calibration(
     if not str(outcome.get("cluster_id", "")).strip() or not str(
         outcome.get("centroid", "")
     ).strip():
-        raise builder.BuildError("IMG outcome lacks a cluster ID or centroid name")
+        raise contracts.BuildError("IMG outcome lacks a cluster ID or centroid name")
     status = outcome.get("classification_status")
     reason = outcome.get("reason")
     gated_reasons = {
@@ -310,7 +325,9 @@ def validate_outcome_calibration(
             and outcome.get("missing_calibration_strata") == missing
         ):
             return
-        raise builder.BuildError("IMG outcome has inconsistent missing calibration strata")
+        raise contracts.BuildError(
+            "IMG outcome has inconsistent missing calibration strata"
+        )
     failed = [
         {"key": key, "reason": strata[key]["reason"]}
         for key in required_keys
@@ -325,8 +342,12 @@ def validate_outcome_calibration(
         ):
             return
         if status == "classified":
-            raise builder.BuildError("classified IMG outcome requires a failed stratum")
-        raise builder.BuildError("failed IMG calibration outcome has inconsistent evidence")
+            raise contracts.BuildError(
+                "classified IMG outcome requires a failed stratum"
+            )
+        raise contracts.BuildError(
+            "failed IMG calibration outcome has inconsistent evidence"
+        )
 
     rank_rules = calibration.get("rank_rules", {})
     relevant_rules = {key: rank_rules.get(key, []) for key in required_keys}
@@ -338,7 +359,7 @@ def validate_outcome_calibration(
                 for candidate in outcome["candidates"]
             )
         except (InvalidOperation, KeyError, TypeError, ValueError) as error:
-            raise builder.BuildError(
+            raise contracts.BuildError(
                 "IMG outcome has invalid candidate identity evidence"
             ) from error
     route_caps = []
@@ -365,15 +386,17 @@ def validate_outcome_calibration(
             and reported_minimum == minimum_identity
         ):
             return
-        raise builder.BuildError("IMG outcome violates calibration identity rules")
+        raise contracts.BuildError("IMG outcome violates calibration identity rules")
     if status == "classified":
         if reason != "":
-            raise builder.BuildError("classified IMG outcome has a non-empty reason")
+            raise contracts.BuildError("classified IMG outcome has a non-empty reason")
         expected_cap = min(route_caps)
         if type(outcome.get("calibration_rank_cap")) is not int or outcome.get(
             "calibration_rank_cap"
         ) != expected_cap:
-            raise builder.BuildError("classified IMG outcome has wrong calibration rank cap")
+            raise contracts.BuildError(
+                "classified IMG outcome has wrong calibration rank cap"
+            )
         if any(relevant_rules.values()):
             expected_threshold = max(
                 Decimal(
@@ -394,31 +417,37 @@ def validate_outcome_calibration(
             except InvalidOperation:
                 reported_minimum = reported_threshold = None
             if reported_minimum != minimum_identity or reported_threshold != expected_threshold:
-                raise builder.BuildError(
+                raise contracts.BuildError(
                     "classified IMG outcome has wrong calibration identity evidence"
                 )
         if (
             type(outcome.get("propagation_rank_cap")) is not int
             or outcome.get("propagation_rank_cap") != 0
         ):
-            raise builder.BuildError("classified IMG outcome lacks the domain propagation cap")
+            raise contracts.BuildError(
+                "classified IMG outcome lacks the domain propagation cap"
+            )
         domain = required_keys[0].rsplit("|", 1)[1]
         if outcome.get("domain") != domain or outcome.get("taxonomy") != domain:
-            raise builder.BuildError("classified IMG outcome exceeds the domain propagation cap")
+            raise contracts.BuildError(
+                "classified IMG outcome exceeds the domain propagation cap"
+            )
         expected_sources = "+".join(key.split("|", 2)[1] for key in required_keys)
         if outcome.get("taxonomy_source") != expected_sources:
-            raise builder.BuildError("classified IMG outcome taxonomy source is inconsistent")
+            raise contracts.BuildError(
+                "classified IMG outcome taxonomy source is inconsistent"
+            )
         centroid_taxonomy = str(outcome.get("centroid_taxonomy", ""))
         if (
             not centroid_taxonomy
             or centroid_taxonomy.split(";", 1)[0] != domain
             or outcome.get("centroid_taxonomy_source") != expected_sources
         ):
-            raise builder.BuildError(
+            raise contracts.BuildError(
                 "classified IMG outcome has inconsistent centroid taxonomy"
             )
         return
-    raise builder.BuildError("IMG calibration outcome has an inconsistent reason")
+    raise contracts.BuildError("IMG calibration outcome has an inconsistent reason")
 
 
 def _source_paths(
@@ -429,15 +458,19 @@ def _source_paths(
         try:
             raw_entry = catalog["sources"][name]
         except KeyError as error:
-            raise builder.BuildError(f"source catalog lacks {name!r}") from error
+            raise contracts.BuildError(f"source catalog lacks {name!r}") from error
         if not isinstance(raw_entry, dict):
-            raise builder.BuildError(f"source catalog entry {name!r} must be an object")
+            raise contracts.BuildError(
+                f"source catalog entry {name!r} must be an object"
+            )
         filename = raw_entry.get("filename")
         if not isinstance(filename, str) or Path(filename).name != filename:
-            raise builder.BuildError(f"source catalog entry {name!r} has an unsafe filename")
+            raise contracts.BuildError(
+                f"source catalog entry {name!r} has an unsafe filename"
+            )
         path = source_directory / filename
         if not path.is_file():
-            raise builder.BuildError(f"missing pinned source {name!r}: {path}")
+            raise contracts.BuildError(f"missing pinned source {name!r}: {path}")
         database_sources.validate_artifact(path, raw_entry)
         paths[name] = path
     return paths
@@ -447,44 +480,82 @@ def _source_version(catalog: Mapping[str, object], name: str) -> str:
     entry = catalog["sources"][name]
     version = entry.get("version") if isinstance(entry, dict) else None
     if not isinstance(version, str) or not version:
-        raise builder.BuildError(f"source catalog entry {name!r} lacks a version")
+        raise contracts.BuildError(f"source catalog entry {name!r} lacks a version")
     return version
 
 
 def iter_curated_records(
-    paths: Mapping[str, Path], catalog: Mapping[str, object]
-) -> Iterator[builder.PreparedSourceRecord]:
+    paths: Mapping[str, Path],
+    catalog: Mapping[str, object],
+    skipped_counts: dict[str, int],
+) -> Iterator[contracts.PreparedSourceRecord]:
+    """Yield curated records and count records excluded by each source filter."""
     silva_version = _source_version(catalog, "silva_ssu_nr99_fasta")
     taxonomy_version = _source_version(catalog, "silva_ssu_taxonomy")
     if silva_version != taxonomy_version:
-        raise builder.BuildError(
+        raise contracts.BuildError(
             "SILVA FASTA and taxonomy versions differ: "
             f"{silva_version!r} != {taxonomy_version!r}"
         )
-    yield from builder.iter_curated_silva_records(
+    skipped: dict[str, int] = {}
+    yield from database_sources.iter_curated_silva_records(
         paths["silva_ssu_nr99_fasta"],
         paths["silva_ssu_taxonomy"],
         source_version=silva_version,
+        skipped_counts=skipped,
     )
-    yield from builder.iter_curated_pr2_records(
+    skipped_counts["silva_ssu_nr99_fasta"] = skipped.get("SILVA", 0)
+    yield from database_sources.iter_curated_pr2_records(
         paths["pr2_ssu_fasta"],
         source_version=_source_version(catalog, "pr2_ssu_fasta"),
+        skipped_counts=skipped,
     )
+    skipped_counts["pr2_ssu_fasta"] = skipped.get("PR2", 0)
 
 
 def iter_img_records(
-    paths: Mapping[str, Path], catalog: Mapping[str, object]
-) -> Iterator[builder.PreparedSourceRecord]:
-    yield from builder.iter_img_records(
-        paths["eukcensus_16s_fasta"],
-        "16S",
-        source_version=_source_version(catalog, "eukcensus_16s_fasta"),
-    )
-    yield from builder.iter_img_records(
-        paths["eukcensus_18s_fasta"],
-        "18S",
-        source_version=_source_version(catalog, "eukcensus_18s_fasta"),
-    )
+    paths: Mapping[str, Path],
+    catalog: Mapping[str, object],
+    skipped_counts: dict[str, int],
+) -> Iterator[contracts.PreparedSourceRecord]:
+    """Yield IMG records and count embedded references excluded per marker."""
+    for marker in ("16S", "18S"):
+        name = f"eukcensus_{marker.lower()}_fasta"
+        skipped: dict[str, int] = {}
+        yield from database_sources.iter_img_records(
+            paths[name],
+            marker,
+            source_version=_source_version(catalog, name),
+            skipped_counts=skipped,
+        )
+        skipped_counts[name] = skipped.get("IMG", 0)
+
+
+def validate_curated_sequences(model: contracts.DatabaseModel, profile: Path) -> None:
+    """Require rebuilt curated sequences to match the classification reference."""
+    markers: dict[str, set[str]] = {}
+    for source in model.source_records:
+        if source.reference_source != "IMG":
+            markers.setdefault(source.sequence_id, set()).add(source.marker)
+    rebuilt = {
+        (
+            sequence.sequence_id,
+            len(sequence.sequence),
+            hashlib.sha256(sequence.sequence.encode("ascii")).hexdigest(),
+            ";".join(sorted(markers[sequence.sequence_id])),
+        )
+        for sequence in model.sequences
+        if sequence.sequence_id in markers
+    }
+    with duckdb.connect(":memory:", config={"threads": 1}) as connection:
+        reference = connection.execute(
+            "SELECT sequence_id, length, sha256, markers FROM read_parquet(?)",
+            [str(profile / "tables/sequences.parquet")],
+        ).fetchall()
+    if rebuilt != set(reference):
+        raise contracts.BuildError(
+            "Rebuilt curated source sequences do not match the classification reference"
+        )
 
 
 def _sha256(path: Path) -> str:
@@ -519,7 +590,9 @@ def _source_tree_provenance() -> dict[str, object]:
     for relative_name in SOURCE_TREE_FILES:
         path = REPO / relative_name
         if not path.is_file():
-            raise builder.BuildError(f"release source-tree file is missing: {relative_name}")
+            raise contracts.BuildError(
+                f"release source-tree file is missing: {relative_name}"
+            )
         files.append({"path": relative_name, "sha256": _sha256(path)})
     tree_sha256 = hashlib.sha256(_canonical_json(files).encode("utf-8")).hexdigest()
     try:
@@ -530,16 +603,21 @@ def _source_tree_provenance() -> dict[str, object]:
             capture_output=True,
             text=True,
         ).stdout.strip()
+        if not commit:
+            raise contracts.BuildError("git returned an empty release commit")
         status = subprocess.run(
-            ["git", "status", "--porcelain", "--", *SOURCE_TREE_FILES],
+            ["git", "status", "--porcelain", "--untracked-files=no"],
             cwd=REPO,
             check=True,
             capture_output=True,
             text=True,
         ).stdout.splitlines()
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        commit = None
-        status = None
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise contracts.BuildError(
+            f"Could not determine release git state: {error}"
+        ) from error
+    if status:
+        raise contracts.BuildError("Cannot build a release from a dirty git worktree")
     try:
         duckdb_version = importlib.metadata.version("duckdb")
     except importlib.metadata.PackageNotFoundError:
@@ -547,7 +625,7 @@ def _source_tree_provenance() -> dict[str, object]:
     return {
         "repository": {
             "commit": commit,
-            "relevant_worktree_dirty": None if status is None else bool(status),
+            "tracked_worktree_dirty": False,
             "source_tree_sha256": tree_sha256,
             "source_files": files,
         },
@@ -572,7 +650,9 @@ def _source_tree_provenance() -> dict[str, object]:
 def _safe_evidence_payload(marker: str, outcome: Mapping[str, object]) -> dict[str, object]:
     status = outcome.get("classification_status")
     if status not in {"classified", "unclassified"}:
-        raise builder.BuildError(f"IMG evidence outcome has invalid status: {status!r}")
+        raise contracts.BuildError(
+            f"IMG evidence outcome has invalid status: {status!r}"
+        )
     payload = {
         "schema_version": 1,
         "marker": marker,
@@ -586,7 +666,7 @@ def _assert_evidence_privacy(value: object) -> None:
     if isinstance(value, Mapping):
         forbidden = FORBIDDEN_EVIDENCE_KEYS.intersection(str(key) for key in value)
         if forbidden:
-            raise builder.BuildError(
+            raise contracts.BuildError(
                 f"IMG evidence contains forbidden identity/metadata keys: {sorted(forbidden)}"
             )
         for nested in value.values():
@@ -595,7 +675,7 @@ def _assert_evidence_privacy(value: object) -> None:
         for nested in value:
             _assert_evidence_privacy(nested)
     elif isinstance(value, str) and "IMG_" in value:
-        raise builder.BuildError("IMG evidence contains a raw IMG identifier")
+        raise contracts.BuildError("IMG evidence contains a raw IMG identifier")
 
 
 def _outcome_evidence_id(outcome: Mapping[str, object]) -> str:
@@ -607,11 +687,7 @@ def _outcome_evidence_id(outcome: Mapping[str, object]) -> str:
         and all(character in "0123456789abcdef" for character in existing[6:])
     ):
         return existing
-    if existing is not None:
-        raise builder.BuildError(f"invalid IMG outcome evidence_id: {existing!r}")
-    return "IMGEV_" + hashlib.sha256(
-        _canonical_json(dict(outcome)).encode("utf-8")
-    ).hexdigest()
+    raise contracts.BuildError(f"invalid IMG outcome evidence_id: {existing!r}")
 
 
 def create_img_evidence_catalog(
@@ -634,13 +710,13 @@ def create_img_evidence_catalog(
                 path = assignment_path.resolve()
                 marker = path.parent.name
                 if marker not in {"16S", "18S"}:
-                    raise builder.BuildError(
+                    raise contracts.BuildError(
                         "IMG assignment parent must identify marker 16S or 18S: "
                         f"{assignment_path}"
                     )
                 outcomes_path = path.parent / "outcomes.jsonl"
                 if not outcomes_path.is_file():
-                    raise builder.BuildError(
+                    raise contracts.BuildError(
                         f"IMG evidence outcomes are missing: {outcomes_path}"
                     )
                 marker_mapping: dict[str, dict[str, str]] = {}
@@ -649,12 +725,12 @@ def create_img_evidence_catalog(
                         try:
                             outcome = json.loads(line)
                         except json.JSONDecodeError as error:
-                            raise builder.BuildError(
+                            raise contracts.BuildError(
                                 "invalid IMG outcome JSON at "
                                 f"{outcomes_path}:{line_number}"
                             ) from error
                         if not isinstance(outcome, dict):
-                            raise builder.BuildError(
+                            raise contracts.BuildError(
                                 "IMG outcome must be an object at "
                                 f"{outcomes_path}:{line_number}"
                             )
@@ -703,7 +779,7 @@ def create_img_evidence_catalog(
                             }
                         previous = marker_mapping.setdefault(old_id, resolution)
                         if previous != resolution:
-                            raise builder.BuildError(
+                            raise contracts.BuildError(
                                 f"conflicting IMG evidence ID: {old_id}"
                             )
                         if evidence_id not in seen_evidence_ids:
@@ -761,13 +837,14 @@ def create_img_evidence_catalog(
 
 def read_assignment_rows(
     paths: Iterable[str | Path],
-    evidence_maps: Mapping[Path, Mapping[str, Mapping[str, str]]] | None = None,
+    evidence_maps: Mapping[Path, Mapping[str, Mapping[str, str]]],
 ) -> Iterator[dict[str, str]]:
     for path_value in paths:
         path = Path(path_value).resolve()
         with path.open(newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle, delimiter="\t")
             required = {
+                "marker",
                 "source_identifier",
                 "taxonomy",
                 "taxonomy_source",
@@ -778,62 +855,71 @@ def read_assignment_rows(
                 "centroid_name",
                 "centroid_taxonomy",
                 "centroid_taxonomy_source",
+                "evidence_id",
             }
             missing = required - set(reader.fieldnames or ())
             if missing:
-                raise builder.BuildError(
+                raise contracts.BuildError(
                     f"IMG assignment table {path} lacks columns: {sorted(missing)}"
                 )
             for row in reader:
-                if evidence_maps is not None:
-                    old_id = str(row.get("evidence_id", "")).strip()
-                    if not old_id:
-                        raise builder.BuildError(
-                            f"IMG assignment table {path} lacks evidence_id values"
+                if row["marker"] != path.parent.name:
+                    raise contracts.BuildError(
+                        f"IMG assignment marker does not match directory: {path}"
+                    )
+                old_id = str(row.get("evidence_id", "")).strip()
+                if not old_id:
+                    raise contracts.BuildError(
+                        f"IMG assignment table {path} lacks evidence_id values"
+                    )
+                try:
+                    resolution = evidence_maps[path][old_id]
+                except KeyError as error:
+                    raise contracts.BuildError(
+                        f"IMG assignment evidence_id {old_id!r} "
+                        f"does not resolve in {path}"
+                    ) from error
+                new_id = resolution["evidence_id"]
+                for field in (
+                    "taxonomy",
+                    "taxonomy_source",
+                    "assignment_method",
+                    "compartment",
+                    "centroid",
+                    "centroid_name",
+                    "centroid_taxonomy",
+                    "centroid_taxonomy_source",
+                ):
+                    if str(row.get(field, "")).strip() != resolution[field]:
+                        raise contracts.BuildError(
+                            f"IMG assignment {field} does not match evidence {old_id!r}"
                         )
-                    try:
-                        resolution = evidence_maps[path][old_id]
-                    except KeyError as error:
-                        raise builder.BuildError(
-                            f"IMG assignment evidence_id {old_id!r} does not resolve in {path}"
-                        ) from error
-                    new_id = resolution["evidence_id"]
-                    for field in (
-                        "taxonomy",
-                        "taxonomy_source",
-                        "assignment_method",
-                        "compartment",
-                        "centroid",
-                        "centroid_name",
-                        "centroid_taxonomy",
-                        "centroid_taxonomy_source",
-                    ):
-                        if str(row.get(field, "")).strip() != resolution[field]:
-                            raise builder.BuildError(
-                                f"IMG assignment {field} does not match evidence {old_id!r}"
-                            )
-                    evidence = str(row["evidence"])
-                    if old_id not in evidence:
-                        raise builder.BuildError(
-                            f"IMG assignment evidence text does not contain {old_id!r}"
-                        )
-                    row["evidence"] = evidence.replace(old_id, new_id)
-                    row["evidence_id"] = new_id
+                evidence = str(row["evidence"])
+                if old_id not in evidence:
+                    raise contracts.BuildError(
+                        f"IMG assignment evidence text does not contain {old_id!r}"
+                    )
+                row["evidence"] = evidence.replace(old_id, new_id)
+                row["evidence_id"] = new_id
                 yield row
 
 
 def read_img_locations(
     path: str | Path, included_taxon_oids: set[str]
-) -> tuple[tuple[builder.ImgLocation, ...], list[dict[str, object]]]:
+) -> tuple[tuple[contracts.ImgLocation, ...], list[dict[str, object]]]:
     corrections: list[dict[str, object]] = []
     with Path(path).open(newline="", encoding="utf-8") as handle:
-        locations = builder.clean_img_metadata(
+        locations = database_sources.clean_img_metadata(
             csv.DictReader(handle, delimiter="\t"), corrections=corrections
         )
     filtered = tuple(
         location for location in locations if location.taxon_oid in included_taxon_oids
     )
-    return filtered, corrections
+    return filtered, [
+        correction
+        for correction in corrections
+        if correction["taxon_oid"] in included_taxon_oids
+    ]
 
 
 def _release_files(profile: str, notices: Path) -> dict[str, Path]:
@@ -891,7 +977,7 @@ def _provenance_details(
                 "centroid_taxonomy_policy": (
                     "calibrated SILVA/PR2 LCA before the cluster propagation cap"
                 ),
-                "img_metadata_columns": list(builder.IMG_LOCATION_COLUMNS),
+                "img_metadata_columns": list(contracts.IMG_LOCATION_COLUMNS),
                 "metadata_corrections": list(corrections),
             }
         )
@@ -901,12 +987,12 @@ def _provenance_details(
 
 
 def _assemble(
-    model: builder.DatabaseModel,
+    model: contracts.DatabaseModel,
     args: argparse.Namespace,
     profile: str,
     catalog: Mapping[str, object],
     source_names: Sequence[str],
-    locations: Sequence[builder.ImgLocation] = (),
+    locations: Sequence[contracts.ImgLocation] = (),
     corrections: Sequence[Mapping[str, object]] = (),
     extra_provenance: Mapping[str, object] | None = None,
     extra_release_files: Mapping[str, str | Path] | None = None,
@@ -934,22 +1020,48 @@ def _assemble(
     )
 
 
+def _check_build_destination(args: argparse.Namespace, profile: str) -> None:
+    assembler.require_identifier(args.version, "version")
+    target = args.output_root / profile
+    archive = (
+        args.archive_directory / f"ssuextract-db-{profile}-v{args.version}.tar.zst"
+    )
+    if target.exists():
+        raise contracts.BuildError(f"Profile directory already exists: {target}")
+    if archive.exists():
+        raise contracts.BuildError(f"Archive destination already exists: {archive}")
+
+
 def build_curated(args: argparse.Namespace) -> assembler.AssemblyResult:
+    """Build the curated release after checking output destinations."""
+    _check_build_destination(args, "curated")
     catalog = load_source_catalog(args.source_config)
     paths = _source_paths(catalog, args.source_directory, CURATED_SOURCE_NAMES)
-    model = builder.build_deduplicated_model(iter_curated_records(paths, catalog))
-    return _assemble(model, args, "curated", catalog, CURATED_SOURCE_NAMES)
+    skipped: dict[str, int] = {}
+    model = builder.build_deduplicated_model(
+        iter_curated_records(paths, catalog, skipped)
+    )
+    return _assemble(
+        model,
+        args,
+        "curated",
+        catalog,
+        CURATED_SOURCE_NAMES,
+        extra_provenance={"source_filter_skipped_records": skipped},
+    )
 
 
 def build_img(args: argparse.Namespace) -> assembler.AssemblyResult:
+    """Build the IMG release using calibrated, provenance-bound assignments."""
+    _check_build_destination(args, "img")
     assignment_paths = tuple(Path(path).resolve() for path in args.assignments)
     markers = [path.parent.name for path in assignment_paths]
     if sorted(markers) != ["16S", "18S"]:
-        raise builder.BuildError(
+        raise contracts.BuildError(
             "IMG profile requires exactly one 16S and one 18S assignment table"
         )
     if getattr(args, "curated_manifest", None) is None:
-        raise builder.BuildError("IMG profile requires a curated manifest")
+        raise contracts.BuildError("IMG profile requires a curated manifest")
     calibration = calibration_provenance(args.calibration)
     curated_manifest = validate_curated_manifest(args.curated_manifest, calibration)
     catalog = load_source_catalog(args.source_config)
@@ -976,10 +1088,13 @@ def build_img(args: argparse.Namespace) -> assembler.AssemblyResult:
         evidence_maps, evidence_metadata = create_img_evidence_catalog(
             assignment_paths, evidence_path, calibration
         )
+        skipped: dict[str, int] = {}
         prepared = itertools.chain(
-            iter_curated_records(paths, catalog), iter_img_records(paths, catalog)
+            iter_curated_records(paths, catalog, skipped),
+            iter_img_records(paths, catalog, skipped),
         )
         model = builder.build_deduplicated_model(prepared)
+        validate_curated_sequences(model, curated_profile)
         derived = builder.ingest_derived_cluster_assignments(
             read_assignment_rows(assignment_paths, evidence_maps), model.source_records
         )
@@ -1012,7 +1127,10 @@ def build_img(args: argparse.Namespace) -> assembler.AssemblyResult:
             IMG_SOURCE_NAMES,
             locations,
             corrections,
-            {"img_classification": classification_inputs},
+            {
+                "img_classification": classification_inputs,
+                "source_filter_skipped_records": skipped,
+            },
             qc_files,
         )
 

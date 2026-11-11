@@ -14,6 +14,8 @@ def taxonomy_path(value: Sequence[str] | str) -> tuple[str, ...]:
         taxonomy = taxonomy[:-1]
     if not taxonomy or not taxonomy[0]:
         raise ValueError("Taxonomy must contain a non-empty domain")
+    if "" in taxonomy:
+        raise ValueError("Taxonomy contains an empty rank inside its lineage")
     return taxonomy
 
 

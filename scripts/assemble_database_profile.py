@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -13,14 +12,14 @@ import subprocess
 import tarfile
 import tempfile
 from collections import Counter, defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Mapping, Sequence
 
-import build_database_release as builder
+import database_contracts as contracts
 import database_manager as manager
+import database_release_io as release_io
 from atomic_io import fsync_directory, fsync_file, replace_and_fsync
-
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _TABLE_PATHS = {
@@ -65,7 +64,8 @@ class AssemblyResult:
     archive: ArchiveMetadata | None
 
 
-def _require_identifier(value: str, label: str) -> str:
+def require_identifier(value: str, label: str) -> str:
+    """Return a safe, non-empty profile, version, or marker identifier."""
     if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
         raise AssemblyError(f"{label} must be a safe, non-empty identifier")
     return value
@@ -102,16 +102,16 @@ def _makeblastdb_version(executable: str, *, cwd: Path) -> str:
 
 
 def _marker_sequences(
-    model: builder.DatabaseModel,
-) -> tuple[dict[str, tuple[builder.SequenceRecord, ...]], dict[str, int]]:
-    members: dict[str, list[builder.SequenceRecord]] = defaultdict(list)
+    model: contracts.DatabaseModel,
+) -> tuple[dict[str, tuple[contracts.SequenceRecord, ...]], dict[str, int]]:
+    members: dict[str, list[contracts.SequenceRecord]] = defaultdict(list)
     source_counts: Counter[str] = Counter()
     for sequence in model.sequences:
         for raw_marker in sequence.markers:
-            marker = _require_identifier(raw_marker, "sequence marker")
+            marker = require_identifier(raw_marker, "sequence marker")
             members[marker].append(sequence)
     for source in model.source_records:
-        marker = _require_identifier(source.marker, "source marker")
+        marker = require_identifier(source.marker, "source marker")
         source_counts[marker] += 1
     if not members:
         raise AssemblyError("Database model has no marker memberships")
@@ -144,10 +144,10 @@ def _normalize_permissions(root: Path) -> None:
 
 
 def _provenance(
-    model: builder.DatabaseModel,
+    model: contracts.DatabaseModel,
     profile: str,
     version: str,
-    marker_sequences: dict[str, tuple[builder.SequenceRecord, ...]],
+    marker_sequences: dict[str, tuple[contracts.SequenceRecord, ...]],
     source_counts: dict[str, int],
     makeblastdb_version: str,
     provenance_details: Mapping[str, object] | None,
@@ -220,24 +220,23 @@ def _copy_release_files(staging: Path, files: Mapping[str, str | Path]) -> None:
 
 def _assemble_staging_profile(
     staging: Path,
-    model: builder.DatabaseModel,
+    model: contracts.DatabaseModel,
     profile: str,
     version: str,
-    img_locations: tuple[builder.ImgLocation, ...],
+    img_locations: tuple[contracts.ImgLocation, ...],
     makeblastdb: str,
     blastdbcmd: str,
     provenance_details: Mapping[str, object] | None,
     release_files: Mapping[str, str | Path],
 ) -> dict[str, object]:
-    builder.validate_release(model, img_locations)
+    release_io.validate_release(model, img_locations)
     marker_sequences, source_counts = _marker_sequences(model)
-
-    builder.write_release_tables(staging / "tables", model, img_locations)
+    release_io.write_validated_release_tables(staging / "tables", model, img_locations)
     blast_databases: dict[str, dict[str, str]] = {}
     for marker, sequences in marker_sequences.items():
         fasta = Path("fasta") / f"{marker}.fasta"
         prefix = Path("blast") / marker
-        builder.write_marker_fasta(staging / fasta, sequences)
+        release_io.write_marker_fasta(staging / fasta, sequences)
         (staging / prefix).parent.mkdir(parents=True, exist_ok=True)
         _run(
             [
@@ -331,74 +330,6 @@ def _write_deterministic_tar(profile_directory: Path, destination: Path) -> None
                     archive.addfile(info, handle)
 
 
-def package_profile(
-    profile_directory: str | Path,
-    archive_path: str | Path,
-    *,
-    zstd: str = "zstd",
-    compression_level: int = 10,
-) -> ArchiveMetadata:
-    """Package exactly one profile directory into a deterministic ``tar.zst``."""
-
-    profile = Path(profile_directory).resolve()
-    if not profile.is_dir():
-        raise AssemblyError(f"Profile directory does not exist: {profile}")
-    destination = Path(archive_path).resolve()
-    if destination == profile or profile in destination.parents:
-        raise AssemblyError("Archive destination must be outside the profile directory")
-    if destination.exists():
-        raise AssemblyError(f"Archive destination already exists: {destination}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(
-        prefix=f".{destination.name}.", dir=destination.parent
-    ) as tmp:
-        temporary_directory = Path(tmp)
-        tar_path = temporary_directory / "profile.tar"
-        compressed = temporary_directory / "profile.tar.zst"
-        _write_deterministic_tar(profile, tar_path)
-        _run(
-            [
-                zstd,
-                f"-{compression_level}",
-                "-T1",
-                "-q",
-                "-f",
-                tar_path.name,
-                "-o",
-                compressed.name,
-            ],
-            cwd=temporary_directory,
-        )
-        linked = False
-        try:
-            # The temporary archive is created on the destination filesystem.
-            # link(2) publishes it without the overwrite race of os.replace().
-            fsync_file(compressed)
-            os.link(compressed, destination)
-            linked = True
-            fsync_directory(destination.parent)
-        except FileExistsError as error:
-            raise AssemblyError(f"Archive destination already exists: {destination}") from error
-        except BaseException as publication_error:
-            rollback_errors: list[BaseException] = []
-            if linked:
-                try:
-                    destination.unlink(missing_ok=True)
-                except BaseException as error:
-                    rollback_errors.append(error)
-                try:
-                    fsync_directory(destination.parent)
-                except BaseException as error:
-                    rollback_errors.append(error)
-            _annotate_rollback_errors(
-                publication_error,
-                rollback_errors,
-                "archive rollback also failed",
-            )
-            raise
-    return ArchiveMetadata(destination, destination.stat().st_size, _sha256(destination))
-
-
 def _stage_profile_archive(
     profile_directory: Path,
     archive_path: Path,
@@ -436,12 +367,12 @@ def _stage_profile_archive(
 
 
 def assemble_database_profile(
-    model: builder.DatabaseModel,
+    model: contracts.DatabaseModel,
     profile_directory: str | Path,
     *,
     profile: str,
     version: str,
-    img_locations: Iterable[builder.ImgLocation] = (),
+    img_locations: Iterable[contracts.ImgLocation] = (),
     makeblastdb: str = "makeblastdb",
     blastdbcmd: str = "blastdbcmd",
     archive_path: str | Path | None = None,
@@ -451,8 +382,8 @@ def assemble_database_profile(
 ) -> AssemblyResult:
     """Stage and validate both outputs, with rollback on reported publish failures."""
 
-    profile = _require_identifier(profile, "profile")
-    version = _require_identifier(version, "version")
+    profile = require_identifier(profile, "profile")
+    version = require_identifier(version, "version")
     target = Path(profile_directory).resolve()
     if target.name != profile:
         raise AssemblyError(
@@ -563,52 +494,3 @@ def assemble_database_profile(
         else None
     )
     return AssemblyResult(target, manifest, archive)
-
-
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--records-jsonl", type=Path, required=True)
-    parser.add_argument("--img-metadata", type=Path)
-    parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--profile", required=True)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--archive", type=Path)
-    parser.add_argument("--makeblastdb", default="makeblastdb")
-    parser.add_argument("--blastdbcmd", default="blastdbcmd")
-    parser.add_argument("--zstd", default="zstd")
-    return parser
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    model = builder.build_deduplicated_model(builder.read_prepared_jsonl(args.records_jsonl))
-    locations = builder.read_img_metadata_tsv(args.img_metadata) if args.img_metadata else ()
-    result = assemble_database_profile(
-        model,
-        args.output_root / args.profile,
-        profile=args.profile,
-        version=args.version,
-        img_locations=locations,
-        makeblastdb=args.makeblastdb,
-        blastdbcmd=args.blastdbcmd,
-        archive_path=args.archive,
-        zstd=args.zstd,
-    )
-    summary = {
-        "profile_directory": str(result.profile_directory),
-        "archive": (
-            {
-                "path": str(result.archive.path),
-                "bytes": result.archive.bytes,
-                "sha256": result.archive.sha256,
-            }
-            if result.archive
-            else None
-        ),
-    }
-    print(json.dumps(summary, sort_keys=True))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -19,13 +19,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Iterable, Iterator, Mapping, Sequence, TextIO
 
+import img_search_provenance
 from atomic_io import replace_and_fsync
 from img_classification_data import (
     BLAST_FETCH_TARGETS,
     BLAST_MAX_TARGETS,
     CALIBRATION_SCHEMA_VERSION,
-    CALIBRATION_STRATUM_BASIS,
-    CALIBRATION_USE_CASE,
     CANDIDATE_BITSCORE_FRACTION,
     MIN_QUERY_COVERAGE,
     BlastHit,
@@ -38,14 +37,11 @@ from img_classification_data import (
     load_taxonomy,
     parse_blast_hits,
     parse_clusters,
-    _taxonomy_record,
 )
-import img_search_provenance
-from taxonomy_utils import common_value as _shared_common_value
-from taxonomy_utils import lowest_common_ancestor as _shared_lca
-
+from taxonomy_utils import common_value, lowest_common_ancestor
 
 ASSIGNMENT_FIELDS = (
+    "marker",
     "source_identifier",
     "taxonomy",
     "taxonomy_source",
@@ -119,10 +115,6 @@ def _classification_output_hashes(
     }
 
 
-def lowest_common_ancestor(taxonomies: Iterable[Sequence[str]]) -> tuple[str, ...]:
-    return _shared_lca(taxonomies)
-
-
 def _is_pr2_species_path(
     taxonomy: Sequence[str], records: Sequence[TaxonomyRecord]
 ) -> bool:
@@ -184,10 +176,6 @@ def resolve_candidate_taxonomy(
         taxonomy = taxonomy[:-1]
         species_guard_applied = True
     return taxonomy, truncated, candidates_exact_and_agreeing, species_guard_applied
-
-
-def _common_value(values: Iterable[str]) -> str:
-    return _shared_common_value(values)
 
 
 def _canonical_json(value: object) -> str:
@@ -406,7 +394,9 @@ def _classify_cluster(
         if propagation_rank_cap < 0:
             raise ValueError("propagation_rank_cap must be non-negative")
         taxonomy = taxonomy[: propagation_rank_cap + 1]
-    compartment = "" if truncated else _common_value(record.compartment for record in records)
+    compartment = (
+        "" if truncated else common_value(record.compartment for record in records)
+    )
     result = {
         **base,
         "classification_status": "classified",
@@ -442,7 +432,7 @@ def _classify_cluster(
 
 def classify_clusters(
     clusters: Sequence[Cluster],
-    hits_by_query: Mapping[str, Sequence[BlastHit]],
+    hits_by_query: Iterable[tuple[str, Sequence[BlastHit]]],
     taxonomy_records: Mapping[str, TaxonomyRecord],
     *,
     max_targets: int = BLAST_MAX_TARGETS,
@@ -453,35 +443,14 @@ def classify_clusters(
 ) -> tuple[list[dict[str, str]], list[dict[str, object]], dict[str, object]]:
     if max_targets < 1:
         raise ValueError("max_targets must be positive")
-    aliases: dict[str, Cluster] = {}
-    for cluster in clusters:
-        for alias in {cluster.cluster_id, cluster.centroid}:
-            previous = aliases.get(alias)
-            if previous is not None and previous != cluster:
-                raise ValueError(f"Cluster query alias {alias!r} is ambiguous")
-            aliases[alias] = cluster
-    unmatched_queries = sorted(set(hits_by_query) - set(aliases))
-    if unmatched_queries:
-        preview = ", ".join(unmatched_queries[:5])
-        raise ValueError(f"BLAST queries do not match a cluster centroid or ID: {preview}")
-
-    assignments: list[dict[str, str]] = []
-    outcomes: list[dict[str, object]] = []
-    qc: Counter[str] = Counter()
-    reasons: Counter[str] = Counter()
-    domains: Counter[str] = Counter()
-    for cluster in sorted(clusters, key=lambda value: (value.cluster_id, value.centroid)):
-        matched_queries = [
-            alias for alias in {cluster.cluster_id, cluster.centroid} if alias in hits_by_query
-        ]
-        if len(matched_queries) > 1:
-            raise ValueError(
-                f"Cluster {cluster.cluster_id!r} has BLAST hits under both cluster ID and centroid"
-            )
-        hits = tuple(hits_by_query[matched_queries[0]]) if matched_queries else ()
-        outcome = _classify_cluster(
-            cluster,
-            hits,
+    by_cluster_id = {cluster.cluster_id: cluster for cluster in clusters}
+    classified: dict[str, dict[str, object]] = {}
+    for query, query_hits in hits_by_query:
+        if query not in by_cluster_id:
+            raise ValueError(f"BLAST query does not match a cluster ID: {query}")
+        classified[query] = _classify_cluster(
+            by_cluster_id[query],
+            query_hits,
             taxonomy_records,
             max_targets=max_targets,
             marker=marker,
@@ -489,10 +458,36 @@ def classify_clusters(
             calibration_rank_rules=calibration_rank_rules,
             propagation_rank_cap=propagation_rank_cap,
         )
+
+    assignments: list[dict[str, str]] = []
+    outcomes: list[dict[str, object]] = []
+    qc: Counter[str] = Counter()
+    reasons: Counter[str] = Counter()
+    domains: Counter[str] = Counter()
+    for cluster in sorted(
+        clusters, key=lambda value: (value.cluster_id, value.centroid)
+    ):
+        outcome = classified.get(cluster.cluster_id)
+        if outcome is None:
+            outcome = _classify_cluster(
+                cluster,
+                (),
+                taxonomy_records,
+                max_targets=max_targets,
+                marker=marker,
+                calibration_strata=calibration_strata,
+                calibration_rank_rules=calibration_rank_rules,
+                propagation_rank_cap=propagation_rank_cap,
+            )
+        if "evidence_id" not in outcome:
+            outcome["evidence_id"] = (
+                "IMGEV_"
+                + hashlib.sha256(_canonical_json(outcome).encode("utf-8")).hexdigest()
+            )
         outcomes.append(outcome)
         qc["clusters_total"] += 1
         qc["img_members_total"] += len(cluster.img_members)
-        qc["hits_total"] += len(hits)
+        qc["hits_total"] += int(outcome["returned_hit_count"])
         qc["coverage_filtered_hits"] += int(outcome["coverage_filtered_hit_count"])
         qc["eligible_hits"] += int(outcome["eligible_hit_count"])
         qc["candidate_hits"] += int(outcome.get("candidate_count", 0))
@@ -502,9 +497,7 @@ def classify_clusters(
             reason = str(outcome["reason"])
             reasons[reason] += 1
             if cluster.img_members:
-                evidence_id = "IMGEV_" + hashlib.sha256(
-                    _canonical_json(outcome).encode("utf-8")
-                ).hexdigest()
+                evidence_id = str(outcome["evidence_id"])
                 evidence = (
                     "centroid_blast_unclassified "
                     f"evidence_id={evidence_id} reason={reason}"
@@ -512,6 +505,7 @@ def classify_clusters(
                 for member in cluster.img_members:
                     assignments.append(
                         {
+                            "marker": marker or "",
                             "source_identifier": member,
                             "taxonomy": "Unclassified",
                             "taxonomy_source": "SILVA+PR2",
@@ -542,6 +536,7 @@ def classify_clusters(
         for member in cluster.img_members:
             assignments.append(
                 {
+                    "marker": marker or "",
                     "source_identifier": member,
                     "taxonomy": str(outcome["taxonomy"]),
                     "taxonomy_source": str(outcome["taxonomy_source"]),
@@ -585,7 +580,6 @@ def _atomic_text_writer(path: Path) -> Iterator[TextIO]:
 
 def _write_outputs(
     assignments_tsv: Path,
-    assignments_jsonl: Path,
     outcomes_jsonl: Path,
     qc_json: Path,
     assignments: Sequence[Mapping[str, str]],
@@ -601,9 +595,6 @@ def _write_outputs(
         )
         writer.writeheader()
         writer.writerows(assignments)
-    with writer_context(assignments_jsonl) as handle:
-        for row in assignments:
-            handle.write(_canonical_json(dict(row)) + "\n")
     with writer_context(outcomes_jsonl) as handle:
         for row in outcomes:
             handle.write(_canonical_json(dict(row)) + "\n")
@@ -618,7 +609,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--taxonomy", type=Path, required=True)
     parser.add_argument("--clusters", type=Path, required=True)
     parser.add_argument("--assignments-tsv", type=Path, required=True)
-    parser.add_argument("--assignments-jsonl", type=Path, required=True)
     parser.add_argument("--outcomes-jsonl", type=Path, required=True)
     parser.add_argument("--qc-json", type=Path, required=True)
     parser.add_argument(
@@ -627,12 +617,13 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="Upstream BLAST max_target_seqs; must include one overflow sentinel.",
     )
-    parser.add_argument("--marker", choices=("16S", "18S"))
-    parser.add_argument("--calibration", type=Path)
-    parser.add_argument("--search-provenance", type=Path)
+    parser.add_argument("--marker", choices=("16S", "18S"), required=True)
+    parser.add_argument("--calibration", type=Path, required=True)
+    parser.add_argument("--search-provenance", type=Path, required=True)
     parser.add_argument(
         "--propagation-rank-cap",
         type=int,
+        required=True,
         help="Maximum zero-based taxonomy rank propagated from a cluster centroid.",
     )
     return parser
@@ -660,58 +651,46 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--blast-fetch-targets must be "
             f"{BLAST_FETCH_TARGETS} for the {BLAST_MAX_TARGETS}-hit policy"
         )
-    if bool(args.marker) != bool(args.calibration):
-        raise ValueError("--marker and --calibration must be supplied together")
-    portable_search = (
-        load_portable_search_provenance(args.search_provenance)
-        if args.search_provenance
-        else None
-    )
-    if portable_search is not None and portable_search["marker"] != args.marker:
+    portable_search = load_portable_search_provenance(args.search_provenance)
+    if portable_search["marker"] != args.marker:
         raise ValueError("IMG search provenance marker does not match --marker")
     search_input_bindings = {
         "blast_m8": args.blast,
         "clusters": args.clusters,
         "preferred_taxonomy": args.taxonomy,
     }
-    if portable_search is not None:
-        _validate_search_input_bindings(portable_search, search_input_bindings)
-    calibration_sha256: str | None = None
-    if args.calibration:
-        calibration_sha256 = _file_sha256(args.calibration)
-        calibration = load_calibration(args.calibration)
-        if _file_sha256(args.calibration) != calibration_sha256:
-            raise ValueError("taxonomy calibration changed while it was being loaded")
-    else:
-        calibration = None
-    with args.blast.open(encoding="utf-8") as handle:
-        hits_by_query = parse_blast_hits(handle)
+    _validate_search_input_bindings(portable_search, search_input_bindings)
+    calibration_sha256 = _file_sha256(args.calibration)
+    calibration = load_calibration(args.calibration)
+    if _file_sha256(args.calibration) != calibration_sha256:
+        raise ValueError("taxonomy calibration changed while it was being loaded")
     with args.clusters.open(newline="", encoding="utf-8") as handle:
         clusters = parse_clusters(handle)
-    subjects = {
-        hit.subject for hits in hits_by_query.values() for hit in hits
-    }
+    with args.blast.open(encoding="utf-8") as handle:
+        subjects = {
+            hit.subject
+            for _, query_hits in parse_blast_hits(handle)
+            for hit in select_candidate_hits(query_hits)[2]
+        }
     taxonomy_records = load_taxonomy(args.taxonomy, subjects)
-    assignments, outcomes, qc = classify_clusters(
-        clusters,
-        hits_by_query,
-        taxonomy_records,
-        max_targets=BLAST_MAX_TARGETS,
-        marker=args.marker,
-        calibration_strata=calibration.strata if calibration else None,
-        calibration_rank_rules=calibration.rank_rules if calibration else None,
-        propagation_rank_cap=args.propagation_rank_cap,
-    )
-    if portable_search is not None:
-        _validate_search_input_bindings(portable_search, search_input_bindings)
+    with args.blast.open(encoding="utf-8") as handle:
+        assignments, outcomes, qc = classify_clusters(
+            clusters,
+            parse_blast_hits(handle),
+            taxonomy_records,
+            max_targets=BLAST_MAX_TARGETS,
+            marker=args.marker,
+            calibration_strata=calibration.strata,
+            calibration_rank_rules=calibration.rank_rules,
+            propagation_rank_cap=args.propagation_rank_cap,
+        )
+    _validate_search_input_bindings(portable_search, search_input_bindings)
     qc["classification_binding"] = {
         "schema_version": 1,
         "calibration": {
             "sha256": calibration_sha256,
             "schema_version": CALIBRATION_SCHEMA_VERSION,
-        }
-        if calibration
-        else None,
+        },
         "marker": args.marker,
         "propagation_rank_cap": args.propagation_rank_cap,
         "policy": classification_policy(
@@ -720,11 +699,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         "outputs": _classification_output_hashes(assignments, outcomes),
     }
-    if portable_search is not None:
-        qc["classification_binding"]["search_provenance"] = portable_search
+    qc["classification_binding"]["search_provenance"] = portable_search
     _write_outputs(
         args.assignments_tsv,
-        args.assignments_jsonl,
         args.outcomes_jsonl,
         args.qc_json,
         assignments,

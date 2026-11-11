@@ -11,19 +11,25 @@ import taxonomy_utils
 
 class TaxonomyPathTests(unittest.TestCase):
     def test_string_and_rank_sequence_have_one_normalization_contract(self) -> None:
-        expected = ("Bacteria", "Firmicutes", "", "Bacillales")
+        expected = ("Bacteria", "Firmicutes", "Bacillales")
         self.assertEqual(
-            taxonomy_utils.taxonomy_path(" Bacteria ; Firmicutes ;; Bacillales ; "),
+            taxonomy_utils.taxonomy_path(" Bacteria ; Firmicutes ; Bacillales ; "),
             expected,
         )
         self.assertEqual(
-            taxonomy_utils.taxonomy_path([" Bacteria ", "Firmicutes", "", "Bacillales", ""]),
+            taxonomy_utils.taxonomy_path(
+                [" Bacteria ", "Firmicutes", "Bacillales", ""]
+            ),
             expected,
         )
 
     def test_empty_domain_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "non-empty domain"):
             taxonomy_utils.taxonomy_path(";Firmicutes")
+
+    def test_internal_empty_rank_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "empty rank"):
+            taxonomy_utils.taxonomy_path("Bacteria;Firmicutes;;Bacillales")
 
 
 class LowestCommonAncestorTests(unittest.TestCase):
